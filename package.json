@@ -1,0 +1,30 @@
+{
+  "name": "@liberuum-org/bee-reactor-adapter",
+  "version": "0.16.0",
+  "description": "Swarm Bee storage adapter for the Powerhouse Reactor",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "bee:health": "./scripts/bee-health.sh",
+    "bee:upload-test": "./scripts/bee-upload-test.sh",
+    "bee:test-flow": "npx tsx scripts/test-adapter-flow.ts"
+  },
+  "dependencies": {
+    "@ethersphere/bee-js": "^11.1.1"
+  },
+  "devDependencies": {
+    "tsx": "^4.21.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "peerDependencies": {
+    "kysely": "^0.27.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "MIT"
+}
