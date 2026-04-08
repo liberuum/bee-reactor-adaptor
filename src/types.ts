@@ -219,14 +219,8 @@ export interface SharedDocumentEntry {
   driveId: string;
   driveName: string;
 
-  /** Swarm reference to the ACT-encrypted operation data */
+  /** Swarm reference to the shared operation data */
   reference: string;
-
-  /** ACT history address (required for recipient to download) */
-  historyAddress: string;
-
-  /** Grantee list reference (for managing access) */
-  granteeRef: string;
 
   /** Number of operations in this share */
   operationCount: number;

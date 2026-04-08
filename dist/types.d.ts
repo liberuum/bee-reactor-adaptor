@@ -144,4 +144,50 @@ export interface StampStatus {
     /** Health status based on TTL thresholds */
     health: "healthy" | "warning" | "critical" | "expired";
 }
+/**
+ * Public profile published on an unencrypted Swarm feed.
+ * Allows any user to discover another user's public keys by ETH address.
+ *
+ * Feed topic: "{prefix}:profile:<address>" (e.g. "ph:v2:profile:<address>")
+ */
+export interface SwarmPublicProfile {
+    /** Swarm signer address (wallet-derived, used as feed owner) */
+    address: string;
+    /** User's original ETH wallet address (from Renown login) */
+    ethAddress?: string;
+    /** Bee node's compressed secp256k1 public key (for ACT grant access) */
+    beeNodePublicKey: string;
+    /** Wallet-derived compressed secp256k1 public key (for future ECDH) */
+    swarmPublicKey?: string;
+    /** Bee node overlay address (for GSOC/PSS targeting) */
+    overlayAddress?: string;
+    updatedAt: string;
+}
+/**
+ * Manifest of documents shared from one user to another.
+ * Stored on a Swarm feed owned by the sender.
+ *
+ * Feed topic: "{prefix}:share:<sender_address>:<recipient_address>"
+ */
+export interface ShareManifest {
+    from: string;
+    to: string;
+    shares: SharedDocumentEntry[];
+    createdAt: string;
+}
+/**
+ * A single shared document entry within a ShareManifest.
+ */
+export interface SharedDocumentEntry {
+    documentId: string;
+    documentType: string;
+    name: string;
+    driveId: string;
+    driveName: string;
+    /** Swarm reference to the shared operation data */
+    reference: string;
+    /** Number of operations in this share */
+    operationCount: number;
+    sharedAt: string;
+}
 //# sourceMappingURL=types.d.ts.map

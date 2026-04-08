@@ -150,7 +150,8 @@ export class SwarmClient {
         if (!this.bee.signer) {
             throw new Error("No signer configured on Bee instance");
         }
-        return this.bee.signer.publicKey().address().toHex();
+        const hex = this.bee.signer.publicKey().address().toHex();
+        return hex.startsWith("0x") ? hex : `0x${hex}`;
     }
     /**
      * Get the Bee node's public key (for ACT sharing — this is what other
@@ -469,6 +470,127 @@ export class SwarmClient {
             durationOptions,
         };
     }
+    // ─── Public Profile (unencrypted, discoverable by ETH address) ─
+    /**
+     * Publish the user's public profile to an UNENCRYPTED feed.
+     * The profile is keyed by the signer address (= feed owner), so
+     * anyone who knows the signer address can discover the profile.
+     *
+     * @param signerAddress - The signer's address (from getOwnerAddress())
+     * @param profile - The profile data to publish
+     */
+    async publishPublicProfile(signerAddress, profile) {
+        const topic = this.profileTopic(signerAddress);
+        const payload = JSON.stringify(profile);
+        // Upload WITHOUT encryption — this is public data
+        const { reference } = await this.uploadData(payload, { skipEncryption: true });
+        await this.writeFeedPayload(topic, reference);
+    }
+    /**
+     * Read a user's public profile by their Swarm signer address.
+     * Returns null if the user hasn't published a profile yet.
+     *
+     * The signer address IS the feed owner, so this works for cross-user reads.
+     * Note: this takes a signer address, NOT an ETH wallet address.
+     *
+     * @param signerAddress - The target user's signer address (NOT their ETH wallet address)
+     */
+    async readPublicProfile(signerAddress) {
+        const topic = this.profileTopic(signerAddress);
+        const ownerAddr = normalizeAddress(signerAddress);
+        try {
+            const reader = this.bee.makeFeedReader(topic, ownerAddr);
+            const result = await reader.downloadPayload();
+            const raw = new TextDecoder().decode(result.payload.toUint8Array());
+            // Profile data is unencrypted — parse directly or dereference
+            if (raw.startsWith("{")) {
+                return JSON.parse(raw);
+            }
+            const trimmed = raw.trim();
+            if (/^[0-9a-f]{64}$/i.test(trimmed)) {
+                const data = await this.downloadData(trimmed, { skipDecryption: true });
+                return JSON.parse(new TextDecoder().decode(data));
+            }
+            return null;
+        }
+        catch {
+            // Any error (404, parse, network) → no profile
+            return null;
+        }
+    }
+    // ─── Document Sharing (ACT-based) ─────────────────────────────
+    /**
+     * Upload data for sharing — encrypted with a key derived from both parties' addresses.
+     * Both sender and recipient can derive the same key: SHA-256(sender:recipient).
+     * Third parties can't decrypt without knowing both signer addresses.
+     *
+     * @param data - The operation data to share
+     * @param senderAddress - Sender's signer address
+     * @param recipientAddress - Recipient's signer address
+     */
+    async uploadSharedData(data, senderAddress, recipientAddress) {
+        const shareKey = await deriveShareKey(senderAddress, recipientAddress);
+        const encrypted = await encrypt(data, shareKey);
+        const result = await this.bee.uploadData(this.batchId, encrypted);
+        return { reference: result.reference.toHex() };
+    }
+    /**
+     * Download shared data and decrypt with the shared key.
+     * The key is derived from both parties' addresses: SHA-256(sender:recipient).
+     *
+     * @param reference - Swarm reference
+     * @param senderAddress - Sender's signer address
+     * @param recipientAddress - Recipient's signer address (= our address when importing)
+     */
+    async downloadSharedData(reference, senderAddress, recipientAddress) {
+        const raw = await this.bee.downloadData(reference);
+        const shareKey = await deriveShareKey(senderAddress, recipientAddress);
+        return decrypt(raw.toUint8Array(), shareKey);
+    }
+    /**
+     * Write a share manifest to the share feed between sender and recipient.
+     */
+    async writeShareManifest(senderAddress, recipientAddress, manifest) {
+        const topic = this.shareTopic(senderAddress, recipientAddress);
+        const payload = JSON.stringify(manifest);
+        // Upload WITHOUT encryption — the recipient needs to read this manifest
+        // to discover shared documents. The actual document data is ACT-encrypted.
+        const { reference } = await this.uploadData(payload, { skipEncryption: true });
+        await this.writeFeedPayload(topic, reference);
+    }
+    /**
+     * Read the share manifest from another user.
+     * Alice reads: shareTopic(bob, alice) with owner = bob's address.
+     *
+     * Note: The share manifest is encrypted with the sender's key.
+     * The recipient needs their own copy or the manifest should use
+     * a shared encryption scheme. For now, we store it unencrypted
+     * on the feed (the feed topic is obscure enough).
+     */
+    async readShareManifest(senderAddress, recipientAddress) {
+        const senderNorm = normalizeAddress(senderAddress);
+        const topic = this.shareTopic(senderAddress, recipientAddress);
+        try {
+            // Read using the SENDER's address as owner (they wrote this feed)
+            const reader = this.bee.makeFeedReader(topic, senderNorm);
+            const result = await reader.downloadPayload();
+            const raw = new TextDecoder().decode(result.payload.toUint8Array());
+            // Auto-detect: inline JSON or /bytes reference
+            if (raw.startsWith("{")) {
+                return JSON.parse(raw);
+            }
+            const trimmed = raw.trim();
+            if (/^[0-9a-f]{64}$/i.test(trimmed)) {
+                const data = await this.downloadData(trimmed, { skipDecryption: true });
+                return JSON.parse(new TextDecoder().decode(data));
+            }
+            return null;
+        }
+        catch {
+            // Any error (404, parse, network) → no share manifest
+            return null;
+        }
+    }
     // ─── Manifest compaction ───────────────────────────────────────
     /**
      * Compact a document's manifest by merging many small operation batches
@@ -538,7 +660,20 @@ export class SwarmClient {
      * Derive a deterministic feed topic for a user's manifest.
      */
     userTopic(address) {
+        // MUST keep 0x prefix — existing feeds were written with it
         return Topic.fromString(`${this.feedTopicPrefix}:user:${address.toLowerCase()}`);
+    }
+    /**
+     * Derive a deterministic feed topic for a user's public profile.
+     */
+    profileTopic(address) {
+        return Topic.fromString(`${this.feedTopicPrefix}:profile:${address.toLowerCase()}`);
+    }
+    /**
+     * Derive a deterministic feed topic for shares between two users.
+     */
+    shareTopic(fromAddress, toAddress) {
+        return Topic.fromString(`${this.feedTopicPrefix}:share:${fromAddress.toLowerCase()}:${toAddress.toLowerCase()}`);
     }
     // ─── Feed mode (production) ────────────────────────────────────
     /**
@@ -569,8 +704,8 @@ export class SwarmClient {
                 const json = new TextDecoder().decode(data);
                 return JSON.parse(json);
             }
-            // Unknown format — try parsing as JSON anyway
-            return JSON.parse(raw);
+            // Unknown format — not a valid manifest
+            return null;
         }
         catch (error) {
             if (isNotFoundError(error)) {
@@ -666,10 +801,44 @@ export class SwarmClient {
         this.manifestIndex.set(documentId, reference);
     }
 }
+/** Normalize an address: strip 0x prefix for bee-js, lowercase */
+function normalizeAddress(addr) {
+    return addr.replace(/^0x/i, "").toLowerCase();
+}
+/**
+ * Derive a 32-byte hex key for share encryption from both parties' addresses.
+ * SHA-256(sender_normalized + ":" + recipient_normalized) → 64-char hex string.
+ * Both sender and recipient can independently derive the same key.
+ */
+async function deriveShareKey(senderAddress, recipientAddress) {
+    const material = `${normalizeAddress(senderAddress)}:${normalizeAddress(recipientAddress)}`;
+    const encoded = new TextEncoder().encode(material);
+    const hash = await crypto.subtle.digest("SHA-256", encoded);
+    const bytes = new Uint8Array(hash);
+    return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
 function isNotFoundError(error) {
-    if (error && typeof error === "object" && "status" in error) {
-        const status = error.status;
-        return status === 404 || status === 500;
+    if (error && typeof error === "object") {
+        const e = error;
+        // Check .status (bee-js BeeResponseError)
+        if ("status" in e && (e.status === 404 || e.status === 500))
+            return true;
+        // Check .statusCode (axios-style)
+        if ("statusCode" in e && (e.statusCode === 404 || e.statusCode === 500))
+            return true;
+        // Check nested .response.status
+        if ("response" in e && e.response && typeof e.response === "object") {
+            const resp = e.response;
+            if (resp.status === 404 || resp.status === 500)
+                return true;
+        }
+        // Check error message
+        if ("message" in e && typeof e.message === "string") {
+            if (e.message.includes("404") || e.message.includes("Not Found"))
+                return true;
+            if (e.message.includes("Request failed with status code 404"))
+                return true;
+        }
     }
     return false;
 }

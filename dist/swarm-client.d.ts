@@ -1,5 +1,5 @@
 import { Topic } from "@ethersphere/bee-js";
-import type { SwarmDocumentManifest, SwarmUserManifest, StampStatus } from "./types.js";
+import type { SwarmDocumentManifest, SwarmUserManifest, SwarmPublicProfile, ShareManifest, StampStatus } from "./types.js";
 /**
  * Thin wrapper around the Bee SDK providing the specific operations
  * needed by the reactor storage adapter.
@@ -227,6 +227,60 @@ export declare class SwarmClient {
         }>;
     }>;
     /**
+     * Publish the user's public profile to an UNENCRYPTED feed.
+     * The profile is keyed by the signer address (= feed owner), so
+     * anyone who knows the signer address can discover the profile.
+     *
+     * @param signerAddress - The signer's address (from getOwnerAddress())
+     * @param profile - The profile data to publish
+     */
+    publishPublicProfile(signerAddress: string, profile: SwarmPublicProfile): Promise<void>;
+    /**
+     * Read a user's public profile by their Swarm signer address.
+     * Returns null if the user hasn't published a profile yet.
+     *
+     * The signer address IS the feed owner, so this works for cross-user reads.
+     * Note: this takes a signer address, NOT an ETH wallet address.
+     *
+     * @param signerAddress - The target user's signer address (NOT their ETH wallet address)
+     */
+    readPublicProfile(signerAddress: string): Promise<SwarmPublicProfile | null>;
+    /**
+     * Upload data for sharing — encrypted with a key derived from both parties' addresses.
+     * Both sender and recipient can derive the same key: SHA-256(sender:recipient).
+     * Third parties can't decrypt without knowing both signer addresses.
+     *
+     * @param data - The operation data to share
+     * @param senderAddress - Sender's signer address
+     * @param recipientAddress - Recipient's signer address
+     */
+    uploadSharedData(data: string | Uint8Array, senderAddress: string, recipientAddress: string): Promise<{
+        reference: string;
+    }>;
+    /**
+     * Download shared data and decrypt with the shared key.
+     * The key is derived from both parties' addresses: SHA-256(sender:recipient).
+     *
+     * @param reference - Swarm reference
+     * @param senderAddress - Sender's signer address
+     * @param recipientAddress - Recipient's signer address (= our address when importing)
+     */
+    downloadSharedData(reference: string, senderAddress: string, recipientAddress: string): Promise<Uint8Array>;
+    /**
+     * Write a share manifest to the share feed between sender and recipient.
+     */
+    writeShareManifest(senderAddress: string, recipientAddress: string, manifest: ShareManifest): Promise<void>;
+    /**
+     * Read the share manifest from another user.
+     * Alice reads: shareTopic(bob, alice) with owner = bob's address.
+     *
+     * Note: The share manifest is encrypted with the sender's key.
+     * The recipient needs their own copy or the manifest should use
+     * a shared encryption scheme. For now, we store it unencrypted
+     * on the feed (the feed topic is obscure enough).
+     */
+    readShareManifest(senderAddress: string, recipientAddress: string): Promise<ShareManifest | null>;
+    /**
      * Compact a document's manifest by merging many small operation batches
      * into fewer large ones. This keeps recovery fast (fewer downloads).
      *
@@ -246,6 +300,14 @@ export declare class SwarmClient {
      * Derive a deterministic feed topic for a user's manifest.
      */
     userTopic(address: string): Topic;
+    /**
+     * Derive a deterministic feed topic for a user's public profile.
+     */
+    profileTopic(address: string): Topic;
+    /**
+     * Derive a deterministic feed topic for shares between two users.
+     */
+    shareTopic(fromAddress: string, toAddress: string): Topic;
     /**
      * Read document manifest from feed.
      *

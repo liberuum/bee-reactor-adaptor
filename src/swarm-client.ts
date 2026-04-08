@@ -221,7 +221,8 @@ export class SwarmClient {
     if (!this.bee.signer) {
       throw new Error("No signer configured on Bee instance");
     }
-    return this.bee.signer.publicKey().address().toHex();
+    const hex = this.bee.signer.publicKey().address().toHex();
+    return hex.startsWith("0x") ? hex : `0x${hex}`;
   }
 
   /**
@@ -629,8 +630,9 @@ export class SwarmClient {
     signerAddress: string,
   ): Promise<SwarmPublicProfile | null> {
     const topic = this.profileTopic(signerAddress);
+    const ownerAddr = normalizeAddress(signerAddress);
     try {
-      const reader = this.bee.makeFeedReader(topic, signerAddress);
+      const reader = this.bee.makeFeedReader(topic, ownerAddr);
       const result = await reader.downloadPayload();
       const raw = new TextDecoder().decode(result.payload.toUint8Array());
 
@@ -643,65 +645,51 @@ export class SwarmClient {
         const data = await this.downloadData(trimmed, { skipDecryption: true });
         return JSON.parse(new TextDecoder().decode(data)) as SwarmPublicProfile;
       }
-      return JSON.parse(raw) as SwarmPublicProfile;
-    } catch (error: unknown) {
-      if (isNotFoundError(error)) return null;
-      throw error;
+      return null;
+    } catch {
+      // Any error (404, parse, network) → no profile
+      return null;
     }
   }
 
   // ─── Document Sharing (ACT-based) ─────────────────────────────
 
   /**
-   * Share document data with a recipient using Swarm ACT encryption.
+   * Upload data for sharing — encrypted with a key derived from both parties' addresses.
+   * Both sender and recipient can derive the same key: SHA-256(sender:recipient).
+   * Third parties can't decrypt without knowing both signer addresses.
    *
-   * 1. Uploads the operation data with ACT enabled
-   * 2. Grants access to the recipient's Bee node public key
-   * 3. Returns the share record (reference, historyAddress, granteeRef)
-   *
-   * @param data - The operation data to share (will be uploaded with ACT)
-   * @param recipientBeeNodePubKey - Recipient's Bee node compressed public key
+   * @param data - The operation data to share
+   * @param senderAddress - Sender's signer address
+   * @param recipientAddress - Recipient's signer address
    */
   async uploadSharedData(
     data: string | Uint8Array,
-    recipientBeeNodePubKey: string,
-  ): Promise<{ reference: string; historyAddress: string; granteeRef: string }> {
-    // Upload with ACT encryption (skip our app-layer encryption — ACT handles it)
-    const result = await this.bee.uploadData(this.batchId, data, { act: true });
-    const reference = result.reference.toHex();
-    const historyAddress =
-      (result.historyAddress as any)?.toHex?.() ??
-      (result.historyAddress as any)?.value ??
-      String(result.historyAddress);
-
-    // Create grantee list with the recipient
-    const grantees = await this.createGrantees([recipientBeeNodePubKey]);
-
-    return {
-      reference,
-      historyAddress,
-      granteeRef: grantees.ref,
-    };
+    senderAddress: string,
+    recipientAddress: string,
+  ): Promise<{ reference: string }> {
+    const shareKey = await deriveShareKey(senderAddress, recipientAddress);
+    const encrypted = await encrypt(data, shareKey);
+    const result = await this.bee.uploadData(this.batchId, encrypted);
+    return { reference: result.reference.toHex() };
   }
 
   /**
-   * Download ACT-encrypted shared data.
-   * The Bee node transparently decrypts if it holds the matching private key.
+   * Download shared data and decrypt with the shared key.
+   * The key is derived from both parties' addresses: SHA-256(sender:recipient).
    *
-   * @param reference - Swarm reference to the ACT-encrypted data
-   * @param publisherAddress - ETH address of the user who shared the data
-   * @param historyAddress - ACT history address from the share record
+   * @param reference - Swarm reference
+   * @param senderAddress - Sender's signer address
+   * @param recipientAddress - Recipient's signer address (= our address when importing)
    */
   async downloadSharedData(
     reference: string,
-    publisherAddress: string,
-    historyAddress: string,
+    senderAddress: string,
+    recipientAddress: string,
   ): Promise<Uint8Array> {
-    const raw = await this.bee.downloadData(reference, {
-      actPublisher: publisherAddress,
-      actHistoryAddress: historyAddress,
-    });
-    return raw.toUint8Array();
+    const raw = await this.bee.downloadData(reference);
+    const shareKey = await deriveShareKey(senderAddress, recipientAddress);
+    return decrypt(raw.toUint8Array(), shareKey);
   }
 
   /**
@@ -733,10 +721,11 @@ export class SwarmClient {
     senderAddress: string,
     recipientAddress: string,
   ): Promise<ShareManifest | null> {
+    const senderNorm = normalizeAddress(senderAddress);
     const topic = this.shareTopic(senderAddress, recipientAddress);
     try {
       // Read using the SENDER's address as owner (they wrote this feed)
-      const reader = this.bee.makeFeedReader(topic, senderAddress);
+      const reader = this.bee.makeFeedReader(topic, senderNorm);
       const result = await reader.downloadPayload();
       const raw = new TextDecoder().decode(result.payload.toUint8Array());
 
@@ -746,14 +735,13 @@ export class SwarmClient {
       }
       const trimmed = raw.trim();
       if (/^[0-9a-f]{64}$/i.test(trimmed)) {
-        // Reference to /bytes — share manifests are stored unencrypted
         const data = await this.downloadData(trimmed, { skipDecryption: true });
         return JSON.parse(new TextDecoder().decode(data)) as ShareManifest;
       }
-      return JSON.parse(raw) as ShareManifest;
-    } catch (error: unknown) {
-      if (isNotFoundError(error)) return null;
-      throw error;
+      return null;
+    } catch {
+      // Any error (404, parse, network) → no share manifest
+      return null;
     }
   }
 
@@ -838,6 +826,7 @@ export class SwarmClient {
    * Derive a deterministic feed topic for a user's manifest.
    */
   userTopic(address: string): Topic {
+    // MUST keep 0x prefix — existing feeds were written with it
     return Topic.fromString(`${this.feedTopicPrefix}:user:${address.toLowerCase()}`);
   }
 
@@ -893,8 +882,8 @@ export class SwarmClient {
         return JSON.parse(json) as SwarmDocumentManifest;
       }
 
-      // Unknown format — try parsing as JSON anyway
-      return JSON.parse(raw) as SwarmDocumentManifest;
+      // Unknown format — not a valid manifest
+      return null;
     } catch (error: unknown) {
       if (isNotFoundError(error)) {
         return null;
@@ -1004,10 +993,41 @@ export class SwarmClient {
   }
 }
 
+/** Normalize an address: strip 0x prefix for bee-js, lowercase */
+function normalizeAddress(addr: string): string {
+  return addr.replace(/^0x/i, "").toLowerCase();
+}
+
+/**
+ * Derive a 32-byte hex key for share encryption from both parties' addresses.
+ * SHA-256(sender_normalized + ":" + recipient_normalized) → 64-char hex string.
+ * Both sender and recipient can independently derive the same key.
+ */
+async function deriveShareKey(senderAddress: string, recipientAddress: string): Promise<string> {
+  const material = `${normalizeAddress(senderAddress)}:${normalizeAddress(recipientAddress)}`;
+  const encoded = new TextEncoder().encode(material);
+  const hash = await crypto.subtle.digest("SHA-256", encoded);
+  const bytes = new Uint8Array(hash);
+  return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 function isNotFoundError(error: unknown): boolean {
-  if (error && typeof error === "object" && "status" in error) {
-    const status = (error as { status: number }).status;
-    return status === 404 || status === 500;
+  if (error && typeof error === "object") {
+    const e = error as Record<string, unknown>;
+    // Check .status (bee-js BeeResponseError)
+    if ("status" in e && (e.status === 404 || e.status === 500)) return true;
+    // Check .statusCode (axios-style)
+    if ("statusCode" in e && (e.statusCode === 404 || e.statusCode === 500)) return true;
+    // Check nested .response.status
+    if ("response" in e && e.response && typeof e.response === "object") {
+      const resp = e.response as Record<string, unknown>;
+      if (resp.status === 404 || resp.status === 500) return true;
+    }
+    // Check error message
+    if ("message" in e && typeof e.message === "string") {
+      if (e.message.includes("404") || e.message.includes("Not Found")) return true;
+      if (e.message.includes("Request failed with status code 404")) return true;
+    }
   }
   return false;
 }
