@@ -2,7 +2,7 @@
 
 ## What's Built (Complete)
 
-### Core Adapter (`@liberuum-org/bee-reactor-adapter` — v0.17.0)
+### Core Adapter (`@liberuum-org/bee-reactor-adapter` — v0.19.1)
 
 - **SwarmClient** — Bee SDK wrapper with feed mode + bytes mode, auto-detect
 - **SwarmOperationStore** — write-through IOperationStore (local SQL + Swarm /bytes)
@@ -18,6 +18,19 @@
 - **Stamp management** — status, top-up, expand, create, cost estimation, USD pricing via CoinGecko
 - **12 E2E tests** passing against `bee dev`
 
+### Document Sharing (v0.19.1 — NEW)
+
+- **Public profile feed** — publishes Bee node pubkey + signer address on `{prefix}:profile:<address>` (unencrypted, discoverable)
+- **Share manifest feed** — `{prefix}:share:<sender>:<recipient>` stores shared doc references
+- **Encrypted shared data** — `SHA-256(sender_address:recipient_address)` derived key, AES-256-GCM encrypted
+- **Batch share API** — `shareDocumentsWithUser(docIds[])` processes all docs, writes ONE clean manifest (no stale accumulation)
+- **Import with drive dedup** — `importFromUser()` creates single drive, reuses on repeated imports (sessionStorage tracking)
+- **Action extraction** — import extracts `.action` from ops and filters global scope (matches hydration pattern)
+- **Configurable Bee URL** — reads from localStorage, `setBeeUrl()` triggers reconnect
+- **`applySwarmExtensions()`** — all custom `ph.swarm.*` fields survive `plugin.start()` overwrite on reconnect
+- **Address normalization** — `getOwnerAddress()` always `0x`-prefixed, `normalizeAddress()` only for `makeFeedReader` owner param, topics use `address.toLowerCase()` (preserves `0x`, matches legacy feeds)
+- **Robust error handling** — `isNotFoundError` handles bee-js v11 error shapes, `readShareManifest`/`readPublicProfile` catch-all (no JSON parse crashes)
+
 ### Connect Plugin (`swarm-doc-model/processors/swarm-plugin.ts`)
 
 - Initializes asynchronously at processor registration (doesn't block Connect startup)
@@ -28,13 +41,17 @@
 - Clean manifest after recovery (prevents stale drive accumulation)
 - `beforeunload` handler flushes pending manifests
 - `sessionStorage` hydration guard (survives Vite HMR)
-- Exposes `ph.swarm.clearStorage()`, `ph.swarm.reconnect()`, `ph.swarm.refreshBalances()`
+- Exposes on `ph.swarm`: `clearStorage()`, `reconnect()`, `refreshBalances()`, `setBeeUrl()`, `shareDocuments()`, `importSharedDocuments()`, `lookupUser()`
 
 ### Connect Settings UI (`packages/connect/.../swarm-storage.tsx`)
 
 - Loading states (spinner during init, disconnected state with setup instructions)
+- Configurable Bee node URL with Save & Connect button
 - Storage gauge (remaining capacity, TTL, bucket utilization with collapsible explainer)
 - Document tree with sync badges (buffered/flushing/synced/error), drive grouping
+- **Your Swarm ID** — copyable signer address for sharing
+- **Share section** — checkbox tree (drive selects all children), batch share with encryption
+- **Import section** — enter sender's Swarm ID, import shared docs into local drive
 - Stamp management (extend duration, expand storage, buy new stamp — with dropdown presets)
 - Node wallet balances (xBZZ, xDAI) with fund instructions
 - USD pricing (total stamp cost, xBZZ market price from CoinGecko)
@@ -45,9 +62,19 @@
 
 | Package | Version | Registry |
 |---------|---------|----------|
-| `@liberuum-org/bee-reactor-adapter` | 0.17.0 | npm |
-| `@liberuum-org/connect` | 6.0.0-dev.157-swarm.11 | npm |
+| `@liberuum-org/bee-reactor-adapter` | 0.19.1 | npm |
+| `@liberuum-org/connect` | 6.0.0-dev.161-swarm.22 | npm (swarm.23 pending) |
 | `@liberuum-org/reactor` | (forked, with `withOperationStore`/`withKeyframeStore`) | npm |
+
+---
+
+## Known Bugs
+
+- [ ] **Doc-to-drive linking in tree view** — sometimes shows "unlinked" docs in the Documents section. Pre-existing issue related to `JOB_WRITE_READY` timing. `lastSeenDriveId` fallback usually works but not always.
+- [ ] **Multi-drive hydration** — recovery sometimes places all docs in one drive instead of creating separate drives per Swarm driveId. Needs investigation (hydration code not modified by sharing changes).
+- [ ] **Drive dedup on import** — sessionStorage approach works within a session but doesn't persist across page refreshes. The `reactorClient.get(driveId)` name lookup failed in testing. Needs a more robust approach.
+- [ ] **Connect package not published** — swarm.23 with `shareDocuments` batch API, Bee URL input, and checkbox fixes is only available via dist-copy workaround. Needs publishing.
+- [ ] **Swarm propagation delays** — shared data uploaded to Alice's local Bee node may take 30s-2min to be available on Bob's remote Bee node. No retry/polling on import — user must retry manually.
 
 ---
 
@@ -55,18 +82,22 @@
 
 ### Near Term
 
-- [ ] **Step 1: ACT-based document sharing** — share encrypted docs with other ETH addresses using Swarm ACT + Bee node public keys. See `sharing-drives-docs-plan.md`
-- [ ] **Publish Connect swarm.12** — contains latest UI fixes (tooltips, explainers, pricing, alert fixes)
+- [ ] **Publish Connect swarm.23** — batch share API, Bee URL input, checkbox tree
+- [ ] **Publish adapter 0.19.1** — sharing methods, encryption, address normalization (already published)
+- [ ] **Fix doc-to-drive linking** — improve `findParentDrive` reliability
+- [ ] **Fix multi-drive hydration** — ensure each Swarm driveId creates a separate local drive
 - [ ] **Settings UI design polish** — match Connect aesthetic more closely
 
 ### Medium Term
 
+- [ ] **ETH address → signer address registry** — on-chain mapping contract on Gnosis Chain so users can share by ETH address instead of Swarm ID
 - [ ] **Step 2: SwarmChannel + DocSync** — implement a `SwarmChannel` (Channel interface) that uses Swarm feeds as transport for the reactor's existing DocSync protocol. Enables live collaborative editing with 5-10s polling latency. See `swarm-live-editing-research.md`
 - [ ] **Mode 2: Swarm Only** — Connect without Switchboard, full sync via Swarm feeds only
 
 ### Long Term
 
 - [ ] **Step 3: GSOC/PSS real-time** — enhance SwarmChannel with sub-second notifications via GSOC and/or encrypted PSS messaging
+- [ ] **ACT-based sharing** — replace plain encrypted sharing with Swarm ACT once cross-node compatibility improves
 - [ ] **Mode 3: Full Swarm** — Deploy Connect SPA to Swarm with HashRouter + ENS domain
 
 ---
@@ -75,85 +106,63 @@
 
 | File | Purpose |
 |------|---------|
-| `bee-reactor-adaptor/src/swarm-client.ts` | Bee SDK wrapper, feeds, encryption, stamps, ACT |
+| `bee-reactor-adaptor/src/swarm-client.ts` | Bee SDK wrapper: upload, download, feeds, encryption, stamps, sharing |
 | `bee-reactor-adaptor/src/swarm-crypto.ts` | AES-256-GCM encrypt/decrypt with SWE prefix |
 | `bee-reactor-adaptor/src/wallet-signer.ts` | Deterministic key derivation from wallet signature |
-| `bee-reactor-adaptor/src/types.ts` | All type definitions (manifests, stamps, entries) |
+| `bee-reactor-adaptor/src/types.ts` | All type definitions (manifests, stamps, sharing, profiles) |
 | `bee-reactor-adaptor/src/swarm-sync-read-model.ts` | Server-side read model for Swarm sync |
-| `swarm-doc-model/processors/swarm-plugin.ts` | Browser-side plugin (sync, recovery, UI state) |
+| `swarm-doc-model/processors/swarm-plugin.ts` | Browser-side plugin (sync, recovery, sharing, UI state) |
 | `packages/connect/.../swarm-storage.tsx` | Settings UI component |
 | `packages/connect/.../SettingsModal.tsx` | Swarm icon + tab registration |
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  Connect (Browser)                                               │
-│                                                                   │
-│  ┌──────────┐  ┌──────────────┐  ┌──────────────────────────┐   │
-│  │  Reactor  │  │  PGlite      │  │  swarm-plugin.ts         │   │
-│  │  (core)   │──│  (local DB)  │──│  - subscribes to changes │   │
-│  └──────────┘  └──────────────┘  │  - uploads ops to Swarm   │   │
-│                                   │  - debounced manifests    │   │
-│                                   │  - recovery on login      │   │
-│                                   └───────────┬──────────────┘   │
-│                                               │                   │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │  SwarmConnectPlugin (@liberuum-org/bee-reactor-adapter)   │   │
-│  │  - wallet key derivation (personal_sign → keccak256)     │   │
-│  │  - SwarmClient (upload, download, feeds, ACT, stamps)    │   │
-│  │  - AES-256-GCM encryption (wallet-derived key)           │   │
-│  └───────────────────────────┬──────────────────────────────┘   │
-│                               │                                   │
-└───────────────────────────────┼───────────────────────────────────┘
-                                │
-                    ┌───────────▼───────────┐
-                    │  Bee Node (v2.7.1)    │
-                    │  localhost:1633        │
-                    │  Full node, WSS, PSS  │
-                    │                       │
-                    │  /bytes   → immutable  │
-                    │  /feeds   → mutable    │
-                    │  /stamps  → postage    │
-                    │  /gsoc    → messaging  │
-                    │  /pss     → encrypted  │
-                    └───────────┬───────────┘
-                                │
-                    ┌───────────▼───────────┐
-                    │  Swarm Network        │
-                    │  (decentralized)      │
-                    └───────────────────────┘
+Connect (Browser)
+  +-- Reactor (event-sourced operations engine)
+  +-- PGlite (local Postgres in WASM for fast reads)
+  +-- swarm-plugin.ts (subscribes to changes, uploads to Swarm)
+  |     +-- Buffers operations per document (pendingOps)
+  |     +-- Debounces manifest writes (3s per document)
+  |     +-- Handles recovery on new device login
+  |     +-- Share: batch upload + encrypted share manifest
+  |     +-- Import: download + decrypt + replay ops
+  |     +-- Exposes status to settings UI via window.ph.swarm
+  +-- SwarmClient (bee-reactor-adapter)
+        +-- AES-256-GCM encryption (wallet-derived key)
+        +-- Share encryption (SHA-256 derived shared key)
+        +-- /bytes uploads (immutable, content-addressed)
+        +-- Feed writes (mutable pointers, per-topic write lock)
+        +-- Stamp management (status, top-up, expand, create)
+              |
+        Bee Node (configurable URL, default localhost:1633)
+              |
+        Swarm Network (decentralized p2p)
 ```
 
 ## Encryption
 
+### Personal Storage
 All data uploaded to Swarm is encrypted with AES-256-GCM before leaving the browser:
-
 ```
-Key derivation:
-  wallet.personal_sign("Authorize Swarm storage...") → signature
-  keccak256(signature) → 32-byte secp256k1 private key (= Swarm signer)
-  SHA-256(private_key_hex) → AES-256 key
-
-Encryption:
-  plaintext → [SWE prefix (3 bytes)][IV (12 bytes)][AES-256-GCM ciphertext + tag]
-
-Upload:
-  encrypted_bytes → Bee /bytes → content-addressed reference
-
-Feed pattern:
-  manifest JSON → encrypt → /bytes → 64-char reference → feed SOC (72 bytes)
+Wallet personal_sign --> keccak256 --> secp256k1 private key --> SHA-256 --> AES-256 key
 ```
+Same wallet + same message = same key on any device. Deterministic. Portable.
 
-Same wallet + same message = same key on any device. Survives browser clears and Bee node restarts.
+### Shared Data
+Shared documents are encrypted with a key both parties can derive:
+```
+SHA-256(normalizeAddress(sender) + ":" + normalizeAddress(recipient)) --> 256-bit AES key
+```
+Third parties can't decrypt without knowing both signer addresses.
 
 ## Feed Topics
 
-| Feed | Topic Pattern | Purpose |
+| Feed | Topic Pattern | Content |
 |------|--------------|---------|
-| Document manifest | `ph:v2:doc:<documentId>` | Pointer to document's operation batches |
-| User manifest | `ph:v2:user:<eth_address>` | Index of all user's documents and drives |
-| Public profile | `ph:v2:profile:<eth_address>` | Public key publication (for sharing) — **planned** |
-| Share manifest | `ph:v2:share:<from>:<to>` | Documents shared between two users — **planned** |
-| Collaboration index | `ph:v2:collab:<docId>` | Collaborator list for live editing — **planned** |
-| Per-user ops | `ph:v2:ops:<address>:<docId>` | User's SyncEnvelopes for a shared doc — **planned** |
+| Document manifest | `ph:v2:doc:<documentId>` | Pointer to encrypted operation batches |
+| User manifest | `ph:v2:user:<0x_signer_address>` | Index of all user's documents and drives |
+| Public profile | `ph:v2:profile:<0x_signer_address>` | Bee node pubkey (unencrypted, discoverable) |
+| Share manifest | `ph:v2:share:<0x_sender>:<0x_recipient>` | List of shared doc references (unencrypted) |
+
+**Note**: User and document topics include the `0x` prefix (legacy format). Profile and share topics also include `0x` for consistency. The `normalizeAddress()` function (strips `0x`) is only used for `bee.makeFeedReader()` owner parameter, never for topic strings.
