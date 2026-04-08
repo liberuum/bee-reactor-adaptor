@@ -1,250 +1,163 @@
 # Bee Reactor Adapter
 
-A **Swarm Bee** storage adapter for the Powerhouse Reactor. Persists operations and keyframes to the Swarm decentralized storage network while using local SQL (PGlite/PostgreSQL) as a fast read cache.
+Decentralized storage adapter for [Powerhouse](https://powerhouse.io) Connect using [Swarm](https://ethswarm.org). Encrypts documents with your Ethereum wallet and stores them on the Swarm network. Recover all your documents on any device with just a wallet signature.
 
-## Current Version: 0.14.0
+## What It Does
 
-### Connect + Swarm Integration (Browser)
-Full sync and recovery working:
-- **Sync**: Operations upload to Swarm `/bytes`, manifests stored in Swarm feeds
-- **Recovery**: After browser data wipe, same wallet → same key → same feeds → full document state restored
-- **Feed writes**: Per-topic write lock, no manual index management (Swarm best practice)
-- **Topic prefix**: Configurable via `feedTopicPrefix` for feed migration
-
-### Key Architecture Decisions
-- **Feeds are append-only, write-once per index** — never pass explicit indices
-- **Per-topic serialization** — prevents concurrent writers from conflicting
-- **Document IDs preserved** across sync/recovery (reactor uses provided `header.id`)
-- **Initial state from document model** — `reactorClient.getDocumentModelModule(type).utils.createState()`
-
-See [`docs/feed-write-fix.md`](docs/feed-write-fix.md) for the feed write fix details and [`docs/connect-swarm-integration.md`](docs/connect-swarm-integration.md) for the full integration architecture.
-
-## Quick Start: Add Swarm Storage to Any Powerhouse Project
-
-### 1. Add packages to `package.json`
-
-```json
-{
-  "dependencies": {
-    "@liberuum-org/bee-reactor-adapter": "0.2.0",
-    "@ethersphere/bee-js": "^11.1.1"
-  },
-  "resolutions": {
-    "@powerhousedao/switchboard": "npm:@liberuum-org/switchboard@6.0.0-dev.156-swarm.3"
-  }
-}
-```
-
-Then install:
-
-```bash
-bun install
-```
-
-The `resolutions` field tells bun to replace `@powerhousedao/switchboard` everywhere (including inside `ph-cli`) with our Swarm-enabled fork. **No manual patching, no post-install scripts.**
-
-### 2. Install and start a Bee dev node
-
-Download from https://github.com/ethersphere/bee/releases/tag/v2.7.1
-
-```bash
-# macOS ARM64
-curl -L -o /tmp/bee.tar.gz \
-  "https://github.com/ethersphere/bee/releases/download/v2.7.1/bee-darwin-arm64.tar.gz"
-cd /tmp && tar xzf bee.tar.gz
-mkdir -p ~/.local/bin && mv bee ~/.local/bin/bee
-export PATH="$HOME/.local/bin:$PATH"
-
-# Start dev node (memory-only, no blockchain needed)
-bee dev
-```
-
-### 3. Create `.env` with Swarm config
-
-```bash
-# Buy a test stamp (free in dev mode)
-STAMP=$(curl -s -X POST http://localhost:1633/stamps/10000000/24 | jq -r .batchID)
-
-cat > .env << EOF
-SWARM_BEE_URL=http://localhost:1633
-SWARM_STAMP_ID=$STAMP
-SWARM_SIGNER_KEY=0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef
-SWARM_FEED_MODE=false
-EOF
-```
-
-### 4. Start Vetra with Swarm storage
-
-```bash
-source .env && bun run vetra -- --watch
-```
-
-You'll see in the logs:
-
-```
-[switchboard] Swarm Bee adapter enabled (http://localhost:1633)
-[switchboard] Swarm Bee adapter started — operations will persist to Swarm
-```
-
-**Every reactor operation now persists to the Swarm Bee network.** Create documents in Connect (http://localhost:3001) or via `switchboard-cli` and they'll be uploaded to Swarm automatically.
-
-## Published Packages
-
-| Package | Version | What it does |
-|---------|---------|-------------|
-| `@liberuum-org/bee-reactor-adapter` | `0.2.0` | Core adapter: SwarmClient, SwarmSyncReadModel, SwarmOperationStore, SwarmKeyframeStore, SwarmHydrator |
-| `@liberuum-org/switchboard` | `6.0.0-dev.156-swarm.3` | Fork of `@powerhousedao/switchboard` — enables Swarm via env vars |
-| `@liberuum-org/reactor` | `6.0.0-dev.156-swarm.3` | Fork of `@powerhousedao/reactor` — adds `withOperationStore()`/`withKeyframeStore()` |
+- Uploads Powerhouse document operations to Swarm, encrypted with a wallet-derived AES-256-GCM key
+- Maintains mutable feed pointers so the latest document state is always discoverable
+- Recovers all documents on a new device from just a wallet signature (same wallet = same key = same data)
+- Manages postage stamps (Swarm's storage payment mechanism)
+- Provides a settings UI in Connect for monitoring sync status, storage health, and stamp management
 
 ## How It Works
 
-The `SwarmSyncReadModel` implements the reactor's `IReadModel` interface and is registered via `ReactorBuilder.withReadModel()`. The reactor's `ReadModelCoordinator` calls `indexOperations()` on every registered read model whenever operations are written. Our read model uploads the operation batch to Swarm `/bytes` and updates the document's manifest.
-
 ```
-Reactor write path (unchanged):
-  action -> reducer -> KyselyOperationStore (local SQL)
-                         |
-                    JOB_WRITE_READY event
-                         |
-                    ReadModelCoordinator
-                         |
-              +----------+----------+
-              |          |          |
-         DocView    DocIndexer   SwarmSyncReadModel
-         (SQL)      (SQL)        (uploads to Swarm /bytes)
-                                  |-> manifest update
+User edits document in Connect
+       |
+Reactor stores operation in local PGlite (Postgres in WASM)
+       |
+swarm-plugin.ts receives change event, buffers operation
+       |  (3-second debounce)
+Encrypts all buffered ops --> uploads to Swarm /bytes --> updates feed pointer
+       |
+On new device: wallet signature --> same key --> read feeds --> download ops --> replay --> restored
 ```
 
-This approach:
-- Requires **zero changes** to the reactor's internal write path
-- Uses the existing `withReadModel()` extension point
-- Is non-blocking — Swarm uploads are async, errors don't break the reactor
-- Works with any Powerhouse project that uses `ph-cli vetra`
+See [docs/architecture.md](docs/architecture.md) for the full technical deep dive covering encryption, recovery, debouncing, and drive-document relationships.
 
-## Environment Variables
+## Packages
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `SWARM_BEE_URL` | Yes | Bee node API URL (e.g. `http://localhost:1633`) |
-| `SWARM_STAMP_ID` | Yes | Postage stamp batch ID for uploads |
-| `SWARM_SIGNER_KEY` | Yes | Private key (hex) for Swarm feed signing |
-| `SWARM_FEED_MODE` | No | Set `false` for `bee dev` (default: `true`) |
+| Package | npm | Description |
+|---------|-----|-------------|
+| `bee-reactor-adaptor/` | `@liberuum-org/bee-reactor-adapter` | Core adapter: SwarmClient, encryption, feeds, stamps, ACT |
+| `swarm-doc-model/` | — | Connect processor plugin: sync, recovery, settings UI integration |
+| `packages/connect/` | `@liberuum-org/connect` | Fork of Connect with Swarm settings tab |
 
-When these env vars are **not set**, the switchboard behaves identically to the original — no Swarm code runs.
+## Prerequisites
 
-## Verifying Data on Swarm
+- A running [Bee node](https://docs.ethswarm.org/docs/bee/installation/quick-start) (v2.7.1+ recommended)
+- A funded postage stamp (depth 22+ for ~7.7 GB capacity)
+- An Ethereum wallet (MetaMask or any Web3 wallet)
 
-After creating or mutating documents, verify they're on Swarm:
+## Quick Start
 
 ```bash
-# Check Bee node for uploads (tag count increases with each upload)
-curl -s http://localhost:1633/tags | jq '.tags | length'
+# Install
+cd bee-reactor-adaptor && pnpm install
 
-# Inspect a specific Swarm reference
-curl -s http://localhost:1633/bytes/<reference> | jq .
+# Run tests (requires `bee dev` running)
+pnpm test
 
-# Use the included inspect script
-./scripts/bee-inspect.sh <reference>
+# Build
+pnpm build
 ```
 
-## Running Bee in Dev Mode
+## Architecture
 
-Dev mode runs a **memory-only** Bee node — no blockchain, no real tokens, no network.
+```
+Connect (Browser)
+  +-- Reactor (event-sourced operations engine)
+  +-- PGlite (local Postgres in WASM for fast reads)
+  +-- swarm-plugin.ts (subscribes to changes, uploads to Swarm)
+  |     +-- Buffers operations per document (pendingOps)
+  |     +-- Debounces manifest writes (3s per document)
+  |     +-- Handles recovery on new device login
+  |     +-- Exposes status to settings UI via window.ph.swarm
+  +-- SwarmClient (bee-reactor-adapter)
+        +-- AES-256-GCM encryption (wallet-derived key)
+        +-- /bytes uploads (immutable, content-addressed)
+        +-- Feed writes (mutable pointers, per-topic write lock)
+        +-- Stamp management (status, top-up, expand, create)
+        +-- ACT access control (for sharing)
+              |
+        Bee Node (localhost:1633)
+              |
+        Swarm Network (decentralized p2p)
+```
+
+## Encryption
+
+All data is encrypted **before** leaving the browser. The Bee node never sees plaintext.
+
+```
+Wallet personal_sign --> keccak256 --> secp256k1 private key --> SHA-256 --> AES-256 key
+```
+
+Same wallet + same message = same key on any device. Deterministic. Portable. Survives browser clears.
+
+## Feed Topics
+
+| Feed | Topic Pattern | Content |
+|------|--------------|---------|
+| Document manifest | `ph:v2:doc:<documentId>` | Pointer to encrypted operation batches |
+| User manifest | `ph:v2:user:<eth_address>` | Index of all user's documents and drives |
+
+## Key Files
+
+| File | Purpose |
+|------|---------|
+| `bee-reactor-adaptor/src/swarm-client.ts` | Bee SDK wrapper: upload, download, feeds, encryption, stamps, ACT |
+| `bee-reactor-adaptor/src/swarm-crypto.ts` | AES-256-GCM encrypt/decrypt with SWE prefix detection |
+| `bee-reactor-adaptor/src/wallet-signer.ts` | Deterministic key derivation from wallet signature |
+| `bee-reactor-adaptor/src/types.ts` | Type definitions: manifests, stamps, entries |
+| `swarm-doc-model/processors/swarm-plugin.ts` | Browser plugin: sync, recovery, debouncing, UI state |
+| `packages/connect/.../swarm-storage.tsx` | Settings UI component |
+
+## Documentation
+
+| Document | What it covers |
+|----------|---------------|
+| [architecture.md](docs/architecture.md) | How the integration works end-to-end: data flow, encryption, recovery, debouncing, drive-doc relationships, reactor internals |
+| [implementation-plan.md](docs/implementation-plan.md) | What's built, what's next, published packages, architecture diagram |
+| [sharing-drives-docs-plan.md](docs/sharing-drives-docs-plan.md) | Plan for encrypted document sharing between users via Swarm ACT |
+| [swarm-live-editing-research.md](docs/swarm-live-editing-research.md) | Research on multi-user live editing: SwarmChannel + DocSync, GSOC, PSS |
+
+## Roadmap
+
+- [x] Core sync and recovery (operations to Swarm, full restore from wallet)
+- [x] AES-256-GCM encryption (wallet-derived, backward compatible)
+- [x] Feed optimization (3s debounce, op batch accumulation, manifest-as-reference)
+- [x] Multi-drive support with correct drive-document linking
+- [x] Settings UI (stamp management, storage stats, sync badges, USD pricing)
+- [ ] Encrypted sharing between users (ACT-based, Bee node public keys)
+- [ ] SwarmChannel for DocSync (live collaborative editing via feed polling)
+- [ ] GSOC/PSS real-time notifications
+
+## Development
+
+### Running Tests
+
+12 E2E tests run against a live `bee dev` node:
+
+```bash
+# Terminal 1: start Bee in dev mode
+bee dev
+
+# Terminal 2: run tests
+cd bee-reactor-adaptor
+pnpm test
+```
+
+### Bee Dev Mode
+
+Dev mode runs a memory-only Bee node (no blockchain, no real tokens):
 
 ```bash
 bee dev
 ```
 
 - Full HTTP API on port 1633
-- Postage stamps work (free test stamps)
-- Data stored in memory only (lost on restart — good for test isolation)
-- **SOC/Feeds not supported** — adapter uses `/bytes` mode automatically
+- Postage stamps work (free)
+- Data stored in memory only (lost on restart)
+- SOC/Feeds not supported — adapter uses /bytes mode automatically
 
-### Buy a test postage stamp
-
-```bash
-curl -s -X POST http://localhost:1633/stamps/10000000/24 | jq
-# {"batchID":"abc123...","txHash":"0x0000..."}
-```
-
-## CLI Scripts
-
-Run from the `bee-reactor-adaptor/` directory with `bee dev` running:
-
-| Command | Description |
-|---------|-------------|
-| `pnpm bee:health` | Check Bee node status and list stamps |
-| `pnpm bee:upload-test` | Upload test JSON, download, verify round-trip |
-| `pnpm bee:test-flow` | Full adapter lifecycle with Swarm reference logging |
-| `./scripts/bee-inspect.sh <ref>` | Download and pretty-print any Swarm reference |
-
-## Running Tests
-
-12 tests run against a live `bee dev` node:
+### Buy a Test Stamp
 
 ```bash
-# Terminal 1
-bee dev
-
-# Terminal 2
-cd bee-reactor-adaptor
-pnpm test
+curl -s -X POST http://localhost:1633/stamps/10000000/24 | jq .batchID
 ```
 
-### Test coverage
+## License
 
-| Test | What it verifies |
-|------|-----------------|
-| SwarmClient health | Bee node connectivity |
-| SwarmClient upload/download | `/bytes` round-trip |
-| SwarmClient missing feed | Graceful null for non-existent manifests |
-| SwarmClient manifest | Write + read document manifest |
-| SwarmOperationStore write | Operations go to local SQL AND Swarm |
-| SwarmOperationStore read | Reads served from local SQL cache |
-| SwarmKeyframeStore write | Keyframe persistence + manifest compaction |
-| SwarmSyncReadModel single batch | Upload ops when `indexOperations()` called (Switchboard pattern) |
-| SwarmSyncReadModel multi batch | Multiple mutations accumulate in manifest |
-| SwarmSyncReadModel multi doc | Ops for different docs in one batch create separate manifests |
-| SwarmHydrator | Download 3 op batches from Swarm into fresh empty store |
-| BeeReactorAdapter full flow | Write 5 ops + keyframe, hydrate fresh adapter from Swarm |
-
-## Architecture
-
-```
-bee-reactor-adaptor/
-  src/
-    index.ts                      Public exports
-    bee-reactor-adapter.ts        Main orchestrator (BeeReactorAdapter)
-    swarm-client.ts               Bee SDK wrapper (upload, download, manifests)
-    swarm-sync-read-model.ts      IReadModel: uploads ops to Swarm (Switchboard integration)
-    swarm-operation-store.ts      IOperationStore: write-through to local + Swarm
-    swarm-keyframe-store.ts       IKeyframeStore: write-through with manifest compaction
-    swarm-hydrator.ts             Startup sync: download missing data from Swarm
-    types.ts                      Config, manifest types
-  tests/
-    integration.test.ts           12 E2E tests against bee dev node
-  scripts/
-    bee-health.sh                 Check node status
-    bee-upload-test.sh            Upload/download round-trip
-    bee-inspect.sh                Inspect any Swarm reference
-    test-adapter-flow.ts          Full adapter lifecycle with logging
-```
-
-## Deployment Modes
-
-| Mode | App hosting | Data storage | Sync | Server needed |
-|------|-------------|-------------|------|---------------|
-| **Hybrid** | Vercel/Docker | PGlite + Swarm + Switchboard | DocSync via GraphQL | Yes (Switchboard) |
-| **Swarm Only** | Vercel/Docker | PGlite + Swarm | Swarm feed polling | No (Bee node only) |
-| **Full Swarm** | Swarm + ENS | PGlite + Swarm | Swarm feed polling | No (Bee node only) |
-
-See `docs/implementation-plan.md` for details on each mode, Renown identity integration, and ENS deployment.
-
-## References
-
-- Bee releases: https://github.com/ethersphere/bee/releases
-- Bee JS SDK: https://www.npmjs.com/package/@ethersphere/bee-js
-- Bee API docs: https://docs.ethswarm.org/api/
-- Reactor architecture: `powerhouse/packages/reactor/docs/ARCHITECTURE.md`
-- Forked reactor: https://www.npmjs.com/package/@liberuum-org/reactor
-- Forked switchboard: https://www.npmjs.com/package/@liberuum-org/switchboard
+MIT
