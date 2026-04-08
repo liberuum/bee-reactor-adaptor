@@ -135,6 +135,12 @@ export interface StampStatus {
     rawUtilization: number;
     /** Max utilization = 2^(depth - bucketDepth) */
     maxUtilization: number;
+    /** Total xBZZ paid for this stamp */
+    totalCostBzz: string;
+    /** Approximate USD cost (null if price unavailable) */
+    totalCostUsd: string | null;
+    /** Current xBZZ/USD market price (null if unavailable) */
+    bzzUsdPrice: number | null;
     /** Health status based on TTL thresholds */
     health: "healthy" | "warning" | "critical" | "expired";
 }

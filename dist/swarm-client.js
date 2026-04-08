@@ -338,6 +338,12 @@ export class SwarmClient {
             health = "warning";
         else
             health = "healthy";
+        // Compute total cost: amount * 2^depth / 10^16 = xBZZ
+        const amount = BigInt(batch.amount.toString());
+        const totalPlur = amount * BigInt(2 ** batch.depth);
+        const totalBzz = Number(totalPlur) / 1e16;
+        const bzzUsdPrice = await this.getBzzUsdPrice();
+        const totalUsd = bzzUsdPrice != null ? (totalBzz * bzzUsdPrice).toFixed(4) : null;
         return {
             batchId: this.batchId,
             usable: batch.usable,
@@ -353,6 +359,9 @@ export class SwarmClient {
             bucketDepth: batch.bucketDepth,
             rawUtilization: batch.utilization,
             maxUtilization: Math.pow(2, batch.depth - batch.bucketDepth),
+            totalCostBzz: totalBzz.toFixed(6),
+            totalCostUsd: totalUsd ? `$${totalUsd}` : null,
+            bzzUsdPrice,
             expiresAt: new Date(Date.now() + ttlSeconds * 1000).toISOString(),
             health,
         };
@@ -378,6 +387,43 @@ export class SwarmClient {
         return {
             pricePerBlock: chainState.currentPrice,
             blockTime: 5, // Gnosis Chain default
+        };
+    }
+    /**
+     * Get xBZZ/USD market price from CoinGecko.
+     * Returns null if the API is unreachable.
+     */
+    async getBzzUsdPrice() {
+        try {
+            const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=swarm-bzz&vs_currencies=usd", { signal: AbortSignal.timeout(5000) });
+            if (!res.ok)
+                return null;
+            const data = (await res.json());
+            return data["swarm-bzz"]?.usd ?? null;
+        }
+        catch {
+            return null;
+        }
+    }
+    /**
+     * Estimate cost for a stamp operation.
+     *
+     * @param depth - Batch depth
+     * @param days - Duration in days
+     * @returns Cost estimate in xBZZ and USD (if price available)
+     */
+    async estimateStampCost(depth, days) {
+        const { pricePerBlock, blockTime } = await this.getStoragePrice();
+        const blocksPerDay = Math.ceil(86400 / blockTime);
+        const amountPerChunk = BigInt(pricePerBlock) * BigInt(blocksPerDay) * BigInt(days);
+        const totalPlur = amountPerChunk * BigInt(2 ** depth);
+        const xBZZ = Number(totalPlur) / 1e16;
+        const bzzPrice = await this.getBzzUsdPrice();
+        const usd = bzzPrice != null ? (xBZZ * bzzPrice).toFixed(4) : null;
+        return {
+            xBZZ: xBZZ.toFixed(6),
+            usd: usd ? `$${usd}` : null,
+            amountPlur: amountPerChunk.toString(),
         };
     }
     /**

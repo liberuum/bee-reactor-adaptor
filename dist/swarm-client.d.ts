@@ -188,6 +188,23 @@ export declare class SwarmClient {
         blockTime: number;
     }>;
     /**
+     * Get xBZZ/USD market price from CoinGecko.
+     * Returns null if the API is unreachable.
+     */
+    getBzzUsdPrice(): Promise<number | null>;
+    /**
+     * Estimate cost for a stamp operation.
+     *
+     * @param depth - Batch depth
+     * @param days - Duration in days
+     * @returns Cost estimate in xBZZ and USD (if price available)
+     */
+    estimateStampCost(depth: number, days: number): Promise<{
+        xBZZ: string;
+        usd: string | null;
+        amountPlur: string;
+    }>;
+    /**
      * Get stamp management options with human-readable presets.
      * Fetches current price and computes costs for common operations.
      */
