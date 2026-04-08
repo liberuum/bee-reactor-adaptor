@@ -4,6 +4,7 @@ import type {
   SwarmUserManifest,
   StampStatus,
 } from "./types.js";
+import { encrypt, decrypt, isEncrypted } from "./swarm-crypto.js";
 
 /**
  * Thin wrapper around the Bee SDK providing the specific operations
@@ -20,6 +21,10 @@ export class SwarmClient {
   private readonly batchId: string;
   private readonly useFeedMode: boolean;
   private readonly feedTopicPrefix: string;
+  /** The wallet-derived key used for app-layer AES-256-GCM encryption */
+  private readonly encryptionKey: string;
+  /** Whether to encrypt data before upload. Default: true */
+  private readonly useEncryption: boolean;
 
   /**
    * In-memory index: documentId -> latest manifest reference.
@@ -27,11 +32,6 @@ export class SwarmClient {
    */
   private manifestIndex: Map<string, string> = new Map();
 
-  /**
-   * Tracks the next feed write index per topic (hex string).
-   * Avoids stale `findNextIndex` results after rapid or cross-session writes.
-   * Key: topic hex, Value: next index to write at.
-   */
   /** Per-topic write lock — serializes feed writes to prevent concurrent index conflicts */
   private feedWriteLocks: Map<string, Promise<void>> = new Map();
 
@@ -43,6 +43,8 @@ export class SwarmClient {
     useFeedMode?: boolean;
     /** Feed topic prefix. Change this to migrate to fresh feeds (e.g. after corruption). Default: "ph" */
     feedTopicPrefix?: string;
+    /** Enable app-layer AES-256-GCM encryption. Default: true */
+    useEncryption?: boolean;
   }) {
     this.bee = new Bee(config.beeUrl, {
       signer: config.signerPrivateKey,
@@ -50,25 +52,34 @@ export class SwarmClient {
     this.batchId = config.batchId;
     this.useFeedMode = config.useFeedMode ?? true;
     this.feedTopicPrefix = config.feedTopicPrefix ?? "ph";
+    this.encryptionKey = config.signerPrivateKey;
+    this.useEncryption = config.useEncryption ?? true;
   }
 
   /**
-   * Upload JSON-serializable data to Swarm /bytes.
-   * Returns the content-addressed reference (hex hash).
+   * Upload data to Swarm /bytes.
    *
-   * @param data - Data to upload
-   * @param options - Optional: enable ACT encryption, provide existing history
+   * When encryption is enabled (default), data is encrypted with AES-256-GCM
+   * using the wallet-derived key BEFORE upload. The Bee node never sees plaintext.
+   *
+   * @param data - Data to upload (will be encrypted if useEncryption is true)
+   * @param options - Optional: skip encryption, enable ACT, provide history
    */
   async uploadData(
     data: string | Uint8Array,
-    options?: { act?: boolean; actHistoryAddress?: string },
+    options?: { act?: boolean; actHistoryAddress?: string; skipEncryption?: boolean },
   ): Promise<{ reference: string; historyAddress?: string }> {
-    const result = await this.bee.uploadData(this.batchId, data, {
+    let payload: string | Uint8Array = data;
+
+    // App-layer encryption: encrypt before upload
+    if (this.useEncryption && !options?.skipEncryption) {
+      payload = await encrypt(data, this.encryptionKey);
+    }
+
+    const result = await this.bee.uploadData(this.batchId, payload, {
       act: options?.act,
       actHistoryAddress: options?.actHistoryAddress,
     });
-    // result.historyAddress is Optional<Reference> from cafe-utility
-    // Access .value to get the Reference or null/undefined
     const historyRef = (result.historyAddress as any)?.value ?? result.historyAddress;
     return {
       reference: result.reference.toHex(),
@@ -81,8 +92,11 @@ export class SwarmClient {
   /**
    * Download data from Swarm /bytes by reference.
    *
+   * Automatically detects and decrypts AES-256-GCM encrypted data (SWE prefix).
+   * Handles mixed encrypted/unencrypted content for backward compatibility.
+   *
    * @param reference - Content reference
-   * @param options - Optional: ACT parameters for encrypted content
+   * @param options - Optional: ACT parameters, skip decryption
    */
   async downloadData(
     reference: string,
@@ -90,14 +104,22 @@ export class SwarmClient {
       actPublisher?: string;
       actHistoryAddress?: string;
       actTimestamp?: number;
+      skipDecryption?: boolean;
     },
   ): Promise<Uint8Array> {
-    const data = await this.bee.downloadData(reference, {
+    const raw = await this.bee.downloadData(reference, {
       actPublisher: options?.actPublisher,
       actHistoryAddress: options?.actHistoryAddress,
       actTimestamp: options?.actTimestamp,
     });
-    return data.toUint8Array();
+    const data = raw.toUint8Array();
+
+    // Auto-decrypt if data has the SWE prefix (backward compatible with unencrypted data)
+    if (!options?.skipDecryption && isEncrypted(data)) {
+      return decrypt(data, this.encryptionKey);
+    }
+
+    return data;
   }
 
   // ─── ACT Access Control ────────────────────────────────────────
@@ -413,6 +435,13 @@ export class SwarmClient {
     else if (ttlSeconds < 604800) health = "warning";
     else health = "healthy";
 
+    // Compute total cost: amount * 2^depth / 10^16 = xBZZ
+    const amount = BigInt(batch.amount.toString());
+    const totalPlur = amount * BigInt(2 ** batch.depth);
+    const totalBzz = Number(totalPlur) / 1e16;
+    const bzzUsdPrice = await this.getBzzUsdPrice();
+    const totalUsd = bzzUsdPrice != null ? (totalBzz * bzzUsdPrice).toFixed(4) : null;
+
     return {
       batchId: this.batchId,
       usable: batch.usable,
@@ -428,6 +457,9 @@ export class SwarmClient {
       bucketDepth: batch.bucketDepth,
       rawUtilization: batch.utilization,
       maxUtilization: Math.pow(2, batch.depth - batch.bucketDepth),
+      totalCostBzz: totalBzz.toFixed(6),
+      totalCostUsd: totalUsd ? `$${totalUsd}` : null,
+      bzzUsdPrice,
       expiresAt: new Date(Date.now() + ttlSeconds * 1000).toISOString(),
       health,
     };
@@ -456,6 +488,51 @@ export class SwarmClient {
     return {
       pricePerBlock: chainState.currentPrice,
       blockTime: 5, // Gnosis Chain default
+    };
+  }
+
+  /**
+   * Get xBZZ/USD market price from CoinGecko.
+   * Returns null if the API is unreachable.
+   */
+  async getBzzUsdPrice(): Promise<number | null> {
+    try {
+      const res = await fetch(
+        "https://api.coingecko.com/api/v3/simple/price?ids=swarm-bzz&vs_currencies=usd",
+        { signal: AbortSignal.timeout(5000) },
+      );
+      if (!res.ok) return null;
+      const data = (await res.json()) as { "swarm-bzz"?: { usd?: number } };
+      return data["swarm-bzz"]?.usd ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Estimate cost for a stamp operation.
+   *
+   * @param depth - Batch depth
+   * @param days - Duration in days
+   * @returns Cost estimate in xBZZ and USD (if price available)
+   */
+  async estimateStampCost(
+    depth: number,
+    days: number,
+  ): Promise<{ xBZZ: string; usd: string | null; amountPlur: string }> {
+    const { pricePerBlock, blockTime } = await this.getStoragePrice();
+    const blocksPerDay = Math.ceil(86400 / blockTime);
+    const amountPerChunk = BigInt(pricePerBlock) * BigInt(blocksPerDay) * BigInt(days);
+    const totalPlur = amountPerChunk * BigInt(2 ** depth);
+    const xBZZ = Number(totalPlur) / 1e16;
+
+    const bzzPrice = await this.getBzzUsdPrice();
+    const usd = bzzPrice != null ? (xBZZ * bzzPrice).toFixed(4) : null;
+
+    return {
+      xBZZ: xBZZ.toFixed(6),
+      usd: usd ? `$${usd}` : null,
+      amountPlur: amountPerChunk.toString(),
     };
   }
 
