@@ -45,7 +45,11 @@
 - [x] **Stamp management UX** -- extend duration, expand storage, create stamp dropdowns with human-readable presets (matching beeport)
 - [x] **Correct storage stats** -- uses bee-js batch.usage/size/remainingSize, depth/bucketDepth exposed
 - [x] **Published adapter 0.16.0 + Connect swarm.11** -- all fixes included
-- [ ] **Encrypted sharing** -- re-encrypt document key for recipient's public key
+- [x] **App-layer AES-256-GCM encryption (v0.17.0)** -- all uploads encrypted with wallet-derived key, auto-decrypt on download, backward compatible
+- [x] **USD pricing** -- live xBZZ/USD from CoinGecko, total stamp cost, market price display
+- [x] **Storage explainers** -- bucket utilization explainer, tooltips on Batch ID/Depth, data uploaded counter
+- [x] **Banner fix** -- uses actual TTL instead of generic "7 days" message
+- [ ] **Encrypted sharing** -- share documents with other ETH addresses via ECDH shared secrets
 - [ ] **Settings UI design polish** -- match Connect aesthetic, improve stamp management UX
 - [ ] **Mode 2: Swarm Only** -- Connect without Switchboard, sync via Swarm feed polling
 - [ ] **Mode 3: Full Swarm** -- Connect SPA deployed to Swarm, HashRouter, ENS, package registry on Swarm
