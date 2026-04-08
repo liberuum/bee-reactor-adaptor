@@ -16,6 +16,9 @@ export type {
   OperationBatchEntry,
   KeyframeEntry,
   RetryTask,
+  SwarmPublicProfile,
+  ShareManifest,
+  SharedDocumentEntry,
 } from "./types.js";
 
 export type { IOperationStore } from "./swarm-operation-store.js";

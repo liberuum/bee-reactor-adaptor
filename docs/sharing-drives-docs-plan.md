@@ -68,20 +68,28 @@ Each user's Bee node has a secp256k1 key pair (the overlay key).
 We already store `beeNodePublicKey` on the user manifest.
 
 **Problem**: User manifests are AES-256-GCM encrypted — only the owner can read them.
+Additionally, Swarm feeds are identified by (topic, **owner**). The owner address is the
+wallet-derived signer address (NOT the ETH wallet address). So even an unencrypted feed
+keyed by ETH address can't be read by someone who only knows the ETH address — they'd
+need the signer address to locate the feed.
 
-**Solution**: Publish a **public profile feed** (unencrypted) so anyone can look up a user's Bee node public key by ETH address.
+**Solution (MVP)**: Use the **Swarm signer address** as the sharing identifier instead of
+the ETH wallet address. The settings UI displays the user's "Swarm ID" (signer address)
+which they share out-of-band. Future versions can add an on-chain registry mapping
+ETH address → signer address for auto-discovery.
 
 ### Public Profile Feed
 
 ```
-Topic:  ph:v2:profile:<eth_address>
-Owner:  <eth_address> (the user's wallet-derived signer address)
+Topic:  {prefix}:profile:<signer_address>
+Owner:  <signer_address> (the wallet-derived Swarm key address)
 ```
 
 Payload (JSON, uploaded unencrypted to /bytes, reference in feed):
 ```json
 {
-  "address": "0xAlice...",
+  "address": "0xAlice_Signer...",
+  "ethAddress": "0xAlice_Wallet...",
   "beeNodePublicKey": "02abc123...",
   "swarmPublicKey": "03def456...",
   "updatedAt": "2026-04-08T..."
@@ -89,13 +97,23 @@ Payload (JSON, uploaded unencrypted to /bytes, reference in feed):
 ```
 
 Written once on first login, updated if Bee node changes.
-Anyone can read: `bee.makeFeedReader(topic, ownerAddress)` — no private key needed.
+Anyone who knows the signer address can read: `bee.makeFeedReader(topic, signerAddress)`.
+
+### Why Not ETH Address?
+
+Swarm feeds require both a topic AND the owner's address to read. The feed owner is
+the signer (derived via `keccak256(personal_sign(message))`), which is a different
+address from the ETH wallet. Without a registry mapping ETH → signer, the recipient
+must know the signer address.
+
+**Future improvement**: Publish an on-chain registry (simple mapping contract on Gnosis Chain)
+or use a shared Swarm index feed to enable ETH address → signer address lookup.
 
 ### Share Manifest Feed
 
 ```
-Topic:  ph:v2:share:<sender_address>:<recipient_address>
-Owner:  <sender_address>
+Topic:  {prefix}:share:<sender_signer_address>:<recipient_signer_address>
+Owner:  <sender_signer_address>
 ```
 
 Payload (encrypted with ACT, granted to recipient):

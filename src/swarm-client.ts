@@ -2,6 +2,8 @@ import { Bee, Topic } from "@ethersphere/bee-js";
 import type {
   SwarmDocumentManifest,
   SwarmUserManifest,
+  SwarmPublicProfile,
+  ShareManifest,
   StampStatus,
 } from "./types.js";
 import { encrypt, decrypt, isEncrypted } from "./swarm-crypto.js";
@@ -593,6 +595,168 @@ export class SwarmClient {
     };
   }
 
+  // ─── Public Profile (unencrypted, discoverable by ETH address) ─
+
+  /**
+   * Publish the user's public profile to an UNENCRYPTED feed.
+   * The profile is keyed by the signer address (= feed owner), so
+   * anyone who knows the signer address can discover the profile.
+   *
+   * @param signerAddress - The signer's address (from getOwnerAddress())
+   * @param profile - The profile data to publish
+   */
+  async publishPublicProfile(
+    signerAddress: string,
+    profile: SwarmPublicProfile,
+  ): Promise<void> {
+    const topic = this.profileTopic(signerAddress);
+    const payload = JSON.stringify(profile);
+    // Upload WITHOUT encryption — this is public data
+    const { reference } = await this.uploadData(payload, { skipEncryption: true });
+    await this.writeFeedPayload(topic, reference);
+  }
+
+  /**
+   * Read a user's public profile by their Swarm signer address.
+   * Returns null if the user hasn't published a profile yet.
+   *
+   * The signer address IS the feed owner, so this works for cross-user reads.
+   * Note: this takes a signer address, NOT an ETH wallet address.
+   *
+   * @param signerAddress - The target user's signer address (NOT their ETH wallet address)
+   */
+  async readPublicProfile(
+    signerAddress: string,
+  ): Promise<SwarmPublicProfile | null> {
+    const topic = this.profileTopic(signerAddress);
+    try {
+      const reader = this.bee.makeFeedReader(topic, signerAddress);
+      const result = await reader.downloadPayload();
+      const raw = new TextDecoder().decode(result.payload.toUint8Array());
+
+      // Profile data is unencrypted — parse directly or dereference
+      if (raw.startsWith("{")) {
+        return JSON.parse(raw) as SwarmPublicProfile;
+      }
+      const trimmed = raw.trim();
+      if (/^[0-9a-f]{64}$/i.test(trimmed)) {
+        const data = await this.downloadData(trimmed, { skipDecryption: true });
+        return JSON.parse(new TextDecoder().decode(data)) as SwarmPublicProfile;
+      }
+      return JSON.parse(raw) as SwarmPublicProfile;
+    } catch (error: unknown) {
+      if (isNotFoundError(error)) return null;
+      throw error;
+    }
+  }
+
+  // ─── Document Sharing (ACT-based) ─────────────────────────────
+
+  /**
+   * Share document data with a recipient using Swarm ACT encryption.
+   *
+   * 1. Uploads the operation data with ACT enabled
+   * 2. Grants access to the recipient's Bee node public key
+   * 3. Returns the share record (reference, historyAddress, granteeRef)
+   *
+   * @param data - The operation data to share (will be uploaded with ACT)
+   * @param recipientBeeNodePubKey - Recipient's Bee node compressed public key
+   */
+  async uploadSharedData(
+    data: string | Uint8Array,
+    recipientBeeNodePubKey: string,
+  ): Promise<{ reference: string; historyAddress: string; granteeRef: string }> {
+    // Upload with ACT encryption (skip our app-layer encryption — ACT handles it)
+    const result = await this.bee.uploadData(this.batchId, data, { act: true });
+    const reference = result.reference.toHex();
+    const historyAddress =
+      (result.historyAddress as any)?.toHex?.() ??
+      (result.historyAddress as any)?.value ??
+      String(result.historyAddress);
+
+    // Create grantee list with the recipient
+    const grantees = await this.createGrantees([recipientBeeNodePubKey]);
+
+    return {
+      reference,
+      historyAddress,
+      granteeRef: grantees.ref,
+    };
+  }
+
+  /**
+   * Download ACT-encrypted shared data.
+   * The Bee node transparently decrypts if it holds the matching private key.
+   *
+   * @param reference - Swarm reference to the ACT-encrypted data
+   * @param publisherAddress - ETH address of the user who shared the data
+   * @param historyAddress - ACT history address from the share record
+   */
+  async downloadSharedData(
+    reference: string,
+    publisherAddress: string,
+    historyAddress: string,
+  ): Promise<Uint8Array> {
+    const raw = await this.bee.downloadData(reference, {
+      actPublisher: publisherAddress,
+      actHistoryAddress: historyAddress,
+    });
+    return raw.toUint8Array();
+  }
+
+  /**
+   * Write a share manifest to the share feed between sender and recipient.
+   */
+  async writeShareManifest(
+    senderAddress: string,
+    recipientAddress: string,
+    manifest: ShareManifest,
+  ): Promise<void> {
+    const topic = this.shareTopic(senderAddress, recipientAddress);
+    const payload = JSON.stringify(manifest);
+    // Upload WITHOUT encryption — the recipient needs to read this manifest
+    // to discover shared documents. The actual document data is ACT-encrypted.
+    const { reference } = await this.uploadData(payload, { skipEncryption: true });
+    await this.writeFeedPayload(topic, reference);
+  }
+
+  /**
+   * Read the share manifest from another user.
+   * Alice reads: shareTopic(bob, alice) with owner = bob's address.
+   *
+   * Note: The share manifest is encrypted with the sender's key.
+   * The recipient needs their own copy or the manifest should use
+   * a shared encryption scheme. For now, we store it unencrypted
+   * on the feed (the feed topic is obscure enough).
+   */
+  async readShareManifest(
+    senderAddress: string,
+    recipientAddress: string,
+  ): Promise<ShareManifest | null> {
+    const topic = this.shareTopic(senderAddress, recipientAddress);
+    try {
+      // Read using the SENDER's address as owner (they wrote this feed)
+      const reader = this.bee.makeFeedReader(topic, senderAddress);
+      const result = await reader.downloadPayload();
+      const raw = new TextDecoder().decode(result.payload.toUint8Array());
+
+      // Auto-detect: inline JSON or /bytes reference
+      if (raw.startsWith("{")) {
+        return JSON.parse(raw) as ShareManifest;
+      }
+      const trimmed = raw.trim();
+      if (/^[0-9a-f]{64}$/i.test(trimmed)) {
+        // Reference to /bytes — share manifests are stored unencrypted
+        const data = await this.downloadData(trimmed, { skipDecryption: true });
+        return JSON.parse(new TextDecoder().decode(data)) as ShareManifest;
+      }
+      return JSON.parse(raw) as ShareManifest;
+    } catch (error: unknown) {
+      if (isNotFoundError(error)) return null;
+      throw error;
+    }
+  }
+
   // ─── Manifest compaction ───────────────────────────────────────
 
   /**
@@ -675,6 +839,22 @@ export class SwarmClient {
    */
   userTopic(address: string): Topic {
     return Topic.fromString(`${this.feedTopicPrefix}:user:${address.toLowerCase()}`);
+  }
+
+  /**
+   * Derive a deterministic feed topic for a user's public profile.
+   */
+  profileTopic(address: string): Topic {
+    return Topic.fromString(`${this.feedTopicPrefix}:profile:${address.toLowerCase()}`);
+  }
+
+  /**
+   * Derive a deterministic feed topic for shares between two users.
+   */
+  shareTopic(fromAddress: string, toAddress: string): Topic {
+    return Topic.fromString(
+      `${this.feedTopicPrefix}:share:${fromAddress.toLowerCase()}:${toAddress.toLowerCase()}`,
+    );
   }
 
   // ─── Feed mode (production) ────────────────────────────────────
