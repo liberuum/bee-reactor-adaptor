@@ -855,9 +855,10 @@ export class SwarmClient {
    * @param options.skipDecryption - Skip decryption when downloading referenced data
    */
   /**
-   * Read JSON data from a feed. The feed stores a native 32-byte reference
+   * Read JSON data from a feed. The feed stores a reference
    * (written by uploadReference) pointing to encrypted JSON on /bytes.
-   * Returns null if the feed doesn't exist or has stale/incompatible data.
+   * Uses downloadPayload to read the raw bytes, then dereferences.
+   * Returns null if the feed doesn't exist or has incompatible data.
    */
   private async readFeedJson<T>(
     topic: Topic,
@@ -865,8 +866,10 @@ export class SwarmClient {
     options?: { skipDecryption?: boolean },
   ): Promise<T | null> {
     const reader = this.bee.makeFeedReader(topic, ownerAddress);
-    const result = await reader.downloadReference();
-    const ref = result.reference.toHex();
+    const result = await reader.downloadPayload();
+    const bytes = result.payload.toUint8Array();
+    // uploadReference writes 32 raw bytes — convert to hex reference
+    const ref = Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("");
     const data = options?.skipDecryption
       ? await this.downloadData(ref, { skipDecryption: true })
       : await this.downloadData(ref);
