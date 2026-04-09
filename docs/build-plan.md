@@ -11,7 +11,7 @@ What's done and what's next for the Powerhouse Connect + Swarm decentralized sto
 - **SwarmClient** — Bee SDK wrapper with feed mode + bytes mode
 - **Wallet Signer** — deterministic secp256k1 key from `personal_sign` + `keccak256`
 - **AES-256-GCM encryption** — all uploads encrypted with wallet-derived key, auto-decrypt on download
-- **Feed optimization** — debounced doc manifest writes (3s), op batch accumulation, per-topic write lock
+- **Feed optimization** — debounced doc manifest writes (3s), op batch accumulation, per-topic write lock, native reference format (`uploadReference`), manifest compaction on startup
 - **Stamp management** — status, top-up, expand, create, cost estimation, USD pricing via CoinGecko
 - **ACT access control API** — `uploadData({act:true})`, `grantAccess()`, `revokeAccess()`
 
@@ -127,15 +127,7 @@ Publish updated packages to npm with all current features:
 
 ## Exploratory
 
-Low-priority optimizations and future infrastructure. Not blocking anything today.
-
-### Manifest-as-Reference (Feed Write Optimization)
-
-Currently `updateManifestViaFeed` uploads manifest JSON to `/bytes` and writes the reference as a 64-char hex text string via `writer.uploadPayload()`. The optimization: use `writer.uploadReference(batchId, reference)` instead, which writes 32 raw bytes (native Swarm reference) instead of 64 text bytes. The read side already auto-detects both formats. **Marginal gain** — saves ~32 bytes per feed write, cleaner read path.
-
-### Manifest Compaction
-
-Over time, a document manifest accumulates one `operationBatches` entry per flush. After weeks of editing, recovery downloads each batch individually (100+ HTTP requests). Compaction merges all batches into one: download all, concat ops, re-upload as single batch, rewrite manifest. New method `compactManifest(docId, maxBatches=20)` in `swarm-client.ts`, called on startup or periodically. **Only matters for heavily-edited documents** — debouncing already keeps growth slow.
+Future infrastructure ideas. Not blocking anything today.
 
 ### ETH Address → Signer Address Registry
 
