@@ -366,9 +366,9 @@ export class SwarmClient {
       const owner = this.getOwnerAddress();
       try {
         return await this.readFeedJson<SwarmUserManifest>(topic, owner);
-      } catch (error: unknown) {
-        if (isNotFoundError(error)) return null;
-        throw error;
+      } catch {
+        // Feed doesn't exist or has stale/incompatible format — treat as empty
+        return null;
       }
     }
 
@@ -857,6 +857,7 @@ export class SwarmClient {
   /**
    * Read JSON data from a feed. The feed stores a native 32-byte reference
    * (written by uploadReference) pointing to encrypted JSON on /bytes.
+   * Returns null if the feed doesn't exist or has stale/incompatible data.
    */
   private async readFeedJson<T>(
     topic: Topic,
@@ -879,9 +880,8 @@ export class SwarmClient {
     const owner = this.getOwnerAddress();
     try {
       return await this.readFeedJson<SwarmDocumentManifest>(topic, owner);
-    } catch (error: unknown) {
-      if (isNotFoundError(error)) return null;
-      throw error;
+    } catch {
+      return null;
     }
   }
 
