@@ -847,24 +847,16 @@ export class SwarmClient {
   // ─── Feed mode (production) ────────────────────────────────────
 
   /**
-   * Read document manifest from feed.
-   *
-   * Supports two feed formats (auto-detected):
-   * - **Reference format** (new): Feed entry is a 64-char hex reference to /bytes
-   *   containing the manifest JSON. Only 72 bytes in the SOC (8-byte timestamp + ref).
-   * - **Inline format** (legacy): Feed entry IS the manifest JSON directly.
-   *
-   * New writes always use reference format. Old feeds upgrade transparently on next write.
-   */
-  /**
-   * Read JSON data from a feed, auto-detecting the format:
-   * 1. Native reference (new) — 32-byte binary ref → dereference from /bytes → decrypt → parse
-   * 2. Text reference (old) — 64-char hex string → dereference from /bytes → decrypt → parse
-   * 3. Inline JSON (legacy) — raw JSON in the feed payload
+   * Read JSON data from a feed. The feed stores a native 32-byte reference
+   * (written by uploadReference) pointing to encrypted JSON on /bytes.
    *
    * @param topic Feed topic
    * @param ownerAddress Feed owner (use normalizeAddress for cross-user reads)
    * @param options.skipDecryption - Skip decryption when downloading referenced data
+   */
+  /**
+   * Read JSON data from a feed. The feed stores a native 32-byte reference
+   * (written by uploadReference) pointing to encrypted JSON on /bytes.
    */
   private async readFeedJson<T>(
     topic: Topic,
@@ -872,34 +864,12 @@ export class SwarmClient {
     options?: { skipDecryption?: boolean },
   ): Promise<T | null> {
     const reader = this.bee.makeFeedReader(topic, ownerAddress);
-
-    // Try native reference format first (new: uploadReference writes 32-byte binary)
-    try {
-      const result = await reader.downloadReference();
-      const ref = result.reference.toHex();
-      const data = options?.skipDecryption
-        ? await this.downloadData(ref, { skipDecryption: true })
-        : await this.downloadData(ref);
-      return JSON.parse(new TextDecoder().decode(data)) as T;
-    } catch {
-      // Not a valid reference — fall back to payload format
-    }
-
-    // Fall back to payload format (legacy: inline JSON or hex text ref)
-    const result = await reader.downloadPayload();
-    const raw = new TextDecoder().decode(result.payload.toUint8Array());
-
-    if (raw.startsWith("{")) {
-      return JSON.parse(raw) as T;
-    }
-    const trimmed = raw.trim();
-    if (/^[0-9a-f]{64}$/i.test(trimmed)) {
-      const data = options?.skipDecryption
-        ? await this.downloadData(trimmed, { skipDecryption: true })
-        : await this.downloadData(trimmed);
-      return JSON.parse(new TextDecoder().decode(data)) as T;
-    }
-    return null;
+    const result = await reader.downloadReference();
+    const ref = result.reference.toHex();
+    const data = options?.skipDecryption
+      ? await this.downloadData(ref, { skipDecryption: true })
+      : await this.downloadData(ref);
+    return JSON.parse(new TextDecoder().decode(data)) as T;
   }
 
   private async readManifestFromFeed(
@@ -918,13 +888,8 @@ export class SwarmClient {
   /**
    * Write document manifest to feed using the reference pattern.
    *
-   * Instead of writing the full manifest JSON to the feed (which can be large
-   * and makes SOC writes slow), we:
-   * 1. Upload manifest JSON to /bytes (content-addressed, fast)
-   * 2. Write only the 64-char reference to the feed (72-byte SOC)
-   *
-   * This follows the Swarm "regenerate and publish" pattern (Etherjot pattern):
-   * feeds store pointers to immutable data, not the data itself.
+   * Upload manifest JSON to /bytes (encrypted), write 32-byte native reference to feed.
+   * Follows the Swarm "regenerate and publish" pattern.
    */
   private async updateManifestViaFeed(
     documentId: string,
@@ -938,20 +903,12 @@ export class SwarmClient {
   }
 
   /**
-   * Write payload to a feed, serialized per topic.
-   *
-   * Per Swarm docs: each feed index is write-once, and the recommended
-   * approach is to let bee-js find the next index automatically via
-   * `uploadPayload()` without specifying an index.
-   *
-   * The write lock ensures only one write per topic at a time,
-   * preventing two concurrent writers from getting the same
-   * `feedIndexNext` (which would cause a 400 SOC conflict).
-   */
-  /**
    * Write a /bytes reference to a feed using the native reference format.
    * Stores 32 raw bytes in the SOC (not 64 hex chars as text).
-   * Use downloadReference() on the read side.
+   *
+   * Per Swarm docs: each feed index is write-once. bee-js finds the next
+   * index automatically. The write lock ensures only one write per topic
+   * at a time, preventing SOC conflicts from concurrent writers.
    */
   private async writeFeedReference(topic: Topic, reference: string): Promise<void> {
     const topicHex = topic.toHex();
