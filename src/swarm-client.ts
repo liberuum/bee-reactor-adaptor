@@ -867,9 +867,10 @@ export class SwarmClient {
   ): Promise<T | null> {
     const reader = this.bee.makeFeedReader(topic, ownerAddress);
     const result = await reader.downloadPayload();
-    const bytes = result.payload.toUint8Array();
-    // uploadReference writes 32 raw bytes — convert to hex reference
-    const ref = Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("");
+    const payload = result.payload.toUint8Array();
+    // uploadReference writes [8-byte timestamp][32-byte reference] — skip timestamp
+    const refBytes = payload.slice(8, 40);
+    const ref = Array.from(refBytes).map(b => b.toString(16).padStart(2, "0")).join("");
     const data = options?.skipDecryption
       ? await this.downloadData(ref, { skipDecryption: true })
       : await this.downloadData(ref);
