@@ -166,3 +166,67 @@ Third parties can't decrypt without knowing both signer addresses.
 | Share manifest | `ph:v2:share:<0x_sender>:<0x_recipient>` | List of shared doc references (unencrypted) |
 
 **Note**: User and document topics include the `0x` prefix (legacy format). Profile and share topics also include `0x` for consistency. The `normalizeAddress()` function (strips `0x`) is only used for `bee.makeFeedReader()` owner parameter, never for topic strings.
+
+---
+
+## Scaling Syncing With Swarm
+
+### Cost Per Document (Current)
+
+Each document edit burst produces:
+- 1 × `/bytes` upload (encrypted op batch) — ~50-200ms
+- 1 × `/bytes` upload (document manifest JSON) — ~50-200ms
+- 1 × feed write (72-byte SOC reference) — ~200-500ms (includes `findNextIndex`)
+
+Then globally (debounced 3s after last doc flush):
+- 1 × `/bytes` upload (user manifest JSON) — ~50-200ms
+- 1 × feed write (72-byte SOC reference) — ~200-500ms
+
+**Per document**: ~3 Bee API calls, ~300-900ms.
+
+### Bee Node Throughput Limits
+
+A local Bee node (v2.7.1) sustains approximately:
+
+| Operation | Throughput | Notes |
+|-----------|-----------|-------|
+| `/bytes` uploads | ~50-100/sec | Content-addressed, fast |
+| `/bytes` downloads | ~100-200/sec | Local cache + network |
+| Feed reads | ~20-50/sec | SOC lookup |
+| Feed writes | ~5-10/sec | `findNextIndex` + SOC creation + propagation |
+
+**Feed writes are the bottleneck**: ~5-10 per second.
+
+### Scenarios
+
+| Scenario | Docs | Concurrent flushes | Feed writes | Est. time |
+|----------|------|--------------------|-------------|-----------|
+| Interactive editing | 1-5 | 1-2 | 2-4 | <3s |
+| Normal session | 10-20 | 5-10 | 20-40 | 5-10s |
+| Bulk import (100 docs) | 100 | 100 (all at once!) | 200+ | **30-60s+, risk of 400 errors** |
+| Large scale (1000+) | 1000 | 1000 | 2000+ | **needs architecture changes** |
+
+### The Problem: Bulk Import
+
+When 100 docs are created rapidly, all 3s debounce timers fire simultaneously:
+- 100 doc manifest flushes → 300 concurrent Bee API calls
+- Feed write lock serializes per-topic, but 100 topics in parallel overloads the node
+- User manifest updated 100 times (each doc flush triggers it)
+- Postage stamp bucket collisions cause 400 errors
+
+### Scaling Roadmap
+
+#### Phase 1: Concurrent Flush Throttle (Near-term — handles ~100 docs)
+- [x] **Max 5 concurrent doc flushes** — queue excess, process in order
+- [ ] **Batch user manifest updates** — accumulate, write once every 5-10s instead of per-doc
+- [ ] **Compaction on recovery** — if doc has >20 op batches, compact before downloading all
+
+#### Phase 2: Hierarchical Manifests (Medium-term — handles ~1000 docs)
+- [ ] **Drive-level manifests** — user manifest → drive manifests → doc manifests (less data per write)
+- [ ] **Incremental recovery** — only download docs modified since last sync (`lastSynced` timestamp)
+- [ ] **Parallel /bytes, serial feeds** — download all /bytes concurrently, serialize feed writes
+
+#### Phase 3: Server-Side Indexer (Long-term — handles ~10,000+ docs)
+- [ ] **Switchboard indexer** — watches Swarm feeds, maintains fast SQL index for client queries
+- [ ] **Chunk-level dedup** — shared ops across similar docs only uploaded once
+- [ ] **SwarmChannel + DocSync** — leverage reactor's sync protocol instead of custom feed-per-doc

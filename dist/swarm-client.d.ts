@@ -1,5 +1,5 @@
 import { Topic } from "@ethersphere/bee-js";
-import type { SwarmDocumentManifest, SwarmUserManifest, SwarmPublicProfile, ShareManifest, StampStatus } from "./types.js";
+import type { SwarmDocumentManifest, SwarmDriveManifest, SwarmUserManifest, SwarmPublicProfile, ShareManifest, StampStatus } from "./types.js";
 /**
  * Thin wrapper around the Bee SDK providing the specific operations
  * needed by the reactor storage adapter.
@@ -308,6 +308,20 @@ export declare class SwarmClient {
      * Derive a deterministic feed topic for shares between two users.
      */
     shareTopic(fromAddress: string, toAddress: string): Topic;
+    /**
+     * Derive a deterministic feed topic for a drive manifest.
+     */
+    driveTopic(driveId: string): Topic;
+    /**
+     * Read a drive manifest from its feed.
+     * Returns null if no manifest exists (new drive, or v1 user without drive feeds).
+     */
+    readDriveManifest(driveId: string): Promise<SwarmDriveManifest | null>;
+    /**
+     * Write a drive manifest to its feed.
+     * Uses the manifest-as-reference pattern (upload JSON to /bytes, write ref to feed).
+     */
+    updateDriveManifest(driveId: string, manifest: SwarmDriveManifest): Promise<void>;
     /**
      * Read document manifest from feed.
      *

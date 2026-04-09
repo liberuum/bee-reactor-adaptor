@@ -17,6 +17,8 @@ export type {
   KeyframeEntry,
   RetryTask,
   SwarmPublicProfile,
+  SwarmDriveManifest,
+  DriveDocumentEntry,
   ShareManifest,
   SharedDocumentEntry,
 } from "./types.js";

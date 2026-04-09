@@ -675,6 +675,51 @@ export class SwarmClient {
     shareTopic(fromAddress, toAddress) {
         return Topic.fromString(`${this.feedTopicPrefix}:share:${fromAddress.toLowerCase()}:${toAddress.toLowerCase()}`);
     }
+    // ─── Drive manifest (hierarchical v2) ──────────────────────────
+    /**
+     * Derive a deterministic feed topic for a drive manifest.
+     */
+    driveTopic(driveId) {
+        return Topic.fromString(`${this.feedTopicPrefix}:drive:${driveId}`);
+    }
+    /**
+     * Read a drive manifest from its feed.
+     * Returns null if no manifest exists (new drive, or v1 user without drive feeds).
+     */
+    async readDriveManifest(driveId) {
+        if (!this.useFeedMode)
+            return null;
+        const topic = this.driveTopic(driveId);
+        const owner = this.getOwnerAddress();
+        try {
+            const reader = this.bee.makeFeedReader(topic, owner);
+            const result = await reader.downloadPayload();
+            const raw = new TextDecoder().decode(result.payload.toUint8Array());
+            if (raw.startsWith("{")) {
+                return JSON.parse(raw);
+            }
+            const trimmed = raw.trim();
+            if (/^[0-9a-f]{64}$/i.test(trimmed)) {
+                const data = await this.downloadData(trimmed);
+                return JSON.parse(new TextDecoder().decode(data));
+            }
+            return null;
+        }
+        catch {
+            return null;
+        }
+    }
+    /**
+     * Write a drive manifest to its feed.
+     * Uses the manifest-as-reference pattern (upload JSON to /bytes, write ref to feed).
+     */
+    async updateDriveManifest(driveId, manifest) {
+        if (!this.useFeedMode)
+            return;
+        const topic = this.driveTopic(driveId);
+        const { reference } = await this.uploadData(JSON.stringify(manifest));
+        await this.writeFeedPayload(topic, reference);
+    }
     // ─── Feed mode (production) ────────────────────────────────────
     /**
      * Read document manifest from feed.

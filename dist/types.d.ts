@@ -104,6 +104,25 @@ export interface UserStampEntry {
     lastChecked: string;
 }
 /**
+ * Per-drive manifest stored on its own Swarm feed.
+ * Lists all documents belonging to a drive. This is the source of truth
+ * for drive-doc relationships — no more fragile docToDrive mapping.
+ *
+ * Feed topic: "{prefix}:drive:<driveId>"
+ */
+export interface SwarmDriveManifest {
+    driveId: string;
+    name: string;
+    /** Documents in this drive, indexed by documentId */
+    documents: Record<string, DriveDocumentEntry>;
+    updatedAt: string;
+}
+export interface DriveDocumentEntry {
+    documentType: string;
+    name: string;
+    lastUpdated: string;
+}
+/**
  * Stamp status returned by SwarmClient.getStampStatus()
  */
 export interface StampStatus {
