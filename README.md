@@ -111,10 +111,8 @@ Same wallet + same message = same key on any device. Deterministic. Portable. Su
 
 | Document | What it covers |
 |----------|---------------|
-| [architecture.md](docs/architecture.md) | How the integration works end-to-end: data flow, encryption, recovery, debouncing, drive-doc relationships, reactor internals |
-| [implementation-plan.md](docs/implementation-plan.md) | What's built, what's next, published packages, architecture diagram |
-| [sharing-drives-docs-plan.md](docs/sharing-drives-docs-plan.md) | Plan for encrypted document sharing between users via Swarm ACT |
-| [swarm-live-editing-research.md](docs/swarm-live-editing-research.md) | Research on multi-user live editing: SwarmChannel + DocSync, GSOC, PSS |
+| [architecture.md](docs/architecture.md) | How the integration works end-to-end: data flow, encryption, recovery, debouncing, folder structure, reactor internals |
+| [build-plan.md](docs/build-plan.md) | What's built, what's next: SwarmChannel, GSOC/PSS, ETH registry, ACT sharing |
 
 ## Roadmap
 
