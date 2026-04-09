@@ -28,14 +28,14 @@ Key endpoints used for sharing:
 ## Architecture: Three Steps
 
 ```
-Step 1: ACT Sharing (one-way snapshot)         <── Current target
+Step 1: Encrypted sharing (drive bundles)       ← DONE (April 8-9)
 Step 2: SwarmChannel + DocSync (live editing via polling, see swarm-live-editing-research.md)
 Step 3: SwarmChannel + GSOC/PSS (real-time notifications)
 ```
 
 ---
 
-## Step 1: ACT-Based Sharing (One-Way Snapshot)
+## Step 1: Encrypted Document Sharing — DONE
 
 ### What it does
 - Alice shares a document (or full drive) with Bob

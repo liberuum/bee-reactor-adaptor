@@ -216,11 +216,11 @@ On PSS received:
 ## Implementation Roadmap
 
 ```
-Current: Single-user sync to Swarm (swarm-plugin.ts)
+DONE: Single-user sync to Swarm (swarm-plugin.ts)
    ↓
-Step 1: ACT Sharing (one-way snapshot)              ← Building now
+DONE: Encrypted sharing (drive bundles, Phase C)
    ↓
-Step 2: SwarmChannel + polling (5-10s)              ← First live editing
+Step 2: SwarmChannel + polling (5-10s)              ← Next: live editing
    ↓
 Step 3: SwarmChannel + GSOC (sub-second)            ← Real-time notifications
    ↓

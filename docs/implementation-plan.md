@@ -228,8 +228,10 @@ When 100 docs are created rapidly, all 3s debounce timers fire simultaneously:
 - [ ] **Batch user manifest updates** — accumulate, write once every 5-10s instead of per-doc
 - [ ] **Compaction on recovery** — if doc has >20 op batches, compact before downloading all
 
-#### Phase 2: Hierarchical Manifests (Medium-term — handles ~1000 docs)
-- [ ] **Drive-level manifests** — user manifest → drive manifests → doc manifests (less data per write)
+#### Phase 2: Hierarchical Manifests — DONE (April 9)
+- [x] **Drive-level manifests** — user manifest → drive manifests → doc manifests
+- [x] **Slim user manifest** — drives only, no per-doc entries (v2 format)
+- [x] **Drive-bundle sharing** — Phase C, one upload per drive
 - [ ] **Incremental recovery** — only download docs modified since last sync (`lastSynced` timestamp)
 - [ ] **Parallel /bytes, serial feeds** — download all /bytes concurrently, serialize feed writes
 

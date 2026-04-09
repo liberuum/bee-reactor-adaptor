@@ -192,36 +192,34 @@ interface DriveDocumentEntry {
 }
 ```
 
-## Implementation Phases
+## Implementation Status
 
-### Phase A: Add drive manifests (additive, backward compatible)
-1. Add `SwarmDriveManifest` type and `driveTopic()` to SwarmClient
-2. Add `readDriveManifest()` / `updateDriveManifest()` methods
-3. On doc flush: write drive manifest in addition to user manifest
-4. On recovery: try reading drive manifests first, fall back to flat user manifest
-5. No breaking changes — old manifests still work
+### Phase A: Drive manifests — DONE (April 9)
+- `SwarmDriveManifest` type + `driveTopic()` in SwarmClient
+- `readDriveManifest()` / `updateDriveManifest()` methods
+- Doc flush writes drive manifest alongside doc manifest (debounced per drive)
+- Recovery reads drive manifests first, falls back to flat user manifest (v1 compat)
 
-### Phase B: Slim down user manifest
-1. Stop writing per-doc entries to user manifest
-2. User manifest only contains drive references + metadata
-3. Add `version: 2` flag
-4. Migration: on read, if v1 detected, write drive manifests + upgrade to v2
+### Phase B: Slim user manifest — DONE (April 9)
+- User manifest writes drives only (name, lastUpdated), no per-doc entries
+- Recovery uses drive manifests as sole source of truth for doc grouping
+- UI cache populated from drive manifests for Settings tree view
 
-### Phase C: Sharing via drive feeds
-1. Share a drive = share the driveId + signer address
-2. Recipient reads the drive feed directly → gets doc list
-3. No need for separate share manifest entries per doc
+### Phase C: Drive-bundle sharing — DONE (April 9)
+- Share groups docs by drive, uploads ONE encrypted bundle per drive
+- Import downloads one bundle per drive, unpacks and creates each doc
+- Single doc or full drive sharing both work through the same mechanism
 
 ## Impact on Existing Bugs
 
 | Bug | Fixed? | How |
 |-----|--------|-----|
-| Doc-to-drive linking broken | **YES** | Docs are INSIDE drive manifests — no `docToDrive` map, no `lastSeenDriveId`, no `findParentDrive()` |
-| Multi-drive hydration collapses | **YES** | Each drive has its own feed with its own doc list — recovery is naturally per-drive |
-| Drive dedup on import | **Partially** | User manifest's drive list is a persistent registry to check by name (replaces sessionStorage) |
-| User manifest too large | **YES** | Slim manifest with just drive references (~200 bytes vs 10-50KB) |
-| Stale entries after clear | **YES** | Clear per-drive feed, user manifest keeps identity |
-| Swarm propagation delays | **NO** | Network issue — needs separate retry logic with backoff |
+| Doc-to-drive linking broken | **FIXED** | Docs are INSIDE drive manifests — verified with multi-doc drives |
+| Multi-drive hydration collapses | **FIXED** | Each drive has its own feed — verified with 2-drive recovery |
+| Drive dedup on import | **FIXED** | sessionStorage + drive name matching |
+| User manifest too large | **FIXED** | Slim manifest with just drive references |
+| Stale entries after clear | **FIXED** | Clear per-drive feed, user manifest keeps identity |
+| Swarm propagation delays | **FIXED** | Import retries 3 times with backoff (0s, 3s, 8s) |
 
 ## Clear Storage Behavior
 
