@@ -98,8 +98,8 @@
 ### Medium Term
 
 - [ ] **ETH address → signer address registry** — on-chain mapping contract on Gnosis Chain so users can share by ETH address instead of Swarm ID
-- [ ] **Step 2: SwarmChannel + DocSync** — implement a `SwarmChannel` (Channel interface) that uses Swarm feeds as transport for the reactor's existing DocSync protocol. Enables live collaborative editing with 5-10s polling latency. See `swarm-live-editing-research.md`
-- [ ] **Mode 2: Swarm Only** — Connect without Switchboard, full sync via Swarm feeds only
+- [x] **Mode 2: Swarm Only** — DONE. Connect syncs directly with Swarm via the plugin, no Switchboard needed. This is what we've built and tested.
+- [ ] **SwarmChannel + DocSync** — implement a `SwarmChannel` (Channel interface) that uses Swarm feeds as transport for the reactor's existing DocSync protocol. Enables live collaborative editing with 5-10s polling latency. See `swarm-live-editing-research.md`
 
 ### Long Term
 
