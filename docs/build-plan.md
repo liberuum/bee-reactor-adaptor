@@ -67,14 +67,14 @@ What's done and what's next for the Powerhouse Connect + Swarm decentralized sto
 
 ### 1. Manifest-as-Reference (Feed Write Optimization)
 
-Upload manifest JSON to `/bytes` first, then write only the 64-char reference to the feed using bee-js `FeedWriter.uploadReference(batchId, reference)`. This writes exactly 72 bytes (8-byte timestamp + 64-byte ref) instead of the full manifest JSON.
+Currently `updateManifestViaFeed` uploads manifest JSON to `/bytes` and writes the reference as a text string via `writer.uploadPayload()`. The optimization is to use `FeedWriter.uploadReference(batchId, reference)` instead, which writes exactly 72 bytes (8-byte timestamp + 64-byte ref) as a native Swarm reference — smaller and faster than a text payload.
 
 **Files:** `bee-reactor-adaptor/src/swarm-client.ts`
 
 Changes:
-- `updateManifestViaFeed`: upload to `/bytes` → `writer.uploadReference()` instead of `writer.uploadPayload()`
-- `readManifestFromFeed`: auto-detect — if payload is 64-char hex, dereference from `/bytes`; if starts with `{`, it's inline JSON
-- Apply same pattern to `updateUserManifest` / `updateDriveManifest`
+- `writeFeedPayload`: switch from `writer.uploadPayload(batchId, data)` to `writer.uploadReference(batchId, reference)` when writing a `/bytes` reference
+- `readManifestFromFeed`: already handles both formats (auto-detects reference vs inline JSON)
+- Apply same pattern to `updateDriveManifest` / `updateUserManifest` feed writes
 
 ### 2. Manifest Compaction
 

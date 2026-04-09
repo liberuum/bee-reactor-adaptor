@@ -331,10 +331,16 @@ The plugin maintains several maps and flags at module scope (persisted across fu
 |-------|------|---------|
 | `syncedRevisions` | `Map<string, number>` | Last synced op index per document — prevents re-uploading |
 | `docToDrive` | `Map<string, string>` | Confirmed document → drive relationships |
+| `driveNames` | `Map<string, string>` | Known drive names (for manifest writes) |
 | `driveManifestCache` | `Map<string, SwarmDriveManifest>` | Local source of truth for drive contents (avoids stale Swarm reads) |
-| `pendingManifests` | `Map<string, manifest>` | In-memory manifests waiting for debounce flush |
+| `pendingManifests` | `Map<string, manifest>` | In-memory doc manifests waiting for debounce flush |
 | `pendingOps` | `Map<string, ops[]>` | Buffered operations waiting for batch upload |
 | `docManifestTimers` | `Map<string, timeout>` | Active debounce timers per document |
+| `pendingDriveUpdates` | `Map<string, Map<docId, entry>>` | Pending drive manifest updates (batched) |
+| `driveManifestTimers` | `Map<string, timeout>` | Active debounce timers per drive manifest |
+| `driveManifestFlushInProgress` | `Map<string, Promise>` | Write lock per drive manifest |
+| `pendingManifestDriveUpdates` | `Map<string, entry>` | Pending user manifest drive entries |
+| `manifestFlushTimer` | `timeout \| null` | Active debounce timer for user manifest |
 | `lastSeenDriveId` | `string` | Most recent drive ID from subscriber events |
 | `syncPaused` | `boolean` | Pauses all sync during recovery |
 | `hydrationRan` | `boolean` (sessionStorage) | Prevents duplicate recovery across HMR |
