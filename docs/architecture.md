@@ -73,6 +73,36 @@ is detected by its absence — backward compatible.
 
 ---
 
+## Upload / Encryption / Download / Decryption
+
+Two separate layers handle data storage and discovery:
+
+```
+WRITE PATH (upload):
+
+  1. Plugin calls uploadData(JSON.stringify(ops))
+  2. SwarmClient encrypts with AES-256-GCM → [SWE prefix][IV][ciphertext+tag]
+  3. Encrypted bytes uploaded to Swarm /bytes → returns 64-char content hash (reference)
+  4. Reference written to feed via writeFeedPayload(topic, reference)
+     Feed SOC contains ONLY the reference (a pointer) — never encrypted data
+
+READ PATH (download):
+
+  1. Reader reads feed → gets reference (64-char hex hash)
+  2. Uses reference to download from /bytes → gets encrypted bytes
+  3. SwarmClient detects SWE prefix (0x535745) → decrypts with AES-256-GCM
+  4. Returns plaintext JSON
+```
+
+**Key principle: encryption lives at the `/bytes` layer, NOT the feed layer.**
+Feeds store plain-text references (content hashes). The data those references point to is encrypted. Anyone can read the feed and get the reference, but they can't decrypt the data without the wallet-derived AES key.
+
+This separation is why feed-level optimizations (like `uploadReference` vs `uploadPayload`) don't affect encryption — they only change how the 64-char hash is stored in the SOC, not the encrypted data at `/bytes`.
+
+**Sharing uses a different key**: instead of the wallet-derived key, shared data is encrypted with `SHA-256(sender_address:recipient_address)`. Both parties can derive the same key. The share manifest itself is unencrypted (the feed topic is obscure enough — requires knowing both signer addresses).
+
+---
+
 ## The Three Layers
 
 ### Layer 1: bee-reactor-adapter (npm package)
@@ -81,19 +111,21 @@ The `SwarmClient` class wraps the Bee SDK and provides:
 
 | Method | What it does |
 |--------|-------------|
-| `uploadData(data)` | Encrypt + upload to /bytes → returns content hash |
+| `uploadData(data)` | Encrypt with AES-256-GCM + upload to /bytes → returns content hash |
 | `downloadData(ref)` | Download from /bytes + auto-decrypt if SWE prefix detected |
-| `updateManifest(docId, manifest)` | Upload manifest JSON to /bytes, write hash to feed |
-| `readManifest(docId)` | Read feed → dereference hash → download + decrypt manifest |
-| `updateUserManifest(address, manifest)` | Same pattern for the user-level index |
-| `readUserManifest(address)` | Read user's document index from their feed |
+| `uploadSharedData(data, sender, recipient)` | Encrypt with SHA-256 shared key + upload to /bytes |
+| `downloadSharedData(ref, sender, recipient)` | Download from /bytes + decrypt with shared key |
+| `updateManifest(docId, manifest)` | Upload manifest to /bytes (encrypted), write reference to feed |
+| `readManifest(docId)` | Read feed → dereference → download from /bytes → decrypt → parse |
+| `updateDriveManifest(driveId, manifest)` | Same pattern for drive-level manifest |
+| `updateUserManifest(address, manifest)` | Same pattern for user-level index |
 | `getStampStatus()` | Postage stamp health, capacity, cost |
-| `grantAccess() / revokeAccess()` | ACT encryption for sharing (planned) |
+| `grantAccess() / revokeAccess()` | ACT access control (built, not yet integrated into sharing) |
 
 The client also handles:
 - **Per-topic write locks** — prevents concurrent feed writes from getting the same index
 - **3-retry with backoff** — handles Swarm propagation delays on feed writes
-- **Auto-detect feed format** — legacy inline JSON vs new reference format
+- **Auto-detect feed format** — reference (64-char hex) vs inline JSON (legacy)
 
 ### Layer 2: swarm-plugin.ts (processor in swarm-doc-model)
 
