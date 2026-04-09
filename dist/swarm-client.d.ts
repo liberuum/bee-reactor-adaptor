@@ -323,38 +323,33 @@ export declare class SwarmClient {
      */
     updateDriveManifest(driveId: string, manifest: SwarmDriveManifest): Promise<void>;
     /**
-     * Read document manifest from feed.
+     * Read JSON data from a feed. The feed stores a native 32-byte reference
+     * (written by uploadReference) pointing to encrypted JSON on /bytes.
      *
-     * Supports two feed formats (auto-detected):
-     * - **Reference format** (new): Feed entry is a 64-char hex reference to /bytes
-     *   containing the manifest JSON. Only 72 bytes in the SOC (8-byte timestamp + ref).
-     * - **Inline format** (legacy): Feed entry IS the manifest JSON directly.
-     *
-     * New writes always use reference format. Old feeds upgrade transparently on next write.
+     * @param topic Feed topic
+     * @param ownerAddress Feed owner (use normalizeAddress for cross-user reads)
+     * @param options.skipDecryption - Skip decryption when downloading referenced data
      */
+    /**
+     * Read JSON data from a feed. The feed stores a 64-char hex reference
+     * (written by writeFeedPayload) pointing to encrypted JSON on /bytes.
+     */
+    private readFeedJson;
     private readManifestFromFeed;
     /**
      * Write document manifest to feed using the reference pattern.
      *
-     * Instead of writing the full manifest JSON to the feed (which can be large
-     * and makes SOC writes slow), we:
-     * 1. Upload manifest JSON to /bytes (content-addressed, fast)
-     * 2. Write only the 64-char reference to the feed (72-byte SOC)
-     *
-     * This follows the Swarm "regenerate and publish" pattern (Etherjot pattern):
-     * feeds store pointers to immutable data, not the data itself.
+     * Upload manifest JSON to /bytes (encrypted), write 32-byte native reference to feed.
+     * Follows the Swarm "regenerate and publish" pattern.
      */
     private updateManifestViaFeed;
     /**
-     * Write payload to a feed, serialized per topic.
+     * Write a string payload to a feed. Used to store /bytes references
+     * as 64-char hex text in the SOC.
      *
-     * Per Swarm docs: each feed index is write-once, and the recommended
-     * approach is to let bee-js find the next index automatically via
-     * `uploadPayload()` without specifying an index.
-     *
-     * The write lock ensures only one write per topic at a time,
-     * preventing two concurrent writers from getting the same
-     * `feedIndexNext` (which would cause a 400 SOC conflict).
+     * Per Swarm docs: each feed index is write-once. bee-js finds the next
+     * index automatically. The write lock ensures only one write per topic
+     * at a time, preventing SOC conflicts from concurrent writers.
      */
     private writeFeedPayload;
     private readManifestFromBytes;

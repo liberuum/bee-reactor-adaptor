@@ -48,3 +48,4 @@ export {
 } from "./wallet-signer.js";
 export type { SwarmSignerEntry } from "./wallet-signer.js";
 export { patchReactorBuilder } from "./patch-reactor-builder.js";
+export { swarmPluginProcessorBuilder } from "./swarm-plugin.js";

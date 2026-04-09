@@ -16,11 +16,17 @@
     "@ethersphere/bee-js": "^11.1.1"
   },
   "devDependencies": {
+    "@powerhousedao/reactor": "6.0.0-dev.163",
+    "@powerhousedao/reactor-browser": "6.0.0-dev.163",
+    "document-model": "6.0.0-dev.163",
     "tsx": "^4.21.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
   },
   "peerDependencies": {
+    "@powerhousedao/reactor": "*",
+    "@powerhousedao/reactor-browser": "*",
+    "document-model": "*",
     "kysely": "^0.27.0"
   },
   "publishConfig": {

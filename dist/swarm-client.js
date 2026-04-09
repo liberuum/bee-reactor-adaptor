@@ -264,31 +264,18 @@ export class SwarmClient {
      * Returns null if no manifest exists.
      */
     async readUserManifest(address) {
-        const key = `user:${address.toLowerCase()}`;
         if (this.useFeedMode) {
             const topic = this.userTopic(address);
             const owner = this.getOwnerAddress();
             try {
-                const reader = this.bee.makeFeedReader(topic, owner);
-                const result = await reader.downloadPayload();
-                const raw = new TextDecoder().decode(result.payload.toUint8Array());
-                // Auto-detect format: inline JSON (legacy) vs /bytes reference (new)
-                if (raw.startsWith("{")) {
-                    return JSON.parse(raw);
-                }
-                const trimmed = raw.trim();
-                if (/^[0-9a-f]{64}$/i.test(trimmed)) {
-                    const data = await this.downloadData(trimmed);
-                    return JSON.parse(new TextDecoder().decode(data));
-                }
-                return JSON.parse(raw);
+                return await this.readFeedJson(topic, owner);
             }
-            catch (error) {
-                if (isNotFoundError(error))
-                    return null;
-                throw error;
+            catch {
+                // Feed doesn't exist or has stale/incompatible format — treat as empty
+                return null;
             }
         }
+        const key = `user:${address.toLowerCase()}`;
         const reference = this.manifestIndex.get(key);
         if (!reference)
             return null;
@@ -499,22 +486,9 @@ export class SwarmClient {
         const topic = this.profileTopic(signerAddress);
         const ownerAddr = normalizeAddress(signerAddress);
         try {
-            const reader = this.bee.makeFeedReader(topic, ownerAddr);
-            const result = await reader.downloadPayload();
-            const raw = new TextDecoder().decode(result.payload.toUint8Array());
-            // Profile data is unencrypted — parse directly or dereference
-            if (raw.startsWith("{")) {
-                return JSON.parse(raw);
-            }
-            const trimmed = raw.trim();
-            if (/^[0-9a-f]{64}$/i.test(trimmed)) {
-                const data = await this.downloadData(trimmed, { skipDecryption: true });
-                return JSON.parse(new TextDecoder().decode(data));
-            }
-            return null;
+            return await this.readFeedJson(topic, ownerAddr, { skipDecryption: true });
         }
         catch {
-            // Any error (404, parse, network) → no profile
             return null;
         }
     }
@@ -571,23 +545,9 @@ export class SwarmClient {
         const senderNorm = normalizeAddress(senderAddress);
         const topic = this.shareTopic(senderAddress, recipientAddress);
         try {
-            // Read using the SENDER's address as owner (they wrote this feed)
-            const reader = this.bee.makeFeedReader(topic, senderNorm);
-            const result = await reader.downloadPayload();
-            const raw = new TextDecoder().decode(result.payload.toUint8Array());
-            // Auto-detect: inline JSON or /bytes reference
-            if (raw.startsWith("{")) {
-                return JSON.parse(raw);
-            }
-            const trimmed = raw.trim();
-            if (/^[0-9a-f]{64}$/i.test(trimmed)) {
-                const data = await this.downloadData(trimmed, { skipDecryption: true });
-                return JSON.parse(new TextDecoder().decode(data));
-            }
-            return null;
+            return await this.readFeedJson(topic, senderNorm, { skipDecryption: true });
         }
         catch {
-            // Any error (404, parse, network) → no share manifest
             return null;
         }
     }
@@ -692,18 +652,7 @@ export class SwarmClient {
         const topic = this.driveTopic(driveId);
         const owner = this.getOwnerAddress();
         try {
-            const reader = this.bee.makeFeedReader(topic, owner);
-            const result = await reader.downloadPayload();
-            const raw = new TextDecoder().decode(result.payload.toUint8Array());
-            if (raw.startsWith("{")) {
-                return JSON.parse(raw);
-            }
-            const trimmed = raw.trim();
-            if (/^[0-9a-f]{64}$/i.test(trimmed)) {
-                const data = await this.downloadData(trimmed);
-                return JSON.parse(new TextDecoder().decode(data));
-            }
-            return null;
+            return await this.readFeedJson(topic, owner);
         }
         catch {
             return null;
@@ -722,53 +671,41 @@ export class SwarmClient {
     }
     // ─── Feed mode (production) ────────────────────────────────────
     /**
-     * Read document manifest from feed.
+     * Read JSON data from a feed. The feed stores a native 32-byte reference
+     * (written by uploadReference) pointing to encrypted JSON on /bytes.
      *
-     * Supports two feed formats (auto-detected):
-     * - **Reference format** (new): Feed entry is a 64-char hex reference to /bytes
-     *   containing the manifest JSON. Only 72 bytes in the SOC (8-byte timestamp + ref).
-     * - **Inline format** (legacy): Feed entry IS the manifest JSON directly.
-     *
-     * New writes always use reference format. Old feeds upgrade transparently on next write.
+     * @param topic Feed topic
+     * @param ownerAddress Feed owner (use normalizeAddress for cross-user reads)
+     * @param options.skipDecryption - Skip decryption when downloading referenced data
      */
+    /**
+     * Read JSON data from a feed. The feed stores a 64-char hex reference
+     * (written by writeFeedPayload) pointing to encrypted JSON on /bytes.
+     */
+    async readFeedJson(topic, ownerAddress, options) {
+        const reader = this.bee.makeFeedReader(topic, ownerAddress);
+        const result = await reader.downloadPayload();
+        const ref = new TextDecoder().decode(result.payload.toUint8Array()).trim();
+        const data = options?.skipDecryption
+            ? await this.downloadData(ref, { skipDecryption: true })
+            : await this.downloadData(ref);
+        return JSON.parse(new TextDecoder().decode(data));
+    }
     async readManifestFromFeed(documentId) {
         const topic = this.documentTopic(documentId);
         const owner = this.getOwnerAddress();
         try {
-            const reader = this.bee.makeFeedReader(topic, owner);
-            const result = await reader.downloadPayload();
-            const raw = new TextDecoder().decode(result.payload.toUint8Array());
-            // Auto-detect format: if it starts with '{', it's inline JSON (legacy)
-            if (raw.startsWith("{")) {
-                return JSON.parse(raw);
-            }
-            // Otherwise it's a /bytes reference — dereference it
-            const trimmed = raw.trim();
-            if (/^[0-9a-f]{64}$/i.test(trimmed)) {
-                const data = await this.downloadData(trimmed);
-                const json = new TextDecoder().decode(data);
-                return JSON.parse(json);
-            }
-            // Unknown format — not a valid manifest
-            return null;
+            return await this.readFeedJson(topic, owner);
         }
-        catch (error) {
-            if (isNotFoundError(error)) {
-                return null;
-            }
-            throw error;
+        catch {
+            return null;
         }
     }
     /**
      * Write document manifest to feed using the reference pattern.
      *
-     * Instead of writing the full manifest JSON to the feed (which can be large
-     * and makes SOC writes slow), we:
-     * 1. Upload manifest JSON to /bytes (content-addressed, fast)
-     * 2. Write only the 64-char reference to the feed (72-byte SOC)
-     *
-     * This follows the Swarm "regenerate and publish" pattern (Etherjot pattern):
-     * feeds store pointers to immutable data, not the data itself.
+     * Upload manifest JSON to /bytes (encrypted), write 32-byte native reference to feed.
+     * Follows the Swarm "regenerate and publish" pattern.
      */
     async updateManifestViaFeed(documentId, manifest) {
         const topic = this.documentTopic(documentId);
@@ -778,15 +715,12 @@ export class SwarmClient {
         await this.writeFeedPayload(topic, reference);
     }
     /**
-     * Write payload to a feed, serialized per topic.
+     * Write a string payload to a feed. Used to store /bytes references
+     * as 64-char hex text in the SOC.
      *
-     * Per Swarm docs: each feed index is write-once, and the recommended
-     * approach is to let bee-js find the next index automatically via
-     * `uploadPayload()` without specifying an index.
-     *
-     * The write lock ensures only one write per topic at a time,
-     * preventing two concurrent writers from getting the same
-     * `feedIndexNext` (which would cause a 400 SOC conflict).
+     * Per Swarm docs: each feed index is write-once. bee-js finds the next
+     * index automatically. The write lock ensures only one write per topic
+     * at a time, preventing SOC conflicts from concurrent writers.
      */
     async writeFeedPayload(topic, payload) {
         const topicHex = topic.toHex();

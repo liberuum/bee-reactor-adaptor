@@ -8,4 +8,5 @@ export { SwarmConnectPlugin } from "./connect-plugin.js";
 export { encrypt, decrypt, isEncrypted, encryptJSON, decryptJSON, } from "./swarm-crypto.js";
 export { getOrDeriveSwarmKey, requestSwarmKeyFromWallet, loadCachedSwarmKey, cacheSwarmKey, clearCachedSwarmKey, buildSignMessage, deriveSwarmKey, } from "./wallet-signer.js";
 export { patchReactorBuilder } from "./patch-reactor-builder.js";
+export { swarmPluginProcessorBuilder } from "./swarm-plugin.js";
 //# sourceMappingURL=index.js.map

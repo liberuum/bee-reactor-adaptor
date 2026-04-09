@@ -13,4 +13,5 @@ export { encrypt, decrypt, isEncrypted, encryptJSON, decryptJSON, } from "./swar
 export { getOrDeriveSwarmKey, requestSwarmKeyFromWallet, loadCachedSwarmKey, cacheSwarmKey, clearCachedSwarmKey, buildSignMessage, deriveSwarmKey, } from "./wallet-signer.js";
 export type { SwarmSignerEntry } from "./wallet-signer.js";
 export { patchReactorBuilder } from "./patch-reactor-builder.js";
+export { swarmPluginProcessorBuilder } from "./swarm-plugin.js";
 //# sourceMappingURL=index.d.ts.map
