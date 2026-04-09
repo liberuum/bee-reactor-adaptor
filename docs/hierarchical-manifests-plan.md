@@ -214,10 +214,77 @@ interface DriveDocumentEntry {
 
 ## Impact on Existing Bugs
 
-| Bug | How hierarchical fixes it |
-|-----|--------------------------|
-| Doc-to-drive linking broken | Docs are INSIDE drive manifests — no need for `docToDrive` map |
-| Multi-drive hydration collapses | Each drive has its own manifest with its own doc list |
-| Drive dedup on import | Drive identity is by driveId + name, stored in its own feed |
-| User manifest too large | Slim user manifest with just drive references |
-| Stale entries after clear | Clear per-drive feed, not one giant manifest |
+| Bug | Fixed? | How |
+|-----|--------|-----|
+| Doc-to-drive linking broken | **YES** | Docs are INSIDE drive manifests — no `docToDrive` map, no `lastSeenDriveId`, no `findParentDrive()` |
+| Multi-drive hydration collapses | **YES** | Each drive has its own feed with its own doc list — recovery is naturally per-drive |
+| Drive dedup on import | **Partially** | User manifest's drive list is a persistent registry to check by name (replaces sessionStorage) |
+| User manifest too large | **YES** | Slim manifest with just drive references (~200 bytes vs 10-50KB) |
+| Stale entries after clear | **YES** | Clear per-drive feed, user manifest keeps identity |
+| Swarm propagation delays | **NO** | Network issue — needs separate retry logic with backoff |
+
+## Clear Storage Behavior
+
+"Clear Swarm Storage" should be surgical — reset data, keep identity:
+
+```
+KEEP (user identity):
+  ├─ address
+  ├─ beeNodePublicKey
+  ├─ stamps info
+  ├─ version
+  └─ profile feed (public identity — don't touch)
+
+CLEAR (user data):
+  ├─ user manifest: drives → {}, shares → {}
+  ├─ each drive feed: write empty { driveId, name, documents: {} }
+  └─ local PGlite: separate "Danger Zone" action (not part of Swarm clear)
+
+LEAVE ALONE (expire naturally with stamp):
+  ├─ doc feeds (operation batches)
+  ├─ share feeds
+  └─ /bytes data (content-addressed, immutable)
+```
+
+### Why Keep Identity?
+
+- No wallet re-signing needed after clear
+- Stamp monitoring continues (TTL alerts still work)
+- Public profile stays discoverable (other users can still look you up)
+- Fresh sync from local PGlite will re-populate drives
+
+### Why NOT Delete Doc Feeds?
+
+- Doc feeds are write-once-per-index — can't "delete" a SOC, only stop writing
+- Old SOCs expire when the postage stamp runs out (natural cleanup)
+- Clearing the drive manifest effectively "unlinks" docs — they become unreachable
+- If user re-syncs the same docs, new op batches are uploaded (old ones orphaned but harmless)
+
+### Implementation
+
+```typescript
+async function clearSwarmStorage(client: SwarmClient, address: string): Promise<void> {
+  // 1. Read current user manifest to get drive list
+  const manifest = await client.readUserManifest(address);
+  
+  // 2. Clear each drive manifest feed
+  if (manifest?.drives) {
+    for (const driveId of Object.keys(manifest.drives)) {
+      await client.updateDriveManifest(driveId, {
+        driveId, name: "", documents: {}, updatedAt: new Date().toISOString(),
+      });
+    }
+  }
+  
+  // 3. Write slim user manifest (keep identity, clear data)
+  await client.updateUserManifest(address, {
+    version: 2,
+    address: manifest?.address ?? address,
+    beeNodePublicKey: manifest?.beeNodePublicKey,
+    drives: {},
+    shares: {},
+    stamps: manifest?.stamps ?? {},
+    updatedAt: new Date().toISOString(),
+  });
+}
+```
