@@ -31,15 +31,26 @@
 - **Address normalization** — `getOwnerAddress()` always `0x`-prefixed, `normalizeAddress()` only for `makeFeedReader` owner param, topics use `address.toLowerCase()` (preserves `0x`, matches legacy feeds)
 - **Robust error handling** — `isNotFoundError` handles bee-js v11 error shapes, `readShareManifest`/`readPublicProfile` catch-all (no JSON parse crashes)
 
+### Hierarchical Manifests v2 (April 9 — NEW)
+
+- **Per-drive manifest feeds** — each drive has its own Swarm feed listing its documents
+- **Drive manifest writes** — debounced per-drive (2s), written alongside doc manifests
+- **Recovery uses drive manifests** — v2 path reads per-drive feeds for accurate doc grouping, v1 fallback for old manifests
+- **Concurrent flush throttle** — max 5 parallel doc manifest flushes (prevents Bee node overload on bulk import)
+- **Pre-populated docToDrive** — loaded from user manifest on startup for v1 compat
+- **Clear storage preserves identity** — clears drive+share data, keeps address/pubkey/stamps
+
 ### Connect Plugin (`swarm-doc-model/processors/swarm-plugin.ts`)
 
 - Initializes asynchronously at processor registration (doesn't block Connect startup)
 - Subscribes to ALL reactor document changes, uploads new ops to Swarm
-- Multi-drive sync + recovery with correct drive names
-- Debounced document manifest writes (3s per doc) + debounced user manifest (3s)
+- **Hierarchical v2**: writes drive manifests alongside doc manifests
+- **Recovery**: reads drive manifests first (v2), falls back to flat user manifest (v1)
+- Debounced document manifest writes (3s per doc) + debounced user manifest (3s) + debounced drive manifest (2s)
 - Op batch accumulation — all ops per flush uploaded as ONE /bytes batch
+- Concurrent flush throttle — max 5 parallel, queue excess
 - Clean manifest after recovery (prevents stale drive accumulation)
-- `beforeunload` handler flushes pending manifests
+- `beforeunload` handler flushes pending doc + drive manifests
 - `sessionStorage` hydration guard (survives Vite HMR)
 - Exposes on `ph.swarm`: `clearStorage()`, `reconnect()`, `refreshBalances()`, `setBeeUrl()`, `shareDocuments()`, `importSharedDocuments()`, `lookupUser()`
 
@@ -82,15 +93,15 @@
 
 ### Near Term
 
-- [ ] **Publish Connect swarm.23** — batch share API, Bee URL input, checkbox tree
-- [ ] **Publish adapter 0.19.1** — sharing methods, encryption, address normalization (already published)
-- [x] **Fix doc-to-drive linking** — hierarchical manifests v2 (drive feeds)
-- [x] **Fix multi-drive hydration** — recovery reads drive manifests
+- [ ] **Publish Connect swarm.23 + adapter 0.20.0** — hierarchical manifests, batch share, Bee URL, checkbox tree, all bug fixes
+- [ ] **Phase B: Slim user manifest** — stop writing per-doc entries to user manifest, add `version: 2` flag, migrate on read
+- [ ] **Swarm propagation retry** — auto-retry with exponential backoff when import gets 404 (data not yet propagated)
 - [ ] **Settings UI design polish** — match Connect aesthetic more closely
 
 ### Medium Term
 
 - [ ] **ETH address → signer address registry** — on-chain mapping contract on Gnosis Chain so users can share by ETH address instead of Swarm ID
+- [ ] **Phase C: Sharing via drive feeds** — share a drive = share a feed reference, recipient reads drive manifest directly
 - [ ] **Step 2: SwarmChannel + DocSync** — implement a `SwarmChannel` (Channel interface) that uses Swarm feeds as transport for the reactor's existing DocSync protocol. Enables live collaborative editing with 5-10s polling latency. See `swarm-live-editing-research.md`
 - [ ] **Mode 2: Swarm Only** — Connect without Switchboard, full sync via Swarm feeds only
 
