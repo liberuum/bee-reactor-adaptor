@@ -4,7 +4,7 @@ export { SwarmOperationStore } from "./swarm-operation-store.js";
 export { SwarmKeyframeStore } from "./swarm-keyframe-store.js";
 export { SwarmHydrator } from "./swarm-hydrator.js";
 export { SwarmSyncReadModel } from "./swarm-sync-read-model.js";
-export type { BeeAdapterConfig, SwarmDocumentManifest, SwarmUserManifest, UserDocumentEntry, UserDriveEntry, UserStampEntry, StampStatus, OperationBatchEntry, KeyframeEntry, RetryTask, SwarmPublicProfile, SwarmDriveManifest, DriveDocumentEntry, ShareManifest, SharedDocumentEntry, } from "./types.js";
+export type { BeeAdapterConfig, SwarmDocumentManifest, SwarmUserManifest, UserDocumentEntry, UserDriveEntry, UserStampEntry, StampStatus, OperationBatchEntry, KeyframeEntry, RetryTask, SwarmPublicProfile, SwarmDriveManifest, DriveDocumentEntry, DriveFolderEntry, ShareManifest, SharedDocumentEntry, } from "./types.js";
 export type { IOperationStore } from "./swarm-operation-store.js";
 export type { IKeyframeStore } from "./swarm-keyframe-store.js";
 export type { HydrationResult } from "./swarm-hydrator.js";

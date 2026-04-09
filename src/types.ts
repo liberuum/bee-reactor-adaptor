@@ -143,13 +143,24 @@ export interface SwarmDriveManifest {
   /** Documents in this drive, indexed by documentId */
   documents: Record<string, DriveDocumentEntry>;
 
+  /** Folders in this drive, indexed by folderId */
+  folders?: Record<string, DriveFolderEntry>;
+
   updatedAt: string;
 }
 
 export interface DriveDocumentEntry {
   documentType: string;
   name: string;
+  /** Parent folder ID (undefined = drive root) */
+  parentFolder?: string;
   lastUpdated: string;
+}
+
+export interface DriveFolderEntry {
+  name: string;
+  /** Parent folder ID (undefined = drive root) */
+  parentFolder?: string;
 }
 
 /**

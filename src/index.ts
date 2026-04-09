@@ -19,6 +19,7 @@ export type {
   SwarmPublicProfile,
   SwarmDriveManifest,
   DriveDocumentEntry,
+  DriveFolderEntry,
   ShareManifest,
   SharedDocumentEntry,
 } from "./types.js";
