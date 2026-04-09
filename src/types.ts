@@ -230,12 +230,32 @@ export interface SwarmPublicProfile {
 export interface ShareManifest {
   from: string;
   to: string;
-  shares: SharedDocumentEntry[];
+  shares: SharedDriveBundle[];
   createdAt: string;
 }
 
 /**
+ * A drive bundle shared from one user to another.
+ * Each bundle contains an encrypted Swarm reference and a list of documents.
+ */
+export interface SharedDriveBundle {
+  driveId: string;
+  driveName: string;
+  /** Swarm reference to the encrypted drive bundle */
+  reference: string;
+  /** Documents in this bundle */
+  documents: Array<{
+    documentId: string;
+    documentType: string;
+    name: string;
+    operationCount: number;
+  }>;
+  sharedAt: string;
+}
+
+/**
  * A single shared document entry within a ShareManifest.
+ * @deprecated Use SharedDriveBundle instead — kept for backward compatibility.
  */
 export interface SharedDocumentEntry {
   documentId: string;
