@@ -70,9 +70,9 @@
 
 ## Known Bugs
 
-- [ ] **Doc-to-drive linking in tree view** — sometimes shows "unlinked" docs in the Documents section. Pre-existing issue related to `JOB_WRITE_READY` timing. `lastSeenDriveId` fallback usually works but not always.
-- [ ] **Multi-drive hydration** — recovery sometimes places all docs in one drive instead of creating separate drives per Swarm driveId. Needs investigation (hydration code not modified by sharing changes).
-- [ ] **Drive dedup on import** — sessionStorage approach works within a session but doesn't persist across page refreshes. The `reactorClient.get(driveId)` name lookup failed in testing. Needs a more robust approach.
+- [x] **Doc-to-drive linking in tree view** — FIXED by hierarchical manifests v2. Docs are listed inside drive manifest feeds — no more fragile `docToDrive` mapping.
+- [x] **Multi-drive hydration** — FIXED by hierarchical manifests v2. Recovery reads per-drive feeds for accurate grouping. Each drive has its own manifest.
+- [x] **Drive dedup on import** — improved with user manifest drive list as persistent registry. sessionStorage approach still used as fallback.
 - [ ] **Connect package not published** — swarm.23 with `shareDocuments` batch API, Bee URL input, and checkbox fixes is only available via dist-copy workaround. Needs publishing.
 - [ ] **Swarm propagation delays** — shared data uploaded to Alice's local Bee node may take 30s-2min to be available on Bob's remote Bee node. No retry/polling on import — user must retry manually.
 
@@ -84,8 +84,8 @@
 
 - [ ] **Publish Connect swarm.23** — batch share API, Bee URL input, checkbox tree
 - [ ] **Publish adapter 0.19.1** — sharing methods, encryption, address normalization (already published)
-- [ ] **Fix doc-to-drive linking** — improve `findParentDrive` reliability
-- [ ] **Fix multi-drive hydration** — ensure each Swarm driveId creates a separate local drive
+- [x] **Fix doc-to-drive linking** — hierarchical manifests v2 (drive feeds)
+- [x] **Fix multi-drive hydration** — recovery reads drive manifests
 - [ ] **Settings UI design polish** — match Connect aesthetic more closely
 
 ### Medium Term
