@@ -65,31 +65,9 @@ What's done and what's next for the Powerhouse Connect + Swarm decentralized sto
 
 ## What's Next
 
-### 1. Manifest-as-Reference (Feed Write Optimization)
+### 1. SwarmChannel + DocSync (Live Collaborative Editing)
 
-Currently `updateManifestViaFeed` uploads manifest JSON to `/bytes` and writes the reference as a text string via `writer.uploadPayload()`. The optimization is to use `FeedWriter.uploadReference(batchId, reference)` instead, which writes exactly 72 bytes (8-byte timestamp + 64-byte ref) as a native Swarm reference — smaller and faster than a text payload.
-
-**Files:** `bee-reactor-adaptor/src/swarm-client.ts`
-
-Changes:
-- `writeFeedPayload`: switch from `writer.uploadPayload(batchId, data)` to `writer.uploadReference(batchId, reference)` when writing a `/bytes` reference
-- `readManifestFromFeed`: already handles both formats (auto-detects reference vs inline JSON)
-- Apply same pattern to `updateDriveManifest` / `updateUserManifest` feed writes
-
-### 2. Manifest Compaction
-
-When a document manifest grows beyond ~20 operation batch entries, merge all batches into one:
-1. Download all batches, merge/dedup ops
-2. Upload as 1 batch to `/bytes`
-3. Write compacted manifest
-
-Called on startup or periodically. Keeps manifests small and recovery fast.
-
-**Files:** `bee-reactor-adaptor/src/swarm-client.ts`
-
-### 3. SwarmChannel + DocSync (Live Collaborative Editing)
-
-Implement a `SwarmChannel` that plugs into the reactor's existing DocSync protocol. DocSync already handles operation ordering, deduplication, conflict resolution, and batching — we just build the transport.
+The biggest feature unlock. Implement a `SwarmChannel` that plugs into the reactor's existing DocSync protocol. DocSync already handles operation ordering, deduplication, conflict resolution, and batching — we just build the transport.
 
 **Architecture:**
 ```
@@ -121,7 +99,7 @@ Bob's Op Feed:   ph:v2:ops:<bob>:<docId>   → SyncEnvelopes
 
 **Start with polling (5-10s latency)**, upgrade to GSOC/PSS later.
 
-### 4. GSOC/PSS Real-Time Notifications
+### 2. GSOC/PSS Real-Time Notifications
 
 Enhance SwarmChannel with sub-second latency:
 
@@ -136,22 +114,7 @@ Enhance SwarmChannel with sub-second latency:
 - Mailboxing: works even if recipient is temporarily offline
 - Requires full Bee nodes
 
-### 5. ETH Address → Signer Address Registry
-
-On-chain mapping contract on Gnosis Chain so users can share by ETH wallet address instead of Swarm signer ID. Currently users must exchange signer addresses out-of-band.
-
-### 6. ACT-Based Sharing
-
-Replace the current SHA-256 shared key encryption with Swarm's native ACT (Access Control Trie). ACT handles encryption/decryption transparently at the Bee node level. Waiting for better cross-node compatibility in bee-js.
-
-### 7. Mode 3: Full Swarm Deployment
-
-Deploy the Connect SPA itself to Swarm:
-- HashRouter (no server-side routing)
-- ENS domain for human-readable URLs
-- Fully decentralized — no servers at all
-
-### 8. Publish Packages
+### 3. Publish Packages
 
 Publish updated packages to npm with all current features:
 
@@ -159,6 +122,35 @@ Publish updated packages to npm with all current features:
 |---------|---------|----------|
 | `@liberuum-org/bee-reactor-adapter` | 0.19.1 | npm |
 | `@liberuum-org/connect` | 6.0.0-dev.161-swarm.22 | npm |
+
+---
+
+## Exploratory
+
+Low-priority optimizations and future infrastructure. Not blocking anything today.
+
+### Manifest-as-Reference (Feed Write Optimization)
+
+Currently `updateManifestViaFeed` uploads manifest JSON to `/bytes` and writes the reference as a 64-char hex text string via `writer.uploadPayload()`. The optimization: use `writer.uploadReference(batchId, reference)` instead, which writes 32 raw bytes (native Swarm reference) instead of 64 text bytes. The read side already auto-detects both formats. **Marginal gain** — saves ~32 bytes per feed write, cleaner read path.
+
+### Manifest Compaction
+
+Over time, a document manifest accumulates one `operationBatches` entry per flush. After weeks of editing, recovery downloads each batch individually (100+ HTTP requests). Compaction merges all batches into one: download all, concat ops, re-upload as single batch, rewrite manifest. New method `compactManifest(docId, maxBatches=20)` in `swarm-client.ts`, called on startup or periodically. **Only matters for heavily-edited documents** — debouncing already keeps growth slow.
+
+### ETH Address → Signer Address Registry
+
+Users currently share by Swarm signer ID (copy-paste). An on-chain registry (Gnosis Chain) or Swarm-native index could map ETH wallet address → signer address for auto-discovery. Needs UX design — even a one-time on-chain tx is friction. Could also use ENS text records for ENS name holders.
+
+### ACT-Based Sharing
+
+Replace SHA-256 shared key encryption with Swarm's native ACT (Access Control Trie). ACT handles encryption/decryption at the Bee node level. API methods already exist (`grantAccess`, `revokeAccess`). Waiting for better cross-node compatibility in bee-js.
+
+### Mode 3: Full Swarm Deployment
+
+Deploy the Connect SPA itself to Swarm:
+- HashRouter (no server-side routing)
+- ENS domain for human-readable URLs
+- Fully decentralized — no servers at all
 
 ---
 
