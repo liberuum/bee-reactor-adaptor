@@ -195,9 +195,8 @@ export class SwarmConnectPlugin {
       this.userManifest = await this.swarmClient.readUserManifest(address);
       if (this.userManifest) {
         const driveCount = Object.keys(this.userManifest.drives ?? {}).length;
-        const docCount = Object.keys(this.userManifest.documents ?? {}).length;
         console.log(
-          `[SwarmPlugin] Found ${driveCount} drives, ${docCount} doc entries on Swarm`,
+          `[SwarmPlugin] Found ${driveCount} drive(s) on Swarm`,
         );
         this.config.onUserManifestLoaded?.(this.userManifest);
       } else {
