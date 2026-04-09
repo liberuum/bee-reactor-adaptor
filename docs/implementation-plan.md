@@ -96,7 +96,6 @@
 - [ ] **Publish Connect swarm.23 + adapter 0.20.0** — hierarchical manifests, batch share, Bee URL, checkbox tree, all bug fixes
 - [ ] **Phase B: Slim user manifest** — stop writing per-doc entries to user manifest, add `version: 2` flag, migrate on read
 - [ ] **Swarm propagation retry** — auto-retry with exponential backoff when import gets 404 (data not yet propagated)
-- [ ] **Settings UI design polish** — match Connect aesthetic more closely
 
 ### Medium Term
 
