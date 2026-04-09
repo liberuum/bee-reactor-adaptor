@@ -395,7 +395,7 @@ export class SwarmClient {
       const topic = this.userTopic(address);
       // Upload to /bytes first, then write reference to feed (72-byte SOC)
       const { reference } = await this.uploadData(payload);
-      await this.writeFeedReference(topic, reference);
+      await this.writeFeedPayload(topic, reference);
     } else {
       const { reference } = await this.uploadData(payload);
       this.manifestIndex.set(`user:${address.toLowerCase()}`, reference);
@@ -602,7 +602,7 @@ export class SwarmClient {
     const payload = JSON.stringify(profile);
     // Upload WITHOUT encryption — this is public data
     const { reference } = await this.uploadData(payload, { skipEncryption: true });
-    await this.writeFeedReference(topic, reference);
+    await this.writeFeedPayload(topic, reference);
   }
 
   /**
@@ -679,7 +679,7 @@ export class SwarmClient {
     // Upload WITHOUT encryption — the recipient needs to read this manifest
     // to discover shared documents. The actual document data is ACT-encrypted.
     const { reference } = await this.uploadData(payload, { skipEncryption: true });
-    await this.writeFeedReference(topic, reference);
+    await this.writeFeedPayload(topic, reference);
   }
 
   /**
@@ -841,7 +841,7 @@ export class SwarmClient {
 
     const topic = this.driveTopic(driveId);
     const { reference } = await this.uploadData(JSON.stringify(manifest));
-    await this.writeFeedReference(topic, reference);
+    await this.writeFeedPayload(topic, reference);
   }
 
   // ─── Feed mode (production) ────────────────────────────────────
@@ -855,10 +855,8 @@ export class SwarmClient {
    * @param options.skipDecryption - Skip decryption when downloading referenced data
    */
   /**
-   * Read JSON data from a feed. The feed stores a reference
-   * (written by uploadReference) pointing to encrypted JSON on /bytes.
-   * Uses downloadPayload to read the raw bytes, then dereferences.
-   * Returns null if the feed doesn't exist or has incompatible data.
+   * Read JSON data from a feed. The feed stores a 64-char hex reference
+   * (written by writeFeedPayload) pointing to encrypted JSON on /bytes.
    */
   private async readFeedJson<T>(
     topic: Topic,
@@ -867,10 +865,7 @@ export class SwarmClient {
   ): Promise<T | null> {
     const reader = this.bee.makeFeedReader(topic, ownerAddress);
     const result = await reader.downloadPayload();
-    const payload = result.payload.toUint8Array();
-    // uploadReference writes [8-byte timestamp][32-byte reference] — skip timestamp
-    const refBytes = payload.slice(8, 40);
-    const ref = Array.from(refBytes).map(b => b.toString(16).padStart(2, "0")).join("");
+    const ref = new TextDecoder().decode(result.payload.toUint8Array()).trim();
     const data = options?.skipDecryption
       ? await this.downloadData(ref, { skipDecryption: true })
       : await this.downloadData(ref);
@@ -903,18 +898,18 @@ export class SwarmClient {
     // Upload manifest to /bytes first
     const { reference } = await this.uploadData(JSON.stringify(manifest));
     // Write only the reference to the feed (72-byte SOC)
-    await this.writeFeedReference(topic, reference);
+    await this.writeFeedPayload(topic, reference);
   }
 
   /**
-   * Write a /bytes reference to a feed using the native reference format.
-   * Stores 32 raw bytes in the SOC (not 64 hex chars as text).
+   * Write a string payload to a feed. Used to store /bytes references
+   * as 64-char hex text in the SOC.
    *
    * Per Swarm docs: each feed index is write-once. bee-js finds the next
    * index automatically. The write lock ensures only one write per topic
    * at a time, preventing SOC conflicts from concurrent writers.
    */
-  private async writeFeedReference(topic: Topic, reference: string): Promise<void> {
+  private async writeFeedPayload(topic: Topic, payload: string): Promise<void> {
     const topicHex = topic.toHex();
 
     // Serialize: wait for any in-flight write to the same topic to complete
@@ -925,12 +920,13 @@ export class SwarmClient {
 
     const promise = (async () => {
       const writer = this.bee.makeFeedWriter(topic);
+      const data = new TextEncoder().encode(payload);
 
       // Let bee-js handle index discovery automatically.
       // Retry on 400 with backoff (previous write may need propagation time).
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
-          await writer.uploadReference(this.batchId, reference);
+          await writer.uploadPayload(this.batchId, data);
           return;
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : String(err);
