@@ -85,7 +85,7 @@
 - [x] **Multi-drive hydration** — FIXED by hierarchical manifests v2. Recovery reads per-drive feeds for accurate grouping. Each drive has its own manifest.
 - [x] **Drive dedup on import** — improved with user manifest drive list as persistent registry. sessionStorage approach still used as fallback.
 - [ ] **Connect package not published** — swarm.23 with `shareDocuments` batch API, Bee URL input, and checkbox fixes is only available via dist-copy workaround. Needs publishing.
-- [ ] **Swarm propagation delays** — shared data uploaded to Alice's local Bee node may take 30s-2min to be available on Bob's remote Bee node. No retry/polling on import — user must retry manually.
+- [x] **Swarm propagation delays** — FIXED. Import retries 3 times with backoff (0s, 3s, 8s).
 
 ---
 
@@ -93,14 +93,11 @@
 
 ### Near Term
 
-- [ ] **Publish Connect swarm.23 + adapter 0.20.0** — hierarchical manifests, batch share, Bee URL, checkbox tree, all bug fixes
-- [ ] **Phase B: Slim user manifest** — stop writing per-doc entries to user manifest, add `version: 2` flag, migrate on read
-- [ ] **Swarm propagation retry** — auto-retry with exponential backoff when import gets 404 (data not yet propagated)
+- [ ] **Publish Connect + adapter** — hierarchical manifests, Phase C sharing, all bug fixes
 
 ### Medium Term
 
 - [ ] **ETH address → signer address registry** — on-chain mapping contract on Gnosis Chain so users can share by ETH address instead of Swarm ID
-- [ ] **Phase C: Sharing via drive feeds** — share a drive = share a feed reference, recipient reads drive manifest directly
 - [ ] **Step 2: SwarmChannel + DocSync** — implement a `SwarmChannel` (Channel interface) that uses Swarm feeds as transport for the reactor's existing DocSync protocol. Enables live collaborative editing with 5-10s polling latency. See `swarm-live-editing-research.md`
 - [ ] **Mode 2: Swarm Only** — Connect without Switchboard, full sync via Swarm feeds only
 
