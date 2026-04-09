@@ -11,7 +11,7 @@ What's done and what's next for the Powerhouse Connect + Swarm decentralized sto
 - **SwarmClient** — Bee SDK wrapper with feed mode + bytes mode
 - **Wallet Signer** — deterministic secp256k1 key from `personal_sign` + `keccak256`
 - **AES-256-GCM encryption** — all uploads encrypted with wallet-derived key, auto-decrypt on download
-- **Feed optimization** — debounced doc manifest writes (3s), op batch accumulation, per-topic write lock, native reference format (`uploadReference`), manifest compaction on startup
+- **Feed optimization** — debounced doc manifest writes (3s), op batch accumulation, per-topic write lock, manifest-as-reference (upload to /bytes, write ref to feed), manifest compaction on startup
 - **Stamp management** — status, top-up, expand, create, cost estimation, USD pricing via CoinGecko
 - **ACT access control API** — `uploadData({act:true})`, `grantAccess()`, `revokeAccess()`
 
