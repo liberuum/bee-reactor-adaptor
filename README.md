@@ -91,7 +91,10 @@ Same wallet + same message = same key on any device. Deterministic. Portable. Su
 | Feed | Topic Pattern | Content |
 |------|--------------|---------|
 | Document manifest | `ph:v2:doc:<documentId>` | Pointer to encrypted operation batches |
-| User manifest | `ph:v2:user:<eth_address>` | Index of all user's documents and drives |
+| Drive manifest | `ph:v2:drive:<driveId>` | Documents + folder structure for one drive |
+| User manifest | `ph:v2:user:<eth_address>` | Index of all user's drives |
+| Public profile | `ph:v2:profile:<address>` | Bee node public key for sharing (unencrypted) |
+| Share manifest | `ph:v2:share:<sender>:<recipient>` | Shared drive bundles between users |
 
 ## Key Files
 
@@ -116,13 +119,15 @@ Same wallet + same message = same key on any device. Deterministic. Portable. Su
 ## Roadmap
 
 - [x] Core sync and recovery (operations to Swarm, full restore from wallet)
-- [x] AES-256-GCM encryption (wallet-derived, backward compatible)
+- [x] AES-256-GCM encryption (wallet-derived, deterministic)
 - [x] Feed optimization (3s debounce, op batch accumulation, manifest-as-reference)
-- [x] Multi-drive support with correct drive-document linking
-- [x] Settings UI (stamp management, storage stats, sync badges, USD pricing)
-- [ ] Encrypted sharing between users (ACT-based, Bee node public keys)
+- [x] Hierarchical manifests (user → drive → document feeds)
+- [x] Folder structure preservation (sync, recovery, sharing)
+- [x] Settings UI (stamp management, storage stats, sync badges, folder tree, USD pricing)
+- [x] Encrypted document sharing between users (SHA-256 shared key, drive bundles with folder metadata)
 - [ ] SwarmChannel for DocSync (live collaborative editing via feed polling)
 - [ ] GSOC/PSS real-time notifications
+- [ ] ETH address → signer address registry (on-chain, share by ETH address)
 
 ## Development
 

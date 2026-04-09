@@ -172,36 +172,54 @@ Each `reference` points to a `/bytes` upload containing the encrypted operation 
 
 ### Per-User: User Manifest
 
-Each user has a feed at topic `ph:v2:user:<eth_address>`. It indexes all their documents:
+Each user has a feed at topic `ph:v2:user:<eth_address>`. It indexes their drives (not individual docs):
 
 ```json
 {
   "address": "0x1234...",
   "beeNodePublicKey": "02abc...",
-  "documents": {
-    "drive-xyz": {
-      "documentType": "powerhouse/document-drive",
-      "name": "My Finance Drive",
-      "driveId": "drive-xyz",
-      "lastUpdated": "2026-04-07T10:05:00Z"
-    },
-    "abc-123": {
-      "documentType": "powerhouse/budget-statement",
-      "name": "Q1 Budget",
-      "driveId": "drive-xyz",
-      "lastUpdated": "2026-04-07T10:05:00Z"
-    }
-  },
+  "documents": {},
   "drives": {
     "drive-xyz": {
       "name": "My Finance Drive",
-      "documentIds": ["abc-123"],
+      "documentIds": [],
       "lastUpdated": "2026-04-07T10:05:00Z"
     }
   },
   "updatedAt": "2026-04-07T10:05:00Z"
 }
 ```
+
+### Per-Drive: Drive Manifest
+
+Each drive has a feed at topic `ph:v2:drive:<driveId>`. It lists all documents and folders in that drive:
+
+```json
+{
+  "driveId": "drive-xyz",
+  "name": "My Finance Drive",
+  "documents": {
+    "abc-123": {
+      "documentType": "powerhouse/budget-statement",
+      "name": "Q1 Budget",
+      "parentFolder": "folder-1",
+      "lastUpdated": "2026-04-07T10:05:00Z"
+    },
+    "def-456": {
+      "documentType": "powerhouse/document-model",
+      "name": "Root Doc",
+      "lastUpdated": "2026-04-07T10:05:00Z"
+    }
+  },
+  "folders": {
+    "folder-1": { "name": "Reports" },
+    "folder-2": { "name": "Subfolder", "parentFolder": "folder-1" }
+  },
+  "updatedAt": "2026-04-07T10:05:00Z"
+}
+```
+
+Recovery reads each drive manifest to discover docs and their folder structure. Folder info is tracked by reading the drive's node tree during each flush.
 
 ### Feed Write Pattern: Manifest-as-Reference
 
@@ -216,8 +234,6 @@ Instead of writing the full manifest JSON into the feed (which can be large and 
 
 Reading reverses this: read feed → get hash → download from /bytes → decrypt → parse JSON.
 
-Old feeds that contain inline JSON (pre-optimization) are auto-detected and still readable.
-
 ---
 
 ## Recovery Flow (Swarm → Browser)
@@ -228,20 +244,22 @@ When a user opens Connect on a new device (or after clearing browser data):
 1. User connects wallet (MetaMask)
 2. Plugin requests personal_sign → derives the SAME Swarm key as before
 3. Read user manifest from feed: ph:v2:user:<address>
-4. Compare documents in manifest vs documents in local PGlite
-5. For each document that exists on Swarm but NOT locally:
+4. Read drive manifests for each drive listed in the user manifest
+5. For each document in the drive manifests that doesn't exist locally:
 
-   a. Group documents by driveId
-   b. Create a local drive for each unique driveId (with correct name)
-   c. For each document in the drive:
+   a. Create a local drive for each unique driveId (with correct name)
+   b. For each document in the drive:
       - Read document manifest from feed: ph:v2:doc:<docId>
       - Download each operation batch from /bytes (auto-decrypted)
       - Get the document model's default state via reactorClient.getDocumentModelModule(type)
       - Create a shell document in the local drive
       - Replay all operations via reactorClient.execute(docId, "main", ops)
       - Mark as synced in syncedRevisions map
+   c. Restore folder structure from drive manifest:
+      - Execute ADD_FOLDER actions for each folder (with id, timestampUtcMs, scope: "global")
+      - Execute MOVE_NODE actions to place docs in their folders
 
-6. Write a clean user manifest (only recovered docs, no stale entries)
+6. Write a clean user manifest (only recovered drives, no stale entries)
 7. Resume normal sync (subscribe to change events)
 ```
 
@@ -287,13 +305,21 @@ For a burst of 100 edits across 3 documents:
 
 ## Drive-Document Relationship
 
-Connect organizes documents into drives. On Swarm, we need to preserve this structure.
+Connect organizes documents into drives with optional folder structure. On Swarm, we preserve this via hierarchical manifests:
 
-**The challenge**: The reactor's `getChildren(driveId)` and `state.global.nodes` APIs are unreliable for determining which drive a document belongs to (timing issues with `JOB_WRITE_READY`).
+- **User manifest** — lists drives (name only)
+- **Drive manifest** — lists all documents + folder structure for one drive
+- **Document manifest** — lists operation batches for one document
 
-**The solution**: `lastSeenDriveId` — a module-level variable that tracks the most recent drive ID seen by the subscriber. When a drive event fires (drive creation, rename), we store its ID. When a document flush happens, we use this as a fallback for drive resolution.
+The `docToDrive` map tracks confirmed drive→doc relationships. The `driveManifestCache` is the local source of truth for drive contents (avoids stale reads from Swarm during rapid writes).
 
-The `docToDrive` map tracks confirmed drive→doc relationships. The user manifest stores `driveId` on each document entry for recovery.
+### Folder Structure
+
+During each drive manifest flush, the plugin reads the drive's `state.global.nodes` tree and extracts:
+- **Folder nodes** → stored in `manifest.folders` (id → name + parentFolder)
+- **File nodes** → `parentFolder` set on the document entry in the manifest
+
+During recovery, folders are restored by executing ADD_FOLDER and MOVE_NODE actions on the drive. These actions require the full `createAction()` shape: `id`, `timestampUtcMs`, `type`, `input`, `scope: "global"`.
 
 ---
 
@@ -305,6 +331,7 @@ The plugin maintains several maps and flags at module scope (persisted across fu
 |-------|------|---------|
 | `syncedRevisions` | `Map<string, number>` | Last synced op index per document — prevents re-uploading |
 | `docToDrive` | `Map<string, string>` | Confirmed document → drive relationships |
+| `driveManifestCache` | `Map<string, SwarmDriveManifest>` | Local source of truth for drive contents (avoids stale Swarm reads) |
 | `pendingManifests` | `Map<string, manifest>` | In-memory manifests waiting for debounce flush |
 | `pendingOps` | `Map<string, ops[]>` | Buffered operations waiting for batch upload |
 | `docManifestTimers` | `Map<string, timeout>` | Active debounce timers per document |

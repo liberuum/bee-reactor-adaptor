@@ -23,32 +23,41 @@
 - **Public profile feed** — publishes Bee node pubkey + signer address on `{prefix}:profile:<address>` (unencrypted, discoverable)
 - **Share manifest feed** — `{prefix}:share:<sender>:<recipient>` stores shared doc references
 - **Encrypted shared data** — `SHA-256(sender_address:recipient_address)` derived key, AES-256-GCM encrypted
-- **Batch share API** — `shareDocumentsWithUser(docIds[])` processes all docs, writes ONE clean manifest (no stale accumulation)
-- **Import with drive dedup** — `importFromUser()` creates single drive, reuses on repeated imports (sessionStorage tracking)
+- **Batch share API** — `shareDocumentsWithUser(docIds[])` processes all docs, bundles per drive as `{ documents, folders, docFolders }`, writes ONE clean manifest (no stale accumulation)
+- **Import with drive dedup** — `importFromUser()` creates single drive, reuses on repeated imports (sessionStorage tracking), restores folder structure from bundle
 - **Action extraction** — import extracts `.action` from ops and filters global scope (matches hydration pattern)
 - **Configurable Bee URL** — reads from localStorage, `setBeeUrl()` triggers reconnect
 - **`applySwarmExtensions()`** — all custom `ph.swarm.*` fields survive `plugin.start()` overwrite on reconnect
 - **Address normalization** — `getOwnerAddress()` always `0x`-prefixed, `normalizeAddress()` only for `makeFeedReader` owner param, topics use `address.toLowerCase()` (preserves `0x`, matches legacy feeds)
 - **Robust error handling** — `isNotFoundError` handles bee-js v11 error shapes, `readShareManifest`/`readPublicProfile` catch-all (no JSON parse crashes)
 
-### Hierarchical Manifests v2 (April 9 — NEW)
+### Hierarchical Manifests v2 (April 9)
 
 - **Per-drive manifest feeds** — each drive has its own Swarm feed listing its documents
 - **Drive manifest writes** — debounced per-drive (2s), written alongside doc manifests
-- **Recovery uses drive manifests** — v2 path reads per-drive feeds for accurate doc grouping, v1 fallback for old manifests
+- **Recovery uses drive manifests** — reads per-drive feeds for accurate doc grouping
 - **Concurrent flush throttle** — max 5 parallel doc manifest flushes (prevents Bee node overload on bulk import)
-- **Pre-populated docToDrive** — loaded from user manifest on startup for v1 compat
+- **Pre-populated docToDrive** — loaded from drive manifests on startup
 - **Clear storage preserves identity** — clears drive+share data, keeps address/pubkey/stamps
+
+### Folder Structure Support (April 9)
+
+- **Folder tracking in drive manifests** — `flushDriveManifest` reads the drive's node tree and stores `folders` (id → name + parentFolder) and `parentFolder` on each doc entry
+- **Folder restore on recovery** — after docs are created, ADD_FOLDER + MOVE_NODE actions replay the folder structure using proper `createAction()` shape (`id`, `timestampUtcMs`, `scope: "global"`)
+- **Folder restore on import** — share bundles include `folders` + `docFolders` maps; import side creates folders and moves docs using original→local ID mapping
+- **Settings UI tree** — both Documents and Share sections render folder hierarchy from `driveManifests`; graceful fallback when folder data not yet loaded (docs show as root-level instead of vanishing)
 
 ### Connect Plugin (`swarm-doc-model/processors/swarm-plugin.ts`)
 
 - Initializes asynchronously at processor registration (doesn't block Connect startup)
 - Subscribes to ALL reactor document changes, uploads new ops to Swarm
-- **Hierarchical v2**: writes drive manifests alongside doc manifests
-- **Recovery**: reads drive manifests first (v2), falls back to flat user manifest (v1)
+- **Hierarchical manifests**: writes drive manifests alongside doc manifests
+- **Recovery**: reads drive manifests to discover docs per drive, restores folder structure with ADD_FOLDER + MOVE_NODE actions
+- **Sharing**: bundles docs + folder metadata per drive, restores folders on import with original→local doc ID mapping
 - Debounced document manifest writes (3s per doc) + debounced user manifest (3s) + debounced drive manifest (2s)
 - Op batch accumulation — all ops per flush uploaded as ONE /bytes batch
 - Concurrent flush throttle — max 5 parallel, queue excess
+- Folder tracking — reads drive node tree during flush, stores folders + parentFolder in drive manifest
 - Clean manifest after recovery (prevents stale drive accumulation)
 - `beforeunload` handler flushes pending doc + drive manifests
 - `sessionStorage` hydration guard (survives Vite HMR)
@@ -59,10 +68,10 @@
 - Loading states (spinner during init, disconnected state with setup instructions)
 - Configurable Bee node URL with Save & Connect button
 - Storage gauge (remaining capacity, TTL, bucket utilization with collapsible explainer)
-- Document tree with sync badges (buffered/flushing/synced/error), drive grouping
+- Document tree with sync badges (buffered/flushing/synced/error), drive grouping, **folder hierarchy**
 - **Your Swarm ID** — copyable signer address for sharing
-- **Share section** — checkbox tree (drive selects all children), batch share with encryption
-- **Import section** — enter sender's Swarm ID, import shared docs into local drive
+- **Share section** — checkbox tree with folder hierarchy (drive selects all children), batch share with encryption
+- **Import section** — enter sender's Swarm ID, import shared docs into local drive with folder structure
 - Stamp management (extend duration, expand storage, buy new stamp — with dropdown presets)
 - Node wallet balances (xBZZ, xDAI) with fund instructions
 - USD pricing (total stamp cost, xBZZ market price from CoinGecko)
