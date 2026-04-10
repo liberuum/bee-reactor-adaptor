@@ -1,0 +1,14 @@
+{
+  "name": "@liberuum-org/bee-reactor-monorepo",
+  "private": true,
+  "description": "Swarm Bee storage integration for Powerhouse Connect",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build:adapter": "cd packages/adapter && npx tsc",
+    "build:connect": "cd packages/connect && bun run build",
+    "build": "npm run build:adapter && npm run build:connect",
+    "test": "cd packages/adapter && vitest run"
+  }
+}
