@@ -1,5 +1,6 @@
 import { Icon } from "@powerhousedao/design-system";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
+import { toast } from "../../../../services/toast.js";
 
 /** Snapshot from SwarmConnectPlugin / window.ph.swarm (loose typing for fork UI). */
 export type SwarmUiSnapshot = {
@@ -26,6 +27,10 @@ export type SwarmUiSnapshot = {
     totalCostBzz?: string;
     totalCostUsd?: string | null;
     bzzUsdPrice?: number | null;
+    /** Whether the stamp is immutable (true) or mutable (false) */
+    immutable?: boolean;
+    /** Warnings about stamp configuration */
+    warnings?: string[];
   };
   userManifest?: {
     documents: Record<string, { name?: string; documentType?: string; driveId?: string; parentFolder?: string }>;
@@ -68,6 +73,8 @@ export type SwarmUiSnapshot = {
   beeUrl?: string;
   /** Change Bee node URL and reconnect */
   setBeeUrl?: (url: string) => Promise<void>;
+  /** Subscribe to plugin events. Returns unsubscribe function. */
+  on?: (event: string, handler: (data: Record<string, unknown>) => void) => () => void;
 };
 
 function StatusDot({ color }: { color: string }) {
@@ -764,6 +771,7 @@ export const SwarmStorageSettings: React.FC = () => {
   } | null>(null);
   const [selectedSize, setSelectedSize] = useState<number | null>(null);
   const [selectedDuration, setSelectedDuration] = useState<{ days: number; amount: string } | null>(null);
+  const [stampImmutable, setStampImmutable] = useState(false); // Default: mutable (recommended)
 
   useEffect(() => {
     const read = () => {
@@ -791,6 +799,39 @@ export const SwarmStorageSettings: React.FC = () => {
       setBeeUrlInput(swarm.beeUrl);
     }
   }, [swarm?.beeUrl]);
+
+  // Subscribe to plugin events for toast notifications
+  const unsubsRef = useRef<Array<() => void>>([]);
+  useEffect(() => {
+    const on = swarm?.on;
+    if (!on) return;
+    // Clean up previous subscriptions
+    unsubsRef.current.forEach((u) => u());
+    unsubsRef.current = [];
+
+    unsubsRef.current.push(
+      on("sync:confirmed", (e: Record<string, unknown>) => {
+        toast(`"${e.docName}" synced to Swarm (${e.durationMs}ms)`, { type: "connect-success" });
+      }),
+      on("sync:error", (e: Record<string, unknown>) => {
+        toast(`Sync failed: ${e.error}`, { type: "connect-warning" });
+      }),
+      on("sync:all-synced", () => {
+        toast("All documents synced to Swarm", { type: "connect-success" });
+      }),
+      on("plugin:ready", () => {
+        toast("Connected to Swarm", { type: "connect-success" });
+      }),
+      on("plugin:retrying", (e: Record<string, unknown>) => {
+        toast(`Bee node offline — retrying in ${Number(e.retryInMs) / 1000}s...`, { type: "connect-warning" });
+      }),
+    );
+
+    return () => {
+      unsubsRef.current.forEach((u) => u());
+      unsubsRef.current = [];
+    };
+  }, [swarm?.on, swarm?.ready]);
 
   // Load stamp options when client is ready
   useEffect(() => {
@@ -840,9 +881,9 @@ export const SwarmStorageSettings: React.FC = () => {
           <div className="mt-2 rounded-md bg-gray-50 p-3 text-xs text-gray-600">
             <p className="font-medium mb-1">Setup instructions:</p>
             <ol className="list-decimal list-inside space-y-1">
-              <li>Download Bee from github.com/ethersphere/bee/releases</li>
-              <li>Run <code className="bg-gray-200 px-1 rounded">bee dev</code> for testing or configure a full node</li>
-              <li>Reload this page once the node is running</li>
+              <li>Install and configure a Bee node (<a href="https://docs.ethswarm.org/docs/bee/installation/quick-start" target="_blank" rel="noopener" className="text-blue-500 hover:underline">docs.ethswarm.org</a>)</li>
+              <li>Fund the node with xBZZ and xDAI on Gnosis Chain</li>
+              <li>Enter your Bee node URL above and click Save & Connect</li>
             </ol>
           </div>
         )}
@@ -861,10 +902,14 @@ export const SwarmStorageSettings: React.FC = () => {
   const isDevMode = swarm.isDevMode;
 
   const handleClearCache = async () => {
-    if (!swarm.reconnect) return;
+    if (!swarm.plugin?.clearCache) return;
     setClearing(true);
     try {
-      await swarm.reconnect();
+      await swarm.plugin.clearCache();
+      if (swarm.reconnect) await swarm.reconnect();
+      toast("Swarm key cleared and reconnected", { type: "connect-success" });
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "Clear cache failed", { type: "connect-warning" });
     } finally {
       setClearing(false);
     }
@@ -944,8 +989,10 @@ export const SwarmStorageSettings: React.FC = () => {
     try {
       const sizeLabel = stampOptions?.sizeOptions.find((s) => s.depth === depth)?.label ?? `depth ${depth}`;
       const durLabel = selectedDuration ? `~${selectedDuration.days} days` : "~7 days";
+      const mutLabel = stampImmutable ? "immutable" : "mutable";
       const batchId = await client.createStamp(amount, depth);
-      showStatus(true, `Stamp created: ${batchId.slice(0, 12)}... (${sizeLabel}, ${durLabel}). Allow a few minutes for propagation.`);
+      toast(`Stamp created (${sizeLabel}, ${durLabel}, ${mutLabel}). Propagation takes a few minutes.`, { type: "connect-success" });
+      showStatus(true, `Stamp created: ${batchId.slice(0, 12)}... (${sizeLabel}, ${durLabel}, ${mutLabel}).`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Stamp creation failed";
       if (msg.includes("insufficient") || msg.includes("500")) {
@@ -1145,6 +1192,28 @@ export const SwarmStorageSettings: React.FC = () => {
               }
             />
             <Row
+              label="Type"
+              value={
+                <span className="flex items-center gap-1.5">
+                  <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium ${stamp.immutable ? "bg-yellow-50 text-yellow-700 ring-1 ring-yellow-200" : "bg-green-50 text-green-700 ring-1 ring-green-200"}`}>
+                    {stamp.immutable ? "Immutable" : "Mutable"}
+                  </span>
+                  {stamp.immutable && (
+                    <span className="text-[10px] text-yellow-600">Old data never garbage collected</span>
+                  )}
+                </span>
+              }
+            />
+            {stamp.warnings && stamp.warnings.length > 0 && (
+              <div className="mt-2">
+                {stamp.warnings.map((w, i) => (
+                  <AlertBanner key={i} type="warning">
+                    <p className="text-[10px]">{w}</p>
+                  </AlertBanner>
+                ))}
+              </div>
+            )}
+            <Row
               label="Expires"
               value={stamp.expiresAt ? new Date(stamp.expiresAt).toLocaleDateString() : "—"}
             />
@@ -1300,6 +1369,41 @@ export const SwarmStorageSettings: React.FC = () => {
                   ))}
                 </select>
               </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-gray-500">Stamp type</label>
+                <div className="flex gap-3">
+                  <label className={`flex flex-1 cursor-pointer items-start gap-2 rounded-lg border p-3 transition-colors ${!stampImmutable ? "border-green-300 bg-green-50" : "border-gray-200 hover:border-gray-300"}`}>
+                    <input
+                      type="radio"
+                      name="stamp-type"
+                      checked={!stampImmutable}
+                      onChange={() => setStampImmutable(false)}
+                      className="mt-0.5 accent-green-600"
+                    />
+                    <div>
+                      <p className="text-xs font-medium text-gray-700">Mutable <span className="text-green-600">(recommended)</span></p>
+                      <p className="text-[10px] text-gray-400 leading-relaxed">
+                        Old feed data is garbage collected when updated. Ideal for Swarm Connect — feed writes reuse stamp slots.
+                      </p>
+                    </div>
+                  </label>
+                  <label className={`flex flex-1 cursor-pointer items-start gap-2 rounded-lg border p-3 transition-colors ${stampImmutable ? "border-yellow-300 bg-yellow-50" : "border-gray-200 hover:border-gray-300"}`}>
+                    <input
+                      type="radio"
+                      name="stamp-type"
+                      checked={stampImmutable}
+                      onChange={() => setStampImmutable(true)}
+                      className="mt-0.5 accent-yellow-600"
+                    />
+                    <div>
+                      <p className="text-xs font-medium text-gray-700">Immutable</p>
+                      <p className="text-[10px] text-gray-400 leading-relaxed">
+                        All data is permanently stored until stamp expires. Every feed update uses a new slot. Higher storage cost for frequent writes.
+                      </p>
+                    </div>
+                  </label>
+                </div>
+              </div>
               <ActionButton
                 onClick={handleCreateStamp}
                 loading={createBusy}
@@ -1307,7 +1411,7 @@ export const SwarmStorageSettings: React.FC = () => {
                 variant="primary"
               >
                 {selectedSize && selectedDuration
-                  ? `Create Stamp (${SIZE_OPTIONS.find((s) => s.depth === selectedSize)?.label ?? ""}, ~${selectedDuration.days}d)`
+                  ? `Create ${stampImmutable ? "Immutable" : "Mutable"} Stamp (${SIZE_OPTIONS.find((s) => s.depth === selectedSize)?.label ?? ""}, ~${selectedDuration.days}d)`
                   : "Create Stamp"}
               </ActionButton>
               <p className="text-[10px] text-gray-400">
@@ -1405,6 +1509,7 @@ export const SwarmStorageSettings: React.FC = () => {
                       try {
                         const r = await swarm.shareDocuments(toShare, normalizeAddr(shareRecipient));
                         if (r.success) {
+                          toast(`Shared ${r.shared} document${r.shared !== 1 ? "s" : ""} via Swarm`, { type: "connect-success" });
                           setShareResult({ ok: true, msg: `Shared ${r.shared} document${r.shared !== 1 ? "s" : ""} successfully!` });
                           setShareSelected(new Set());
                           setShareRecipient("");
@@ -1458,6 +1563,7 @@ export const SwarmStorageSettings: React.FC = () => {
                 try {
                   const result = await swarm.importSharedDocuments(normalizeAddr(sender));
                   if (result.success) {
+                    toast(`Imported ${result.imported.length} document(s) from Swarm`, { type: "connect-success" });
                     setImportResult({ ok: true, msg: `Imported ${result.imported.length} document(s). Refresh to see them.` });
                     setImportSender("");
                   } else {
@@ -1498,7 +1604,8 @@ export const SwarmStorageSettings: React.FC = () => {
                   // Try the plugin's clearStorage first
                   if (swarm?.clearStorage) {
                     await swarm.clearStorage();
-                    showStatus(true, "Swarm storage cleared. Refresh to start fresh.");
+                    toast("Swarm storage cleared", { type: "connect-success" });
+                    showStatus(true, "Swarm storage cleared. Sync will resume automatically.");
                     return;
                   }
                   // Fallback: call client API directly
