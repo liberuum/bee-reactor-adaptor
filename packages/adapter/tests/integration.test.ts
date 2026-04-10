@@ -426,9 +426,15 @@ describe("Integration: Bee Node", () => {
       expect(status.usable).toBe(true);
       expect(status.ttlSeconds).toBeGreaterThan(0);
       expect(status.ttlHuman).toBeTruthy();
-      // Don't assert specific health — production stamp may be warning/critical
       expect(["healthy", "warning", "critical"]).toContain(status.health);
       expect(status.capacityBytes).toBeGreaterThan(0);
+      expect(typeof status.immutable).toBe("boolean");
+      expect(Array.isArray(status.warnings)).toBe(true);
+      // Log stamp mutability for visibility
+      console.log(`  Stamp immutable: ${status.immutable}`);
+      if (status.warnings.length > 0) {
+        console.log(`  Warnings: ${status.warnings.join("; ")}`);
+      }
     });
   });
 

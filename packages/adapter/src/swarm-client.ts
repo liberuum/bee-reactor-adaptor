@@ -402,7 +402,7 @@ export class SwarmClient {
   async getBzzUsdPrice(): Promise<number | null> { return getBzzUsdPrice(); }
   async estimateStampCost(depth: number, days: number) { return this.stamps.estimateStampCost(depth, days); }
   async getStampOptions() { return this.stamps.getStampOptions(); }
-  async createStamp(amount: string, depth: number): Promise<string> { return this.stamps.createStamp(amount, depth); }
+  async createStamp(amount: string, depth: number, options?: { immutable?: boolean }): Promise<string> { return this.stamps.createStamp(amount, depth, options); }
 
   // ═══════════════════════════════════════════════════════════════
   // Delegation: Share/Profile methods (backward compatibility)

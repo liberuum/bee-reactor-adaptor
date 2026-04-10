@@ -206,8 +206,14 @@ export interface StampStatus {
   totalCostUsd: string | null;
   /** Current xBZZ/USD market price (null if unavailable) */
   bzzUsdPrice: number | null;
+  /** Whether the stamp is immutable (true) or mutable (false).
+   *  Mutable stamps are recommended for feeds — old feed indices get their
+   *  stamp slots reused, so only the latest data is protected. */
+  immutable: boolean;
   /** Health status based on TTL thresholds */
   health: "healthy" | "warning" | "critical" | "expired";
+  /** Warnings about stamp configuration (e.g. immutable stamp used for feeds) */
+  warnings: string[];
 }
 
 // ─── Sharing Types ──────────────────────────────────────────────

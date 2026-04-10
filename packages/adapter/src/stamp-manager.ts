@@ -40,6 +40,12 @@ export class StampManager {
     const bzzUsdPrice = await getBzzUsdPrice();
     const totalUsd = bzzUsdPrice != null ? (totalBzz * bzzUsdPrice).toFixed(4) : null;
 
+    const immutable = batch.immutableFlag;
+    const warnings: string[] = [];
+    if (immutable) {
+      warnings.push("Stamp is immutable — old feed data will never be garbage collected. Mutable stamps are recommended for Swarm Connect.");
+    }
+
     return {
       batchId: this.batchId,
       usable: batch.usable,
@@ -59,7 +65,9 @@ export class StampManager {
       totalCostUsd: totalUsd ? `$${totalUsd}` : null,
       bzzUsdPrice,
       expiresAt: new Date(Date.now() + ttlSeconds * 1000).toISOString(),
+      immutable,
       health,
+      warnings,
     };
   }
 
@@ -170,13 +178,29 @@ export class StampManager {
   /**
    * Create a new postage stamp batch. The Bee node's wallet must be funded
    * with xBZZ and xDAI first.
+   *
+   * Defaults to MUTABLE stamps — recommended for Swarm Connect because:
+   * - Feed updates reuse stamp slots (old feed indices get garbage collected)
+   * - Prevents stamp exhaustion from frequent manifest writes
+   * - Only the latest feed data is protected; old data expires naturally
+   *
    * @param amount Per-chunk xBZZ allocation (determines duration)
    * @param depth Batch depth (determines capacity, minimum 17)
+   * @param options.immutable Set to true for immutable stamp (default: false = mutable)
    */
-  async createStamp(amount: string, depth: number): Promise<string> {
+  async createStamp(
+    amount: string,
+    depth: number,
+    options?: { immutable?: boolean },
+  ): Promise<string> {
+    const immutable = options?.immutable ?? false;
+    const headers: Record<string, string> = {};
+    if (immutable) {
+      headers["Immutable"] = "true";
+    }
     const response = await fetch(
       `${this.bee.url}/stamps/${amount}/${depth}`,
-      { method: "POST" },
+      { method: "POST", headers },
     );
     if (!response.ok) {
       const text = await response.text();
