@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    "module": "NodeNext",
+    "target": "ESNext",
+    "sourceMap": true,
+    "declaration": true,
+    "declarationMap": true,
+    "strict": true,
+    "jsx": "react-jsx",
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "noUncheckedSideEffectImports": true,
+    "moduleDetection": "force",
+    "skipLibCheck": true,
+    "outDir": "./dist",
+    "paths": {
+      "@powerhousedao/connect/config": ["./src/connect.config.ts"],
+      "@powerhousedao/connect/assets/*": ["./assets/*"],
+      "@powerhousedao/connect/*": ["./src/*/index.ts"]
+    },
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "types": ["node", "@types/wicg-file-system-access", "@types/bun"]
+  },
+  "include": [
+    "**/*.ts",
+    "**/*.tsx",
+    "src/i18n/locales/en.json",
+    "./package.json"
+  ],
+  "exclude": ["dist", "node_modules", "storybook-static", "cypress", "test"]
+}
