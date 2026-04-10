@@ -1,5 +1,5 @@
 import type { SwarmClient } from "./swarm-client.js";
-import { isEncrypted, decrypt } from "./swarm-crypto.js";
+import type { SwarmDocumentManifest } from "./types.js";
 import type { IOperationStore, DocumentRevisions } from "./swarm-operation-store.js";
 import type { IKeyframeStore } from "./swarm-keyframe-store.js";
 
@@ -7,25 +7,19 @@ import type { IKeyframeStore } from "./swarm-keyframe-store.js";
  * Hydrates a local SQL store from Swarm on startup.
  *
  * Compares local revisions with the Swarm feed manifest and downloads
- * any missing operation batches and keyframes. If data is encrypted
- * (AES-256-GCM with "SWE" prefix), decrypts using the provided key.
+ * any missing operation batches and keyframes.
+ *
+ * Decryption is handled by SwarmClient.downloadData() which auto-detects
+ * the SWE prefix and decrypts with the client's wallet-derived key.
+ * This class does NOT manage its own decryption key.
  */
 export class SwarmHydrator {
   private pollingTimer: ReturnType<typeof setInterval> | null = null;
-  private decryptionKey: string | null = null;
 
   constructor(
     private readonly swarmClient: SwarmClient,
     private readonly logger: { info: (...args: unknown[]) => void; warn: (...args: unknown[]) => void } = console,
   ) {}
-
-  /**
-   * Set the decryption key for downloading encrypted content.
-   * Must match the key used for encryption (wallet-derived key).
-   */
-  setDecryptionKey(key: string | null): void {
-    this.decryptionKey = key;
-  }
 
   /**
    * Hydrate local stores from Swarm for a list of document IDs.
@@ -36,11 +30,6 @@ export class SwarmHydrator {
    * 3. Download missing operation batches
    * 4. Download missing keyframes
    * 5. Insert into local stores
-   *
-   * @param documentIds - Documents to hydrate
-   * @param localOperationStore - The underlying local SQL operation store
-   * @param localKeyframeStore - The underlying local SQL keyframe store
-   * @param loadOperations - Callback to load operations into the reactor (e.g. reactor.load)
    */
   async hydrate(
     documentIds: string[],
@@ -61,16 +50,23 @@ export class SwarmHydrator {
 
     for (const docId of documentIds) {
       try {
-        await this.hydrateDocument(
-          docId,
-          localOperationStore,
-          localKeyframeStore,
-          loadOperations,
-          result,
+        const manifest = await this.swarmClient.readManifest(docId);
+        if (!manifest) continue;
+
+        const opsDownloaded = await this.hydrateOperations(
+          docId, manifest, localOperationStore, loadOperations,
         );
+        const kfsDownloaded = await this.hydrateKeyframes(
+          docId, manifest, localKeyframeStore,
+        );
+
+        result.operationBatchesDownloaded += opsDownloaded;
+        result.keyframesDownloaded += kfsDownloaded;
+        if (opsDownloaded > 0 || kfsDownloaded > 0) {
+          result.documentsHydrated++;
+        }
       } catch (err) {
-        const message =
-          err instanceof Error ? err.message : String(err);
+        const message = err instanceof Error ? err.message : String(err);
         result.errors.push({ documentId: docId, error: message });
         this.logger.warn(`Failed to hydrate document ${docId}:`, err);
       }
@@ -125,107 +121,85 @@ export class SwarmHydrator {
     }
   }
 
-  private async hydrateDocument(
+  /**
+   * Download missing operation batches from Swarm and load them locally.
+   * Returns the number of batches downloaded.
+   */
+  private async hydrateOperations(
     documentId: string,
+    manifest: SwarmDocumentManifest,
     localOperationStore: IOperationStore,
-    localKeyframeStore: IKeyframeStore,
-    loadOperations:
-      | ((
-          documentId: string,
-          branch: string,
-          operations: unknown[],
-        ) => Promise<void>)
-      | undefined,
-    result: HydrationResult,
-  ): Promise<void> {
-    const manifest = await this.swarmClient.readManifest(documentId);
-    if (!manifest) return;
-
-    let hydrated = false;
-
-    // Get local revisions for comparison
+    loadOperations?: (documentId: string, branch: string, operations: unknown[]) => Promise<void>,
+  ): Promise<number> {
     let localRevisions: DocumentRevisions;
     try {
-      localRevisions = await localOperationStore.getRevisions(
-        documentId,
-        "main",
-      );
+      localRevisions = await localOperationStore.getRevisions(documentId, "main");
     } catch {
-      // If document doesn't exist locally yet, start from scratch
       localRevisions = { revision: {}, latestTimestamp: "" };
     }
 
-    // Download missing operation batches
+    let downloaded = 0;
     for (const batch of manifest.operationBatches) {
       const localRev = localRevisions.revision[batch.scope] ?? -1;
-      if (batch.endIndex > localRev) {
-        try {
-          let data = await this.swarmClient.downloadData(batch.reference);
+      if (batch.endIndex <= localRev) continue;
 
-          // Auto-detect and decrypt if encrypted
-          if (isEncrypted(data)) {
-            if (!this.decryptionKey) {
-              this.logger.warn(
-                `Encrypted data found for ${documentId} but no decryption key set`,
-              );
-              continue;
-            }
-            data = await decrypt(data, this.decryptionKey);
-          }
+      try {
+        // SwarmClient.downloadData auto-detects and decrypts SWE-prefixed data
+        const data = await this.swarmClient.downloadData(batch.reference);
+        const operations = JSON.parse(new TextDecoder().decode(data)) as unknown[];
 
-          const operations = JSON.parse(
-            new TextDecoder().decode(data),
-          ) as unknown[];
-
-          if (loadOperations) {
-            await loadOperations(documentId, batch.branch, operations);
-          }
-
-          result.operationBatchesDownloaded++;
-          hydrated = true;
-        } catch (err) {
-          this.logger.warn(
-            `Failed to download op batch ${batch.reference} for ${documentId}:`,
-            err,
-          );
+        if (loadOperations) {
+          await loadOperations(documentId, batch.branch, operations);
         }
+
+        downloaded++;
+      } catch (err) {
+        this.logger.warn(
+          `Failed to download op batch ${batch.reference} for ${documentId}:`,
+          err,
+        );
       }
     }
+    return downloaded;
+  }
 
-    // Download missing keyframes
+  /**
+   * Download missing keyframes from Swarm and store them locally.
+   * Returns the number of keyframes downloaded.
+   */
+  private async hydrateKeyframes(
+    documentId: string,
+    manifest: SwarmDocumentManifest,
+    localKeyframeStore: IKeyframeStore,
+  ): Promise<number> {
+    let downloaded = 0;
     for (const kf of manifest.keyframes) {
       try {
         const existing = await localKeyframeStore.findNearestKeyframe(
-          documentId,
-          kf.scope,
-          kf.branch,
-          kf.revision,
+          documentId, kf.scope, kf.branch, kf.revision,
         );
 
-        // Only download if we don't have this exact keyframe
-        if (!existing || existing.revision !== kf.revision) {
-          const data = await this.swarmClient.downloadData(kf.reference);
-          const keyframeData = JSON.parse(
-            new TextDecoder().decode(data),
-          ) as {
-            documentId: string;
-            scope: string;
-            branch: string;
-            revision: number;
-            document: Record<string, unknown>;
-          };
+        if (existing && existing.revision === kf.revision) continue;
 
-          await localKeyframeStore.putKeyframe(
-            keyframeData.documentId,
-            keyframeData.scope,
-            keyframeData.branch,
-            keyframeData.revision,
-            keyframeData.document,
-          );
+        // SwarmClient.downloadData auto-decrypts
+        const data = await this.swarmClient.downloadData(kf.reference);
+        const keyframeData = JSON.parse(new TextDecoder().decode(data)) as {
+          documentId: string;
+          scope: string;
+          branch: string;
+          revision: number;
+          document: Record<string, unknown>;
+        };
 
-          result.keyframesDownloaded++;
-          hydrated = true;
-        }
+        await localKeyframeStore.putKeyframe(
+          keyframeData.documentId,
+          keyframeData.scope,
+          keyframeData.branch,
+          keyframeData.revision,
+          keyframeData.document,
+        );
+
+        downloaded++;
       } catch (err) {
         this.logger.warn(
           `Failed to download keyframe ${kf.reference} for ${documentId}:`,
@@ -233,10 +207,7 @@ export class SwarmHydrator {
         );
       }
     }
-
-    if (hydrated) {
-      result.documentsHydrated++;
-    }
+    return downloaded;
   }
 }
 

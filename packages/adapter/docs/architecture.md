@@ -417,3 +417,171 @@ PENDING → RUNNING → WRITE_READY → READ_READY
 | `reactorClient.addDrive(...)` | Create a new local drive |
 | `driveClient.addDocument(driveId, doc)` | Add a document to a drive |
 | Subscriber callback | Fires on every document change with operation details |
+
+---
+
+## Architecture Decision Records
+
+### ADR-001: Split swarm-plugin.ts into plugin/ module
+
+**Status:** Accepted (2026-04-10)
+
+**Context:** The original `swarm-plugin.ts` was 2,576 lines with 7 tangled concerns and ~20 module-level mutable variables. Impossible to reason about individual flows.
+
+**Decision:** Split into 6 files in `src/plugin/`: state.ts (shared state), init.ts (orchestrator), sync.ts (reactor subscriber), flush.ts (debounced writes), hydration.ts (recovery), sharing.ts (share/import). A thin `swarm-plugin.ts` re-exports the entry point.
+
+**Consequences:**
+- Positive: Each file has a single responsibility. State is centralized. Flows are traceable.
+- Positive: `restoreFolderStructure` deduplicated between hydration and import.
+- Negative: 6 files instead of 1; more imports to manage. Clean DAG prevents circular deps.
+
+### ADR-002: Extract StampManager and ShareManager from SwarmClient
+
+**Status:** Accepted (2026-04-10)
+
+**Context:** `SwarmClient` was 1,035 lines with ~30 methods covering 10 responsibilities (data CRUD, feeds, stamps, pricing, sharing, profiles, ACT, compaction).
+
+**Decision:** Extract `StampManager` (stamp lifecycle + pricing) and `ShareManager` (profiles + sharing + key derivation) as separate classes. SwarmClient keeps thin delegation methods for backward compatibility.
+
+**Consequences:**
+- Positive: SwarmClient focused on core CRUD + feeds + manifests (531 lines).
+- Positive: StampManager and ShareManager independently testable.
+- Negative: SwarmClient has delegation wrappers that add indirection.
+
+### ADR-003: Injectable dependencies for testability
+
+**Status:** Accepted (2026-04-10)
+
+**Context:** All major classes hard-coded their dependencies (`new Bee(...)`, `window.ethereum`, `new SwarmClient(...)`) — impossible to unit test without global mocks.
+
+**Decision:** Add optional dependency injection parameters:
+- `SwarmClient`: optional `bee: Bee` instance
+- `wallet-signer`: optional `provider: EthereumProvider`
+- `BeeReactorAdapter`: optional `deps: { swarmClient?, hydrator? }`
+
+All parameters are optional — defaults preserve existing behavior.
+
+**Consequences:**
+- Positive: Unit tests can inject mocks. No global patching needed.
+- Positive: Zero breaking changes — all injection points are optional.
+
+### ADR-004: Serialize all manifest writes to prevent lost-update races
+
+**Status:** Accepted (2026-04-10)
+
+**Context:** User manifest updates used unserialized read-modify-write. Two concurrent document syncs could lose each other's manifest entries.
+
+**Decision:** Per-address write lock (`userManifestLocks`) in `SwarmSyncReadModel`. Debounced pipeline with generation counter in the plugin. `reconcileUserManifest` routes through the debounced pipeline instead of writing directly.
+
+**Consequences:**
+- Positive: No lost-update races on user manifest.
+- Trade-off: Slightly higher latency for user manifest writes (debounce + lock wait).
+
+### ADR-005: Ops buffer cleared only on full success (atomic flush)
+
+**Status:** Accepted (2026-04-10)
+
+**Context:** `flushDocumentManifest` deleted ops from the buffer before attempting upload. If `uploadData` succeeded but `updateManifest` failed, ops were re-queued but the manifest had a stale duplicate batch entry.
+
+**Decision:** Snapshot ops (don't delete), deep-copy the manifest before mutation, and only delete from buffer after both `uploadData` AND `updateManifest` succeed.
+
+**Consequences:**
+- Positive: Partial failure cannot create duplicate batches or corrupt in-memory manifest.
+- Positive: Retry path is clean — same ops, same manifest state as before the attempt.
+
+### ADR-006: Drive matching by name, not position
+
+**Status:** Accepted (2026-04-10)
+
+**Context:** Hydration matched Swarm drives to local drives by array position. Any locally-created drive that wasn't on Swarm shifted all indices, injecting recovered docs into the wrong drive.
+
+**Decision:** Match by drive name. Only reuse a local drive if its `state.global.name` matches the Swarm drive's name. Create new drives for unmatched entries.
+
+**Consequences:**
+- Positive: Correct matching even with extra local drives.
+- Trade-off: If the user renames a drive locally but hasn't synced, it won't match. New drive created (acceptable — data is not lost).
+
+---
+
+## Testing Architecture
+
+### Test Strategy
+
+The adapter has injectable dependencies at every boundary, enabling 3 levels of testing:
+
+#### Level 1: Unit Tests (fast, no network)
+
+Test individual modules with mock dependencies:
+
+| Module | What to test | Mock |
+|--------|-------------|------|
+| `swarm-crypto.ts` | encrypt → decrypt roundtrip, SWE prefix detection | None (pure functions, uses Web Crypto) |
+| `bytes-utils.ts` | hexToBytes/bytesToHex roundtrip | None (pure functions) |
+| `wallet-signer.ts` | `deriveSwarmKey` determinism, `buildSignMessage` format | `EthereumProvider` mock for `requestSwarmKeyFromWallet` |
+| `stamp-manager.ts` | Status parsing, cost estimation, preset generation | Mock `Bee` instance |
+| `share-manager.ts` | Share key derivation, profile read/write | Mock `SwarmClient` |
+| `types.ts` | `createEmptyManifest` factory | None |
+
+#### Level 2: Integration Tests (live Bee node)
+
+Test end-to-end data paths against `bee dev`:
+
+| Flow | Test |
+|------|------|
+| **Upload → Download** | `uploadData` → `downloadData` roundtrip with encryption |
+| **Manifest CRUD** | `updateManifest` → `readManifest` roundtrip (bytes mode) |
+| **Feed CRUD** | `writeFeedPayload` → `readFeedJson` roundtrip (requires real Bee, not dev) |
+| **User Manifest** | `updateUserManifest` → `readUserManifest` roundtrip |
+| **Drive Manifest** | `updateDriveManifest` → `readDriveManifest` roundtrip |
+| **Compaction** | Upload 30 batches → `compactManifest` → verify single batch, same ops |
+| **Sharing** | `uploadSharedData` → `downloadSharedData` with matching/mismatched keys |
+
+#### Level 3: E2E Flow Tests (plugin simulation)
+
+Test the 6 user flows with a mock `reactorClient` and real `SwarmClient`:
+
+| Flow | What to verify |
+|------|---------------|
+| **Create** | New doc triggers subscriber → ops buffered → flush → all 3 manifests updated |
+| **Sync** | 10 rapid edits → debounce → 1 upload + 1 feed write |
+| **Recover** | Write manifests → clear local state → `hydrateFromSwarm` → all docs restored with correct drive assignment and folder structure |
+| **Share** | Flush pending → bundle by drive → encrypt → share manifest written → recipient can import |
+| **Import** | Read share manifest → download → decrypt → correct drives/folders created |
+| **Clear Cache** | Empty manifests written → auto-reconnect → `syncPaused` resets → new sync works |
+
+### Test Infrastructure
+
+Existing test file: `tests/integration.test.ts` (12 tests against `bee dev`).
+
+Recommended additions:
+```
+tests/
+  unit/
+    swarm-crypto.test.ts      — encrypt/decrypt roundtrips
+    bytes-utils.test.ts       — hex conversion
+    wallet-signer.test.ts     — key derivation with mock provider
+    stamp-manager.test.ts     — status parsing with mock Bee
+    share-manager.test.ts     — share key + profile with mock client
+  integration/
+    integration.test.ts       — existing tests (SwarmClient against bee dev)
+    manifest-flush.test.ts    — debounced flush pipeline
+    compaction.test.ts        — manifest compaction per scope/branch
+  e2e/
+    create-sync-recover.test.ts  — full create → sync → recover flow
+    share-import.test.ts         — full share → import flow
+    clear-cache.test.ts          — clear → reconnect → sync flow
+```
+
+### Running Tests
+
+```bash
+# Unit tests (no Bee node needed)
+pnpm test:unit
+
+# Integration tests (requires bee dev running on localhost:1633)
+bee dev &
+pnpm test:integration
+
+# All tests
+pnpm test
+```
