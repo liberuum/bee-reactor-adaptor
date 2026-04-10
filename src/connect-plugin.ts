@@ -198,10 +198,17 @@ export class SwarmConnectPlugin {
         console.log(
           `[SwarmPlugin] Found ${driveCount} drive(s) on Swarm`,
         );
-        this.config.onUserManifestLoaded?.(this.userManifest);
       } else {
         console.log("[SwarmPlugin] No documents found on Swarm (new user)");
+        this.userManifest = {
+          address,
+          documents: {},
+          drives: {},
+          stamps: {},
+          updatedAt: new Date().toISOString(),
+        };
       }
+      this.config.onUserManifestLoaded?.(this.userManifest);
     }
 
     this.updateWindowState();
