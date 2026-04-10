@@ -1,0 +1,16 @@
+import { connectConfig } from "@powerhousedao/connect/config";
+import { packageJson } from "@powerhousedao/connect/utils";
+import { About as BaseAbout } from "@powerhousedao/design-system/connect";
+
+export const About: React.FC = () => {
+  return (
+    <BaseAbout
+      packageJson={packageJson}
+      phCliVersion={
+        typeof connectConfig.phCliVersion === "string"
+          ? connectConfig.phCliVersion
+          : undefined
+      }
+    />
+  );
+};

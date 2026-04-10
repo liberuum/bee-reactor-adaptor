@@ -1,0 +1,46 @@
+# @liberuum-org/connect
+
+Fork of `@powerhousedao/connect` with **Swarm Storage** integration. Adds decentralized document storage, encrypted sharing, and recovery via Swarm Bee nodes.
+
+## What's Added
+
+### Swarm Storage Settings Tab
+- **Connection**: configurable Bee node URL with Save & Connect
+- **Your Swarm ID**: copyable signer address for sharing with other users
+- **Storage stats**: capacity, TTL, utilization, USD pricing
+- **Document tree**: drives + docs with sync status badges
+- **Share**: checkbox tree to share individual docs or full drives with another Swarm user
+- **Import**: enter a sender's Swarm ID to import documents shared with you
+- **Stamp management**: extend duration, expand storage, buy new stamps
+- **Clear storage**: surgical clear (keeps identity, clears drives/shares)
+
+### Source Changes vs Upstream
+
+| File | Change |
+|------|--------|
+| `src/components/modal/modals/SettingsModal.tsx` | Added SwarmIcon + "Swarm Storage" tab |
+| `src/components/modal/modals/settings/swarm-storage.tsx` | Full Swarm settings UI (new file) |
+| `src/globals.ts` | Added `window.ethereum` type for wallet interaction |
+| `src/hooks/useRegistryPackages.ts` | Added `isUsableRegistryUrl` guard for null registry URLs |
+
+All other source files are synced from upstream `@powerhousedao/connect`.
+
+## Publishing
+
+```bash
+npm run build
+npm publish --tag swarm
+```
+
+Published as `@liberuum-org/connect` on npm with the `swarm` tag.
+
+## Usage in swarm-doc-model
+
+In `package.json` resolutions:
+```json
+{
+  "resolutions": {
+    "@powerhousedao/connect": "npm:@liberuum-org/connect@6.0.0-dev.161-swarm.23"
+  }
+}
+```

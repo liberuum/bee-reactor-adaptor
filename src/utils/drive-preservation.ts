@@ -1,0 +1,67 @@
+import { connectConfig } from "@powerhousedao/connect/config";
+
+type RemoveOldRemoteDrivesOption =
+  | { strategy: "preserve-all" }
+  | { strategy: "preserve-by-id"; ids: string[] }
+  | { strategy: "preserve-by-url-and-detach"; urls: string[] };
+
+/**
+ * Supported drive preservation strategies
+ */
+const SUPPORTED_STRATEGIES = [
+  "preserve-all",
+  "preserve-by-url-and-detach",
+] as const;
+
+type SupportedStrategy = (typeof SUPPORTED_STRATEGIES)[number];
+
+/**
+ * Get the drive preservation strategy from environment variable
+ * @returns Valid strategy or default 'preserve-by-url-and-detach'
+ */
+export const getDrivePreservationStrategy = (): SupportedStrategy => {
+  const envStrategy = connectConfig.drives.preserveStrategy;
+
+  if (!envStrategy) {
+    return "preserve-by-url-and-detach";
+  }
+
+  const isValidStrategy = (strategy: string): strategy is SupportedStrategy => {
+    return SUPPORTED_STRATEGIES.includes(strategy as SupportedStrategy);
+  };
+
+  return isValidStrategy(envStrategy)
+    ? envStrategy
+    : "preserve-by-url-and-detach";
+};
+
+/**
+ * Create the removeOldRemoteDrives configuration based on strategy and drive URLs
+ * @param defaultDrivesUrl Array of default drive URLs
+ * @returns RemoveOldRemoteDrives configuration
+ */
+export const createRemoveOldRemoteDrivesConfig = (
+  defaultDrivesUrl: string[],
+): RemoveOldRemoteDrivesOption => {
+  if (defaultDrivesUrl.length === 0) {
+    return { strategy: "preserve-all" };
+  }
+
+  const strategy: SupportedStrategy = getDrivePreservationStrategy();
+
+  switch (strategy) {
+    case "preserve-all":
+      return { strategy: "preserve-all" };
+    case "preserve-by-url-and-detach":
+      return {
+        strategy: "preserve-by-url-and-detach",
+        urls: defaultDrivesUrl,
+      };
+    default:
+      // TypeScript exhaustiveness check - should never reach here
+      return {
+        strategy: "preserve-by-url-and-detach",
+        urls: defaultDrivesUrl,
+      };
+  }
+};
