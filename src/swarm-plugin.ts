@@ -703,8 +703,22 @@ async function hydrateFromSwarm(
       if (dm?.folders && Object.keys(dm.folders).length > 0) {
         const actions: any[] = [];
 
-        // Create folders first (must match createAction() shape: id, timestampUtcMs, type, input, scope)
-        for (const [folderId, folder] of Object.entries(dm.folders)) {
+        // Create folders in dependency order — parents before children
+        const folderEntries = Object.entries(dm.folders);
+        const sorted: Array<[string, { name: string; parentFolder?: string }]> = [];
+        const added = new Set<string>();
+        const addFolder = (id: string, folder: { name: string; parentFolder?: string }) => {
+          if (added.has(id)) return;
+          // Add parent first if it exists
+          if (folder.parentFolder && dm.folders![folder.parentFolder] && !added.has(folder.parentFolder)) {
+            addFolder(folder.parentFolder, dm.folders![folder.parentFolder]);
+          }
+          sorted.push([id, folder]);
+          added.add(id);
+        };
+        for (const [id, folder] of folderEntries) addFolder(id, folder);
+
+        for (const [folderId, folder] of sorted) {
           actions.push({
             id: crypto.randomUUID(),
             timestampUtcMs: new Date().toISOString(),
@@ -2452,8 +2466,20 @@ async function importFromUser(
           await reactorClient.get(localDriveId);
           const folderActions: any[] = [];
 
-          // Create folders
-          for (const [folderId, folder] of Object.entries(bundleFolders)) {
+          // Create folders in dependency order — parents before children
+          const sortedFolders: Array<[string, { name: string; parentFolder?: string }]> = [];
+          const addedFolders = new Set<string>();
+          const addF = (id: string, f: { name: string; parentFolder?: string }) => {
+            if (addedFolders.has(id)) return;
+            if (f.parentFolder && bundleFolders[f.parentFolder] && !addedFolders.has(f.parentFolder)) {
+              addF(f.parentFolder, bundleFolders[f.parentFolder]);
+            }
+            sortedFolders.push([id, f]);
+            addedFolders.add(id);
+          };
+          for (const [id, f] of Object.entries(bundleFolders)) addF(id, f);
+
+          for (const [folderId, folder] of sortedFolders) {
             folderActions.push({
               id: crypto.randomUUID(),
               timestampUtcMs: new Date().toISOString(),
