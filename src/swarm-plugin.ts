@@ -565,8 +565,10 @@ async function hydrateFromSwarm(
   for (const [swarmDriveId] of docsByDrive) {
     if (driveIdMap.has(swarmDriveId)) continue;
     const driveName = swarmDriveNames.get(swarmDriveId) || "Recovered Drive";
+    const cachedDm = driveManifestCache.get(swarmDriveId);
+    const preferredEditor = cachedDm?.preferredEditor;
     try {
-      const d = await addDrive({ global: { name: driveName } });
+      const d = await addDrive({ global: { name: driveName } }, preferredEditor);
       const localId = d?.header?.id;
       if (localId) {
         driveIdMap.set(swarmDriveId, localId);
@@ -1679,9 +1681,11 @@ async function flushUserManifest(
       // v2: Write drive entries, not per-doc entries
       if (!userManifest.drives) userManifest.drives = {};
       for (const [driveId, { driveName }] of batch) {
+        const cached = driveManifestCache.get(driveId);
         userManifest.drives[driveId] = {
           name: driveName,
           documentIds: [],
+          ...(cached?.preferredEditor ? { preferredEditor: cached.preferredEditor } : {}),
           lastUpdated: new Date().toISOString(),
         };
       }
@@ -1981,12 +1985,15 @@ async function flushDriveManifest(
       const knownName = driveNames.get(driveId);
       if (knownName) manifest.name = knownName;
 
-      // Populate folder info from drive's node tree (best effort)
+      // Populate folder info + preferredEditor from drive's state (best effort)
       try {
         const ph = (globalThis as any).window?.ph;
         const rc = ph?.reactorClient;
         if (rc) {
           const driveDoc = await rc.get(driveId);
+          // Store preferredEditor for custom drive types
+          const editor = driveDoc?.header?.meta?.preferredEditor;
+          if (editor) manifest.preferredEditor = editor;
           const nodes = driveDoc?.state?.global?.nodes ?? [];
           if (nodes.length > 0) {
             const folders: Record<string, { name: string; parentFolder?: string }> = {};
@@ -2241,6 +2248,7 @@ async function shareDocumentsWithUser(
       }
 
       // Bundle ALL docs' ops for this drive into ONE upload
+      const cachedDm = driveManifestCache.get(driveId);
       const bundle = {
         documents: docs.map((d) => ({
           documentId: d.docId,
@@ -2249,6 +2257,7 @@ async function shareDocumentsWithUser(
           operations: d.ops,
         })),
         ...(folderInfo ? { folders: folderInfo.folders, docFolders: folderInfo.docFolders } : {}),
+        ...(cachedDm?.preferredEditor ? { preferredEditor: cachedDm.preferredEditor } : {}),
       };
       const shareResult = await client.uploadSharedData(JSON.stringify(bundle), mySignerAddress, recipientSignerAddress);
 
@@ -2320,33 +2329,7 @@ async function importFromUser(
       const driveName = share.driveName || "Imported Docs";
       const displayName = `${driveName} (shared)`;
 
-      // Reuse drive from previous imports
-      const driveKey = `swarm:importDrive:${senderSignerAddress}:${displayName}`;
-      let localDriveId: string | undefined;
-      try {
-        const cached = sessionStorage.getItem(driveKey);
-        if (cached) {
-          await reactorClient.get(cached);
-          localDriveId = cached;
-          console.log(`[SwarmPlugin] Reusing import drive "${displayName}" (${localDriveId.slice(0, 8)})`);
-        }
-      } catch { /* drive doesn't exist, create new */ }
-
-      if (!localDriveId) {
-        try {
-          const d = await addDrive({ global: { name: displayName } });
-          localDriveId = d?.header?.id;
-          if (!localDriveId) continue;
-          sessionStorage.setItem(driveKey, localDriveId);
-          console.log(`[SwarmPlugin] Created import drive: ${displayName} (${localDriveId.slice(0, 8)})`);
-          await new Promise((r) => setTimeout(r, 500));
-        } catch (err) {
-          console.warn(`[SwarmPlugin] Failed to create drive "${displayName}":`, err);
-          continue;
-        }
-      }
-
-      // Download the drive bundle (one download → all docs for this drive)
+      // Download the drive bundle FIRST (need preferredEditor before creating drive)
       console.log(`[SwarmPlugin] Downloading drive bundle "${driveName}" ref=${share.reference.slice(0, 16)}...`);
       let bundleData: Uint8Array | null = null;
       const retryDelays = [0, 3000, 8000];
@@ -2366,7 +2349,7 @@ async function importFromUser(
       }
       if (!bundleData) continue;
 
-      // Parse the bundle — { documents, folders?, docFolders? }
+      // Parse the bundle — { documents, folders?, docFolders?, preferredEditor? }
       const bundleRaw = JSON.parse(new TextDecoder().decode(bundleData));
       if (!bundleRaw.documents) {
         console.warn(`[SwarmPlugin] Stale bundle format for "${driveName}" — ask sender to re-share`);
@@ -2374,8 +2357,35 @@ async function importFromUser(
       }
       const docs: any[] = bundleRaw.documents;
       const bundleFolders: Record<string, { name: string; parentFolder?: string }> = bundleRaw.folders ?? {};
+      const bundlePreferredEditor: string | undefined = bundleRaw.preferredEditor;
       const bundleDocFolders: Record<string, string> = bundleRaw.docFolders ?? {};
-      console.log(`[SwarmPlugin] Downloaded bundle: ${docs.length} doc(s) in "${driveName}"${Object.keys(bundleFolders).length > 0 ? `, ${Object.keys(bundleFolders).length} folder(s)` : ""}`);
+      console.log(`[SwarmPlugin] Downloaded bundle: ${docs.length} doc(s) in "${driveName}"${Object.keys(bundleFolders).length > 0 ? `, ${Object.keys(bundleFolders).length} folder(s)` : ""}${bundlePreferredEditor ? ` (editor: ${bundlePreferredEditor})` : ""}`);
+
+      // Create or reuse local drive for this bundle
+      const driveKey = `swarm:importDrive:${senderSignerAddress}:${displayName}`;
+      let localDriveId: string | undefined;
+      try {
+        const cached = sessionStorage.getItem(driveKey);
+        if (cached) {
+          await reactorClient.get(cached);
+          localDriveId = cached;
+          console.log(`[SwarmPlugin] Reusing import drive "${displayName}" (${localDriveId.slice(0, 8)})`);
+        }
+      } catch { /* drive doesn't exist, create new */ }
+
+      if (!localDriveId) {
+        try {
+          const d = await addDrive({ global: { name: displayName } }, bundlePreferredEditor);
+          localDriveId = d?.header?.id;
+          if (!localDriveId) continue;
+          sessionStorage.setItem(driveKey, localDriveId);
+          console.log(`[SwarmPlugin] Created import drive: ${displayName} (${localDriveId.slice(0, 8)})`);
+          await new Promise((r) => setTimeout(r, 500));
+        } catch (err) {
+          console.warn(`[SwarmPlugin] Failed to create drive "${displayName}":`, err);
+          continue;
+        }
+      }
 
       // Map original docId → new local docId (for folder assignment)
       const origToLocal = new Map<string, string>();

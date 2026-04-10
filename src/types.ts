@@ -115,6 +115,8 @@ export interface UserDocumentEntry {
 export interface UserDriveEntry {
   name: string;
   documentIds: string[];
+  /** Custom drive editor type (e.g. "builder-team-admin"). Undefined for generic drives. */
+  preferredEditor?: string;
   lastUpdated: string;
 }
 
@@ -139,6 +141,9 @@ export interface UserStampEntry {
 export interface SwarmDriveManifest {
   driveId: string;
   name: string;
+
+  /** Custom drive editor type (e.g. "builder-team-admin"). Undefined for generic drives. */
+  preferredEditor?: string;
 
   /** Documents in this drive, indexed by documentId */
   documents: Record<string, DriveDocumentEntry>;
