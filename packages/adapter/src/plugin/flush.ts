@@ -10,6 +10,7 @@
  */
 import type { SwarmClient } from "../swarm-client.js";
 import { clearPendingOps, clearAllPendingOps } from "./pending-ops-store.js";
+import { emitSwarmEvent } from "./events.js";
 import {
   state,
   setSwarmStatus,
@@ -111,8 +112,10 @@ export async function flushDocumentManifest(docId: string): Promise<void> {
     const manifestCopy = JSON.parse(JSON.stringify(manifest));
 
     if (opsSnapshot.length > 0) {
+      emitSwarmEvent("sync:flushing", { docId, docName, opsCount: opsSnapshot.length });
+
       const payload = JSON.stringify(opsSnapshot);
-      const { reference } = await swarmClient.uploadData(payload);
+      const { reference, tagUid } = await swarmClient.uploadData(payload, { tracked: true, deferred: true });
       addUploadedBytes(payload.length);
 
       const startIndex = opsSnapshot[0].index;
@@ -130,6 +133,22 @@ export async function flushDocumentManifest(docId: string): Promise<void> {
       console.log(
         `[SwarmPlugin] Flushing ${opsSnapshot.length} ops for "${docName}" (${docId.slice(0, 8)}...) → ref:${reference.slice(0, 12)}...`,
       );
+
+      // Wait for network confirmation (non-blocking for the manifest write)
+      if (tagUid) {
+        swarmClient.waitForConfirmation(tagUid, 30_000, 2_000).then(
+          (result) => {
+            emitSwarmEvent("sync:confirmed", {
+              docId, docName, opsCount: opsSnapshot.length, reference,
+              durationMs: result.durationMs, chunksTotal: result.total, chunksSynced: result.synced,
+            });
+            console.log(`[SwarmPlugin] Confirmed "${docName}" — ${result.synced}/${result.total} chunks in ${result.durationMs}ms`);
+          },
+          (err) => {
+            console.warn(`[SwarmPlugin] Confirmation timeout for "${docName}":`, err instanceof Error ? err.message : err);
+          },
+        );
+      }
     }
 
     manifestCopy.updatedAt = new Date().toISOString();
@@ -158,11 +177,18 @@ export async function flushDocumentManifest(docId: string): Promise<void> {
     console.log(
       `[SwarmPlugin] Manifest written for "${docName}" (${docId.slice(0, 8)}...)`,
     );
+
+    // Check if all pending ops are now flushed
+    if (state.pendingOps.size === 0 && state.pendingManifests.size === 0) {
+      emitSwarmEvent("sync:all-synced", {});
+    }
   } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
     setDocSyncStatus(docId, "error");
+    emitSwarmEvent("sync:error", { docId, docName, error: errorMsg });
     console.warn(
       `[SwarmPlugin] Manifest flush failed for ${docId.slice(0, 8)}...:`,
-      err instanceof Error ? err.message : err,
+      errorMsg,
     );
     // Ops are still in state.pendingOps (never removed on failure).
     // Schedule a retry in 5s.

@@ -63,3 +63,5 @@ export {
 } from "./wallet-signer.js";
 export type { SwarmSignerEntry, EthereumProvider } from "./wallet-signer.js";
 export { swarmPluginProcessorBuilder } from "./swarm-plugin.js";
+export { onSwarmEvent, emitSwarmEvent } from "./plugin/events.js";
+export type { SwarmEventType, SwarmEventData } from "./plugin/events.js";

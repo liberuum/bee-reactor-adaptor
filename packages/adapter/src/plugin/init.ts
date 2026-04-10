@@ -24,6 +24,7 @@ import { hydrateFromSwarm, populateUiCacheFromDrives } from "./hydration.js";
 import { startOperationSync } from "./sync.js";
 import { publishPublicProfile, shareDocumentsWithUser, importFromUser } from "./sharing.js";
 import { markPendingOpsExist } from "./pending-ops-store.js";
+import { installEventHandlers, emitSwarmEvent } from "./events.js";
 
 const FEED_TOPIC_PREFIX = "ph:v2";
 
@@ -101,6 +102,7 @@ async function waitForBeeNode(): Promise<boolean> {
 
     console.log(`[SwarmPlugin] Bee node not reachable at ${state.beeUrl} — retrying in ${BEE_HEALTH_RETRY_MS / 1000}s`);
     setSwarmStatus("disconnected", `Bee node not reachable at ${state.beeUrl}. Retrying automatically...`);
+    emitSwarmEvent("plugin:retrying", { beeUrl: state.beeUrl, retryInMs: BEE_HEALTH_RETRY_MS });
     await new Promise((r) => setTimeout(r, BEE_HEALTH_RETRY_MS));
   }
 }
@@ -164,6 +166,7 @@ async function initSwarmPlugin(): Promise<void> {
         `[SwarmPlugin] Ready — ${entry.ownerAddress.slice(0, 10)}...`,
       );
       setSwarmStatus("ready", "Connected to Swarm");
+      emitSwarmEvent("plugin:ready", { ownerAddress: entry.ownerAddress, beeUrl: state.beeUrl, isDevMode });
       const ph = (globalThis as any).window?.ph;
       if (ph?.swarm) {
         ph.swarm.isDevMode = isDevMode;
@@ -219,6 +222,9 @@ function applySwarmExtensions(ph: any, isDevMode: boolean): void {
   ph.swarm.totalBytesUploaded = getUploadedBytes();
   ph.swarm.beeUrl = state.beeUrl;
   if (!ph.swarm.syncStatus) ph.swarm.syncStatus = {};
+
+  // Install event system: window.ph.swarm.on("sync:confirmed", callback)
+  installEventHandlers(ph.swarm);
 
   // If not ready yet (waiting for wallet login), show initializing status
   if (!ph.swarm.ready) {

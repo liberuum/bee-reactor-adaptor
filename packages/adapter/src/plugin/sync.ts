@@ -12,6 +12,7 @@ import {
   createEmptyManifest,
   DOCUMENT_MANIFEST_FLUSH_DELAY_MS,
 } from "./state.js";
+import { emitSwarmEvent } from "./events.js";
 import {
   throttledFlush,
   flushDriveManifest,
@@ -335,6 +336,7 @@ async function syncDocumentToSwarm(
     updateUserManifest(swarmClient, ownerAddress, docId, docType, docName, driveId);
   }
 
+  emitSwarmEvent("sync:buffered", { docId, docName, pendingOps: buffer.length });
   console.log(
     `[SwarmPlugin] Buffered ${newOps.length} ops for "${docName}" (${docId.slice(0, 8)}..., flush in ${DOCUMENT_MANIFEST_FLUSH_DELAY_MS / 1000}s)`,
   );
