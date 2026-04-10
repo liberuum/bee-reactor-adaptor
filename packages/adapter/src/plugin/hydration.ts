@@ -430,8 +430,8 @@ export async function hydrateFromSwarm(
       const dm = await swarmClient.readDriveManifest(swarmDriveId);
       if (dm?.folders && Object.keys(dm.folders).length > 0) {
         const docMoves = Object.entries(dm.documents)
-          .filter(([_, e]) => (e as any).parentFolder)
-          .map(([docId, e]) => ({ docId, targetFolder: (e as any).parentFolder as string }));
+          .filter(([_, e]) => e.parentFolder)
+          .map(([docId, e]) => ({ docId, targetFolder: e.parentFolder as string }));
         await restoreFolderStructure(reactorClient, localDriveId, dm.folders, docMoves);
         console.log(`[SwarmPlugin] Folder structure restored for drive ${swarmDriveId.slice(0, 8)}`);
       }

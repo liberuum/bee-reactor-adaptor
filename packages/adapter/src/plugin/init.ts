@@ -76,6 +76,35 @@ async function fetchUsableStamp(): Promise<{ batchID: string } | null> {
   return data.stamps.find((s) => s.usable) ?? null;
 }
 
+/**
+ * Wait for the Bee node to become reachable. Checks immediately, then
+ * retries every 15 seconds in the background. Returns true once healthy.
+ * This prevents the user from having to refresh the page when the Bee
+ * node starts after Connect.
+ */
+const BEE_HEALTH_RETRY_MS = 15_000;
+
+async function waitForBeeNode(): Promise<boolean> {
+  while (true) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 3000);
+      const res = await fetch(`${state.beeUrl}/health`, { signal: controller.signal });
+      clearTimeout(timeout);
+      if (res.ok) {
+        console.log("[SwarmPlugin] Bee node is reachable");
+        return true;
+      }
+    } catch {
+      // Not reachable yet
+    }
+
+    console.log(`[SwarmPlugin] Bee node not reachable at ${state.beeUrl} — retrying in ${BEE_HEALTH_RETRY_MS / 1000}s`);
+    setSwarmStatus("disconnected", `Bee node not reachable at ${state.beeUrl}. Retrying automatically...`);
+    await new Promise((r) => setTimeout(r, BEE_HEALTH_RETRY_MS));
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Initialization
 // ═══════════════════════════════════════════════════════════════
@@ -83,25 +112,9 @@ async function fetchUsableStamp(): Promise<{ batchID: string } | null> {
 async function initSwarmPlugin(): Promise<void> {
   setSwarmStatus("initializing", "Connecting to Bee node...");
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 3000);
-
-  try {
-    const healthRes = await fetch(`${state.beeUrl}/health`, {
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-    if (!healthRes.ok) {
-      console.log("[SwarmPlugin] Bee node not available");
-      setSwarmStatus("disconnected", "Bee node not available. Start a Bee node to enable Swarm storage.");
-      return;
-    }
-  } catch {
-    clearTimeout(timeout);
-    console.log("[SwarmPlugin] Bee node not reachable at", state.beeUrl);
-    setSwarmStatus("disconnected", `Bee node not reachable at ${state.beeUrl}. Install and start a Bee node to enable decentralized storage.`);
-    return;
-  }
+  // Wait for Bee node to become reachable — retries every 15s in the background
+  const healthy = await waitForBeeNode();
+  if (!healthy) return; // Should not happen (loops until success or page close)
 
   setSwarmStatus("initializing", "Checking postage stamps...");
 
@@ -268,6 +281,9 @@ function applySwarmExtensions(ph: any, isDevMode: boolean): void {
 
     if (ph.swarm) ph.swarm.ready = false;
 
+    // Re-probe dev mode — Bee URL may have changed to a different node
+    const freshIsDevMode = await detectDevMode();
+
     try {
       const freshPlugin = new SwarmConnectPlugin({
         beeUrl: state.beeUrl,
@@ -292,7 +308,7 @@ function applySwarmExtensions(ph: any, isDevMode: boolean): void {
         onReady: (client, readyEntry) => {
           console.log(`[SwarmPlugin] Reconnected — ${readyEntry.ownerAddress.slice(0, 10)}... (${state.beeUrl})`);
           // Re-apply all custom fields since freshPlugin.start() overwrote ph.swarm
-          applySwarmExtensions(ph, isDevMode);
+          applySwarmExtensions(ph, freshIsDevMode);
           if (ph.swarm) ph.swarm.plugin = freshPlugin;
 
           publishPublicProfile(client as SwarmClient, address, readyEntry.swarmPublicKey).catch(
@@ -309,7 +325,7 @@ function applySwarmExtensions(ph: any, isDevMode: boolean): void {
 
       await freshPlugin.start();
       // freshPlugin.start() overwrites ph.swarm — re-apply fields
-      applySwarmExtensions(ph, isDevMode);
+      applySwarmExtensions(ph, freshIsDevMode);
       if (ph.swarm) ph.swarm.plugin = freshPlugin;
       console.log("[SwarmPlugin] Reconnected successfully");
     } catch (err) {

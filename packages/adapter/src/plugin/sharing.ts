@@ -175,9 +175,9 @@ export async function shareDocumentsWithUser(
         const docFolders: Record<string, string> = {};
         const usedFolderIds = new Set<string>();
         for (const [docId, docEntry] of Object.entries(dm.documents)) {
-          if (sharedDocIds.has(docId) && (docEntry as any).parentFolder) {
-            docFolders[docId] = (docEntry as any).parentFolder;
-            usedFolderIds.add((docEntry as any).parentFolder);
+          if (sharedDocIds.has(docId) && docEntry.parentFolder) {
+            docFolders[docId] = docEntry.parentFolder;
+            usedFolderIds.add(docEntry.parentFolder);
           }
         }
         // Include parent chain for nested folders

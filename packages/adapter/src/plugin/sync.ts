@@ -492,12 +492,24 @@ async function compactAllManifests(
   swarmClient: SwarmClient,
   ownerAddress: string,
 ): Promise<void> {
+  // Only compact docs we OWN (in our drives). Imported/shared docs belong
+  // to other users — writing to their feed would fail (wrong signer).
+  const ownedDocIds = new Set<string>();
   const ph = (globalThis as any).window?.ph;
   const userManifest = ph?.swarm?.userManifest;
-  if (!userManifest?.documents) return;
+  if (!userManifest?.drives) return;
 
-  for (const [docId, entry] of Object.entries(userManifest.documents)) {
-    if ((entry as any).documentType === "powerhouse/document-drive") continue;
+  // Collect doc IDs from our own drives only
+  for (const driveId of Object.keys(userManifest.drives)) {
+    const dm = state.driveManifestCache.get(driveId);
+    if (dm) {
+      for (const docId of Object.keys(dm.documents)) {
+        ownedDocIds.add(docId);
+      }
+    }
+  }
+
+  for (const docId of ownedDocIds) {
     try {
       const compacted = await swarmClient.compactManifest(docId);
       if (compacted) {

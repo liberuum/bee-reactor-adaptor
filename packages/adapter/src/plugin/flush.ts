@@ -12,6 +12,7 @@ import type { SwarmClient } from "../swarm-client.js";
 import { clearPendingOps, clearAllPendingOps } from "./pending-ops-store.js";
 import {
   state,
+  setSwarmStatus,
   setDocSyncStatus,
   addUploadedBytes,
   setHydrationRan,
@@ -88,6 +89,22 @@ export async function flushDocumentManifest(docId: string): Promise<void> {
     }
   }
   setDocSyncStatus(docId, "flushing", opsSnapshot.length);
+
+  // Pre-flight: check if stamp is still usable before attempting upload.
+  // Without this, an expired stamp causes infinite 5s retry loops.
+  try {
+    const stampOk = await swarmClient.stamps.getStampStatus();
+    if (!stampOk.usable || stampOk.health === "expired") {
+      setDocSyncStatus(docId, "error");
+      setSwarmStatus("no-stamp", "Postage stamp expired. Buy or top up a stamp to resume syncing.");
+      console.warn(`[SwarmPlugin] Stamp expired — flush paused for ${docId.slice(0, 8)}...`);
+      // Do NOT retry — user must fix the stamp first. Ops stay in buffer + IndexedDB.
+      return;
+    }
+  } catch {
+    // Stamp check failed (Bee unreachable?) — proceed with upload attempt,
+    // it will fail and retry naturally
+  }
 
   try {
     // Work on a deep copy of the manifest — partial failure must not corrupt in-memory state
@@ -415,7 +432,7 @@ export async function flushDriveManifest(
             documentType: docEntry.documentType,
             name: docEntry.name,
             driveId,
-            parentFolder: (docEntry as any).parentFolder || undefined,
+            parentFolder: docEntry.parentFolder || undefined,
             lastUpdated: docEntry.lastUpdated,
           };
         }
