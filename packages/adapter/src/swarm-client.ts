@@ -43,6 +43,11 @@ export class SwarmClient {
   /** Per-topic write lock — serializes feed writes to prevent concurrent index conflicts */
   private feedWriteLocks: Map<string, Promise<void>> = new Map();
 
+  /** Feed index from the last readFeedJson call (for debugging/optimization) */
+  private lastFeedIndex: unknown = undefined;
+  /** Next feed index from the last readFeedJson call */
+  private lastFeedIndexNext: unknown = undefined;
+
   /** Stamp management (status, top-up, pricing, presets) */
   readonly stamps: StampManager;
 
@@ -96,6 +101,9 @@ export class SwarmClient {
       /** Use deferred upload (store locally first, push to network in background).
        *  Faster upload — returns immediately. Use with tracked:true to get confirmation. */
       deferred?: boolean;
+      /** Erasure coding redundancy level (1-4). Higher = more chunk loss protection.
+       *  Level 1: ~1%, Level 2: ~5%, Level 3: ~10%, Level 4: ~25% */
+      redundancyLevel?: 1 | 2 | 3 | 4;
     },
   ): Promise<{ reference: string; historyAddress?: string; tagUid?: number }> {
     let payload: string | Uint8Array = data;
@@ -114,6 +122,7 @@ export class SwarmClient {
     const result = await this.bee.uploadData(this.batchId, payload, {
       act: options?.act,
       actHistoryAddress: options?.actHistoryAddress,
+      redundancyLevel: options?.redundancyLevel,
       tag,
       deferred: options?.deferred,
     });
@@ -543,6 +552,12 @@ export class SwarmClient {
   getManifestIndex(): Map<string, string> { return new Map(this.manifestIndex); }
   setManifestIndex(index: Map<string, string>): void { this.manifestIndex = new Map(index); }
 
+  /** Get feed index metadata from the last readFeedJson call.
+   *  Useful for knowing where you are in the feed sequence. */
+  getLastFeedIndex(): { feedIndex: unknown; feedIndexNext: unknown } {
+    return { feedIndex: this.lastFeedIndex, feedIndexNext: this.lastFeedIndexNext };
+  }
+
   // ═══════════════════════════════════════════════════════════════
   // Delegation: Stamp methods (backward compatibility)
   // ═══════════════════════════════════════════════════════════════
@@ -554,6 +569,7 @@ export class SwarmClient {
   async getBzzUsdPrice(): Promise<number | null> { return getBzzUsdPrice(); }
   async estimateStampCost(depth: number, days: number) { return this.stamps.estimateStampCost(depth, days); }
   async getStampOptions() { return this.stamps.getStampOptions(); }
+  async getBucketUtilization() { return this.stamps.getBucketUtilization(); }
   async createStamp(amount: string, depth: number, options?: { immutable?: boolean }): Promise<string> { return this.stamps.createStamp(amount, depth, options); }
 
   // ═══════════════════════════════════════════════════════════════
@@ -609,7 +625,9 @@ export class SwarmClient {
   /**
    * Read JSON from a feed using the native reference format.
    * Uses downloadReference (binary 32-byte ref) for efficiency.
-   * Falls back to downloadPayload (legacy hex text) for backward compatibility.
+   *
+   * Also captures feed index metadata (feedIndex, feedIndexNext) which
+   * can be used for pre-calculating the next write index.
    */
   async readFeedJson<T>(
     topic: Topic,
@@ -618,10 +636,12 @@ export class SwarmClient {
   ): Promise<T | null> {
     const reader = this.bee.makeFeedReader(topic, ownerAddress);
 
-    // Use downloadReference to read the native 32-byte reference written by uploadReference.
-    // This is the only read path — we always write with uploadReference now.
     const result = await reader.downloadReference();
     const ref = result.reference.toHex();
+
+    // Capture feed index metadata for callers that need it
+    this.lastFeedIndex = result.feedIndex;
+    this.lastFeedIndexNext = result.feedIndexNext;
 
     const data = options?.skipDecryption
       ? await this.downloadData(ref, { skipDecryption: true })

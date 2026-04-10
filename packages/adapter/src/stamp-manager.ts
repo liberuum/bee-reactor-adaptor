@@ -72,6 +72,45 @@ export class StampManager {
   }
 
   /**
+   * Get per-bucket utilization for the stamp.
+   * Returns the fill level of each of the 65,536 buckets.
+   * Useful for detecting "hot buckets" that are close to overflowing.
+   *
+   * @returns Array of bucket depths (how full each bucket is)
+   */
+  async getBucketUtilization(): Promise<{
+    depth: number;
+    bucketDepth: number;
+    bucketUpperBound: number;
+    buckets: Array<{ index: number; collisions: number }>;
+    hotBuckets: Array<{ index: number; collisions: number; percentFull: number }>;
+  }> {
+    const batch = await this.bee.getPostageBatch(this.batchId);
+    const batchBuckets = await this.bee.getPostageBatchBuckets(this.batchId);
+    const bucketUpperBound = Math.pow(2, batch.depth - batch.bucketDepth);
+
+    const buckets: Array<{ index: number; collisions: number }> = [];
+    const hotBuckets: Array<{ index: number; collisions: number; percentFull: number }> = [];
+
+    for (let i = 0; i < batchBuckets.buckets.length; i++) {
+      const collisions = batchBuckets.buckets[i];
+      buckets.push({ index: i, collisions });
+      const percentFull = Math.round((collisions / bucketUpperBound) * 100);
+      if (percentFull >= 80) {
+        hotBuckets.push({ index: i, collisions, percentFull });
+      }
+    }
+
+    return {
+      depth: batch.depth,
+      bucketDepth: batch.bucketDepth,
+      bucketUpperBound,
+      buckets,
+      hotBuckets,
+    };
+  }
+
+  /**
    * Top up the postage stamp to extend its TTL.
    */
   async topUpStamp(additionalAmount: bigint | string): Promise<void> {
