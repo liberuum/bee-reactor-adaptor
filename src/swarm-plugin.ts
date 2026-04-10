@@ -2185,11 +2185,23 @@ async function shareDocumentsWithUser(
     const mySignerAddress = client.getOwnerAddress();
     console.log(`[SwarmPlugin] Sharing ${docIds.length} doc(s) with signer ${recipientSignerAddress.slice(0, 10)}...`);
 
-    // Flush any pending manifests for the docs being shared
+    // Flush ALL pending docs before sharing — ensure ops are on Swarm
+    // (the 3s debounce may not have fired yet for recently edited docs)
     for (const docId of docIds) {
-      if (pendingManifests.has(docId)) {
+      if (pendingManifests.has(docId) || pendingOps.has(docId)) {
         await flushDocumentManifest(docId);
       }
+    }
+    // Also flush any drive that contains shared docs
+    const drivesToFlush = new Set<string>();
+    for (const docId of docIds) {
+      const driveId = docToDrive.get(docId);
+      if (driveId && pendingDriveUpdates.has(driveId)) {
+        drivesToFlush.add(driveId);
+      }
+    }
+    for (const driveId of drivesToFlush) {
+      await flushDriveManifest(client, driveId);
     }
 
     const ph = (globalThis as any).window?.ph;
