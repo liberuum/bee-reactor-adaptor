@@ -46,21 +46,28 @@ export class BeeReactorAdapter {
   private swarmKeyframeStore: SwarmKeyframeStore | null = null;
   private started = false;
 
-  constructor(config: BeeAdapterConfig) {
+  constructor(
+    config: BeeAdapterConfig,
+    /** Pre-built dependencies for testing / DI. If omitted, created from config. */
+    deps?: {
+      swarmClient?: SwarmClient;
+      hydrator?: SwarmHydrator;
+    },
+  ) {
     this.config = {
       ...config,
       trackedDocuments: config.trackedDocuments ?? [],
       pollIntervalMs: config.pollIntervalMs ?? 30_000,
     };
 
-    this.swarmClient = new SwarmClient({
+    this.swarmClient = deps?.swarmClient ?? new SwarmClient({
       beeUrl: config.beeUrl,
       batchId: config.batchId,
       signerPrivateKey: config.signerPrivateKey,
       useFeedMode: config.useFeedMode,
     });
 
-    this.hydrator = new SwarmHydrator(this.swarmClient);
+    this.hydrator = deps?.hydrator ?? new SwarmHydrator(this.swarmClient);
   }
 
   /**

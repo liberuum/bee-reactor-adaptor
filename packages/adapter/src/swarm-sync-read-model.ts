@@ -1,9 +1,7 @@
 import type { SwarmClient } from "./swarm-client.js";
-import { encrypt } from "./swarm-crypto.js";
-import type {
-  SwarmDocumentManifest,
-  SwarmUserManifest,
-} from "./types.js";
+import type { SwarmUserManifest } from "./types.js";
+import { createEmptyManifest } from "./types.js";
+import type { OperationWithContext } from "./swarm-operation-store.js";
 
 /**
  * IReadModel-compatible class that uploads operations to Swarm
@@ -11,19 +9,27 @@ import type {
  *
  * This is registered via `ReactorBuilder.withReadModel()` and receives
  * every operation after it's written to the local SQL store. It then:
- * 1. Uploads the operation batch to Swarm /bytes (optionally encrypted)
+ * 1. Uploads the operation batch to Swarm /bytes (encrypted by SwarmClient)
  * 2. Updates the per-document manifest
  * 3. Extracts the user's Ethereum address from the signer context
  * 4. Updates the user-level manifest (for document discovery on login)
  *
- * When an encryption key is set (via `setEncryptionKey()`), all operation
- * payloads and manifests are encrypted with AES-256-GCM before upload.
- * The key is typically derived from the user's wallet signature.
+ * Encryption is handled by SwarmClient (AES-256-GCM when useEncryption is
+ * true on the client). This class does NOT manage its own encryption key.
  */
 export class SwarmSyncReadModel {
   readonly name = "swarm-sync";
   private pendingUploads: Map<string, Promise<void>> = new Map();
-  private encryptionKey: string | null = null;
+
+  /** Per-document lock — serializes read-modify-write on the doc manifest feed */
+  private docManifestLocks: Map<string, Promise<void>> = new Map();
+
+  /**
+   * Per-address write lock for user manifest updates.
+   * Prevents lost-update races when multiple documents sync concurrently
+   * for the same user (read-modify-write must be serialized).
+   */
+  private userManifestLocks: Map<string, Promise<void>> = new Map();
 
   constructor(
     private readonly swarmClient: SwarmClient,
@@ -32,25 +38,6 @@ export class SwarmSyncReadModel {
       warn: (...args: unknown[]) => void;
     } = console,
   ) {}
-
-  /**
-   * Set the encryption key for all future uploads.
-   * When set, operation batches are AES-256-GCM encrypted before upload.
-   * Pass null to disable encryption.
-   */
-  setEncryptionKey(key: string | null): void {
-    this.encryptionKey = key;
-    if (key) {
-      this.logger.info("[SwarmSync] Encryption enabled for uploads");
-    }
-  }
-
-  /**
-   * Whether encryption is currently active.
-   */
-  isEncryptionEnabled(): boolean {
-    return this.encryptionKey !== null;
-  }
 
   async indexOperations(operations: OperationWithContext[]): Promise<void> {
     if (operations.length === 0) return;
@@ -85,11 +72,15 @@ export class SwarmSyncReadModel {
     await Promise.allSettled(this.pendingUploads.values());
   }
 
+  /**
+   * Upload ops and update the document manifest.
+   * Serialized per document to prevent lost-update races.
+   */
   private async uploadOps(
     documentId: string,
     ops: OperationWithContext[],
   ): Promise<void> {
-    // Serialize operations
+    // Upload to /bytes first (no lock needed — content-addressed, idempotent)
     const jsonPayload = JSON.stringify(
       ops.map((o) => ({
         ...o.operation,
@@ -101,18 +92,8 @@ export class SwarmSyncReadModel {
         },
       })),
     );
+    const { reference } = await this.swarmClient.uploadData(jsonPayload);
 
-    // Encrypt if key is available, otherwise upload plaintext
-    let uploadData: string | Uint8Array = jsonPayload;
-    const encrypted = this.encryptionKey !== null;
-    if (encrypted) {
-      uploadData = await encrypt(jsonPayload, this.encryptionKey!);
-    }
-
-    // Upload to Swarm /bytes
-    const { reference } = await this.swarmClient.uploadData(uploadData);
-
-    // Determine scope/branch from first op (they're grouped by doc)
     const scope = ops[0].context.scope;
     const branch = ops[0].context.branch;
     const docType = ops[0].context.documentType;
@@ -120,32 +101,83 @@ export class SwarmSyncReadModel {
     const startIndex = Math.min(...indices);
     const endIndex = Math.max(...indices);
 
-    // Update document manifest
-    const manifest =
-      (await this.swarmClient.readManifest(documentId)) ??
-      createEmptyDocManifest(documentId, docType);
+    // Serialize the manifest read-modify-write per document
+    const pending = this.docManifestLocks.get(documentId);
+    if (pending) {
+      await pending.catch(() => {});
+    }
 
-    manifest.operationBatches.push({
-      reference,
-      scope,
-      branch,
-      startIndex,
-      endIndex,
-      timestamp: new Date().toISOString(),
-    });
-    manifest.latestRevision[scope] = Math.max(
-      manifest.latestRevision[scope] ?? -1,
-      endIndex,
-    );
-    manifest.encrypted = encrypted;
-    manifest.updatedAt = new Date().toISOString();
+    const lockPromise = (async () => {
+      const manifest =
+        (await this.swarmClient.readManifest(documentId)) ??
+        createEmptyManifest(documentId, docType);
 
-    await this.swarmClient.updateManifest(documentId, manifest);
+      manifest.operationBatches.push({
+        reference,
+        scope,
+        branch,
+        startIndex,
+        endIndex,
+        timestamp: new Date().toISOString(),
+      });
+      manifest.latestRevision[scope] = Math.max(
+        manifest.latestRevision[scope] ?? -1,
+        endIndex,
+      );
+      manifest.updatedAt = new Date().toISOString();
 
-    // Extract user address from signer context and update user manifest
+      await this.swarmClient.updateManifest(documentId, manifest);
+    })();
+
+    this.docManifestLocks.set(documentId, lockPromise);
+    try {
+      await lockPromise;
+    } finally {
+      if (this.docManifestLocks.get(documentId) === lockPromise) {
+        this.docManifestLocks.delete(documentId);
+      }
+    }
+
+    // Update user manifest (already serialized per address)
     const userAddress = extractUserAddress(ops);
     if (userAddress) {
-      await this.updateUserManifest(userAddress, documentId, docType, ops);
+      await this.serializedUpdateUserManifest(userAddress, documentId, docType, ops);
+    }
+  }
+
+  /**
+   * Serialize user manifest updates per address to prevent lost-update races.
+   *
+   * Without this, two concurrent document uploads for the same user would:
+   * 1. Both read the same manifest state
+   * 2. Both modify it independently
+   * 3. The second write overwrites the first's changes
+   *
+   * The lock ensures read-modify-write is atomic per address.
+   */
+  private async serializedUpdateUserManifest(
+    address: string,
+    documentId: string,
+    documentType: string,
+    ops: OperationWithContext[],
+  ): Promise<void> {
+    const key = address.toLowerCase();
+
+    // Wait for any in-flight update for this address to complete
+    const pending = this.userManifestLocks.get(key);
+    if (pending) {
+      await pending.catch(() => {});
+    }
+
+    const promise = this.updateUserManifest(address, documentId, documentType, ops);
+    this.userManifestLocks.set(key, promise);
+
+    try {
+      await promise;
+    } finally {
+      if (this.userManifestLocks.get(key) === promise) {
+        this.userManifestLocks.delete(key);
+      }
     }
   }
 
@@ -218,21 +250,7 @@ export class SwarmSyncReadModel {
   }
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────
-
-function createEmptyDocManifest(
-  documentId: string,
-  documentType: string,
-): SwarmDocumentManifest {
-  return {
-    documentId,
-    documentType,
-    latestRevision: {},
-    operationBatches: [],
-    keyframes: [],
-    updatedAt: new Date().toISOString(),
-  };
-}
+// ─── Helpers ────────────────────────────────────────────────────
 
 function createEmptyUserManifest(address: string): SwarmUserManifest {
   return {
@@ -244,16 +262,10 @@ function createEmptyUserManifest(address: string): SwarmUserManifest {
   };
 }
 
-/**
- * Extract the user's Ethereum address from the signer context in operations.
- */
 function extractUserAddress(ops: OperationWithContext[]): string | null {
   for (const op of ops) {
-    const action = op.operation.action as Record<string, unknown> | undefined;
-    const context = action?.context as Record<string, unknown> | undefined;
-    const signer = context?.signer as Record<string, unknown> | undefined;
-    const user = signer?.user as Record<string, unknown> | undefined;
-    const address = user?.address as string | undefined;
+    const action = op.operation.action;
+    const address = action.context?.signer?.user?.address;
     if (address && address.startsWith("0x") && address.length > 10) {
       return address;
     }
@@ -261,68 +273,35 @@ function extractUserAddress(ops: OperationWithContext[]): string | null {
   return null;
 }
 
-/**
- * Try to extract a document name from operations.
- */
 function extractDocumentName(ops: OperationWithContext[]): string | null {
   for (const op of ops) {
-    const action = op.operation.action as Record<string, unknown> | undefined;
-    if (!action) continue;
-    const actionType = action.type as string | undefined;
+    const action = op.operation.action;
     const input = action.input as Record<string, unknown> | undefined;
-    if (actionType === "SET_MODEL_NAME" && input?.name) {
+    if (action.type === "SET_MODEL_NAME" && input?.name) {
       return input.name as string;
     }
-    if (actionType === "CREATE_DOCUMENT" && input?.name) {
+    if (action.type === "CREATE_DOCUMENT" && input?.name) {
       return input.name as string;
     }
   }
   return null;
 }
 
-/**
- * Try to extract the drive ID this document belongs to.
- */
 function extractDriveId(
   ops: OperationWithContext[],
   documentId: string,
 ): string | null {
   for (const op of ops) {
-    const action = op.operation.action as Record<string, unknown> | undefined;
-    const actionType = action?.type as string | undefined;
     if (op.context.documentType === "powerhouse/document-drive") {
       return op.context.documentId;
     }
-    if (actionType === "ADD_FILE") {
-      const input = action?.input as Record<string, unknown> | undefined;
+    const action = op.operation.action;
+    if (action.type === "ADD_FILE") {
+      const input = action.input as Record<string, unknown> | undefined;
       if (input?.id === documentId) {
         return op.context.documentId;
       }
     }
   }
   return null;
-}
-
-/**
- * Minimal type matching reactor's OperationWithContext.
- */
-interface OperationWithContext {
-  operation: {
-    id: string;
-    index: number;
-    skip: number;
-    timestampUtcMs: string;
-    hash: string;
-    error?: string;
-    action: unknown;
-    [key: string]: unknown;
-  };
-  context: {
-    documentId: string;
-    documentType: string;
-    scope: string;
-    branch: string;
-    resultingState?: string;
-    ordinal: number;
-  };
 }

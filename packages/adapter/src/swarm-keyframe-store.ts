@@ -1,5 +1,5 @@
 import type { SwarmClient } from "./swarm-client.js";
-import type { SwarmDocumentManifest } from "./types.js";
+import { createEmptyManifest } from "./types.js";
 
 /**
  * Minimal PHDocument type matching the reactor's definition.
@@ -64,8 +64,7 @@ export class SwarmKeyframeStore implements IKeyframeStore {
 
   /**
    * Replace the local store after construction.
-   * Used by patchReactorBuilder to inject the Kysely stores
-   * created by buildModule() at runtime.
+   * Used to inject the Kysely stores created by buildModule() at runtime.
    */
   setLocalStore(store: IKeyframeStore): void {
     this.localStore = store;
@@ -164,7 +163,6 @@ export class SwarmKeyframeStore implements IKeyframeStore {
     revision: number,
     document: PHDocument,
   ): Promise<void> {
-    // Serialize and upload the full keyframe to /bytes
     const payload = JSON.stringify({
       documentId,
       scope,
@@ -174,7 +172,6 @@ export class SwarmKeyframeStore implements IKeyframeStore {
     });
     const { reference } = await this.swarmClient.uploadData(payload);
 
-    // Update the document manifest with the keyframe reference
     const manifest =
       (await this.swarmClient.readManifest(documentId)) ??
       createEmptyManifest(documentId);
@@ -182,26 +179,11 @@ export class SwarmKeyframeStore implements IKeyframeStore {
     manifest.keyframes.push({ reference, scope, branch, revision });
     manifest.updatedAt = new Date().toISOString();
 
-    // Compact: remove operation batches older than this keyframe
-    // since the keyframe captures the full state at this revision
-    manifest.operationBatches = manifest.operationBatches.filter(
-      (batch) =>
-        batch.scope !== scope ||
-        batch.branch !== branch ||
-        batch.endIndex > revision,
-    );
+    // Note: we intentionally do NOT compact operation batches here.
+    // Compaction (removing old batches superseded by this keyframe) is
+    // a separate concern — use SwarmClient.compactManifest() explicitly
+    // when you want to reduce batch count for faster recovery.
 
     await this.swarmClient.updateManifest(documentId, manifest);
   }
-}
-
-function createEmptyManifest(documentId: string): SwarmDocumentManifest {
-  return {
-    documentId,
-    documentType: "",
-    latestRevision: {},
-    operationBatches: [],
-    keyframes: [],
-    updatedAt: new Date().toISOString(),
-  };
 }

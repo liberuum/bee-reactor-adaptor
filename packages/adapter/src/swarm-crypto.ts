@@ -12,6 +12,7 @@
  * - Cross-device (same wallet = same key)
  * - Node loss recovery (wallet derives the same key)
  */
+import { hexToBytes, concatBytes } from "./bytes-utils.js";
 
 const IV_LENGTH = 12; // AES-GCM standard IV length
 const ENCRYPTED_PREFIX = new Uint8Array([0x53, 0x57, 0x45]); // "SWE" — Swarm Encrypted marker
@@ -121,26 +122,4 @@ export async function decryptJSON<T = unknown>(
 ): Promise<T> {
   const plaintext = await decrypt(encrypted, key);
   return JSON.parse(new TextDecoder().decode(plaintext)) as T;
-}
-
-// ─── Helpers ─────────────────────────────────────────────────────
-
-function hexToBytes(hex: string): Uint8Array {
-  const h = hex.startsWith("0x") ? hex.slice(2) : hex;
-  const bytes = new Uint8Array(h.length / 2);
-  for (let i = 0; i < bytes.length; i++) {
-    bytes[i] = parseInt(h.substring(i * 2, i * 2 + 2), 16);
-  }
-  return bytes;
-}
-
-function concatBytes(...arrays: Uint8Array[]): Uint8Array {
-  const totalLength = arrays.reduce((sum, arr) => sum + arr.length, 0);
-  const result = new Uint8Array(totalLength);
-  let offset = 0;
-  for (const arr of arrays) {
-    result.set(arr, offset);
-    offset += arr.length;
-  }
-  return result;
 }

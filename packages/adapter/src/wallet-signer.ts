@@ -10,10 +10,20 @@
  * 4. Key is cached in IndexedDB for seamless future sessions
  * 5. On browser data clear, key is re-derived on next login (same result)
  */
+import { hexToBytes, bytesToHex } from "./bytes-utils.js";
+import { Bytes, PrivateKey } from "@ethersphere/bee-js";
 
 const SWARM_KEY_DB_NAME = "swarmKeyDB";
 const SWARM_KEY_STORE_NAME = "keys";
 const SWARM_KEY_ENTRY = "swarm-signer";
+
+/**
+ * Minimal interface for an EIP-1193 Ethereum provider (MetaMask, etc.).
+ * Accept this instead of hard-wiring to window.ethereum for testability.
+ */
+export interface EthereumProvider {
+  request(args: { method: string; params?: unknown[] }): Promise<unknown>;
+}
 
 /**
  * The stored signer entry in IndexedDB.
@@ -46,10 +56,9 @@ export function buildSignMessage(address: string, origin?: string): string {
  * @param signature - The raw hex signature from personal_sign
  * @returns 32-byte hex private key (with 0x prefix)
  */
-export async function deriveSwarmKey(signature: string): Promise<string> {
-  // keccak256 of the signature bytes
+export function deriveSwarmKey(signature: string): string {
   const sigBytes = hexToBytes(signature);
-  const hash = await keccak256(sigBytes);
+  const hash = keccak256(sigBytes);
   return "0x" + bytesToHex(hash);
 }
 
@@ -64,8 +73,10 @@ export async function deriveSwarmKey(signature: string): Promise<string> {
 export async function requestSwarmKeyFromWallet(
   address: string,
   origin?: string,
+  /** Injectable provider for testing. Defaults to window.ethereum. */
+  provider?: EthereumProvider,
 ): Promise<SwarmSignerEntry> {
-  const ethereum = (globalThis as any).window?.ethereum;
+  const ethereum = provider ?? (globalThis as any).window?.ethereum;
   if (!ethereum) {
     throw new Error(
       "No Ethereum wallet found. Please install MetaMask or another Web3 wallet.",
@@ -76,18 +87,16 @@ export async function requestSwarmKeyFromWallet(
   await ethereum.request({ method: "eth_requestAccounts" });
 
   const message = buildSignMessage(address, origin);
-  const signature: string = await ethereum.request({
+  const signature = await ethereum.request({
     method: "personal_sign",
     params: [
       "0x" + bytesToHex(new TextEncoder().encode(message)),
       address,
     ],
-  });
+  }) as string;
 
-  const swarmPrivateKey = await deriveSwarmKey(signature);
+  const swarmPrivateKey = deriveSwarmKey(signature);
 
-  // Derive public key using bee-js PrivateKey
-  const { PrivateKey } = await import("@ethersphere/bee-js");
   const pk = new PrivateKey(swarmPrivateKey);
   const swarmPublicKey = pk.publicKey().toCompressedHex();
 
@@ -213,7 +222,7 @@ export async function getOrDeriveSwarmKey(
   return entry;
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────
+// ─── IndexedDB helper ───────────────────────────────────────────
 
 function openSwarmKeyDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -229,23 +238,6 @@ function openSwarmKeyDB(): Promise<IDBDatabase> {
   });
 }
 
-function hexToBytes(hex: string): Uint8Array {
-  const h = hex.startsWith("0x") ? hex.slice(2) : hex;
-  const bytes = new Uint8Array(h.length / 2);
-  for (let i = 0; i < bytes.length; i++) {
-    bytes[i] = parseInt(h.substring(i * 2, i * 2 + 2), 16);
-  }
-  return bytes;
-}
-
-function bytesToHex(bytes: Uint8Array): string {
-  return Array.from(bytes)
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-async function keccak256(data: Uint8Array): Promise<Uint8Array> {
-  const { Bytes } = await import("@ethersphere/bee-js");
-  const hash = Bytes.keccak256(data);
-  return hash.toUint8Array();
+function keccak256(data: Uint8Array): Uint8Array {
+  return Bytes.keccak256(data).toUint8Array();
 }

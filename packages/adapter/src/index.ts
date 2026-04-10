@@ -1,9 +1,12 @@
 export { BeeReactorAdapter } from "./bee-reactor-adapter.js";
 export { SwarmClient } from "./swarm-client.js";
+export { StampManager, getBzzUsdPrice } from "./stamp-manager.js";
+export { ShareManager, deriveShareKey } from "./share-manager.js";
 export { SwarmOperationStore } from "./swarm-operation-store.js";
 export { SwarmKeyframeStore } from "./swarm-keyframe-store.js";
 export { SwarmHydrator } from "./swarm-hydrator.js";
 export { SwarmSyncReadModel } from "./swarm-sync-read-model.js";
+export { hexToBytes, bytesToHex, concatBytes } from "./bytes-utils.js";
 
 export type {
   BeeAdapterConfig,
@@ -23,8 +26,20 @@ export type {
   ShareManifest,
   SharedDocumentEntry,
 } from "./types.js";
+export { createEmptyManifest } from "./types.js";
 
-export type { IOperationStore } from "./swarm-operation-store.js";
+export type {
+  Action,
+  Operation,
+  OperationContext,
+  OperationWithContext,
+  AtomicTxn,
+  IOperationStore,
+  OperationFilter,
+  PagingOptions,
+  PagedResults,
+  DocumentRevisions,
+} from "./swarm-operation-store.js";
 export type { IKeyframeStore } from "./swarm-keyframe-store.js";
 
 export type { HydrationResult } from "./swarm-hydrator.js";
@@ -46,6 +61,5 @@ export {
   buildSignMessage,
   deriveSwarmKey,
 } from "./wallet-signer.js";
-export type { SwarmSignerEntry } from "./wallet-signer.js";
-export { patchReactorBuilder } from "./patch-reactor-builder.js";
+export type { SwarmSignerEntry, EthereumProvider } from "./wallet-signer.js";
 export { swarmPluginProcessorBuilder } from "./swarm-plugin.js";

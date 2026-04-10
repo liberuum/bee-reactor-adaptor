@@ -288,3 +288,23 @@ export interface SharedDocumentEntry {
 
   sharedAt: string;
 }
+
+// ─── Utilities ──────────────────────────────────────────────────
+
+/**
+ * Create an empty document manifest.
+ * Canonical factory — use this instead of inline object literals.
+ */
+export function createEmptyManifest(
+  documentId: string,
+  documentType: string = "",
+): SwarmDocumentManifest {
+  return {
+    documentId,
+    documentType,
+    latestRevision: {},
+    operationBatches: [],
+    keyframes: [],
+    updatedAt: new Date().toISOString(),
+  };
+}
