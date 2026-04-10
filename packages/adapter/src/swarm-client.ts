@@ -87,17 +87,35 @@ export class SwarmClient {
    */
   async uploadData(
     data: string | Uint8Array,
-    options?: { act?: boolean; actHistoryAddress?: string; skipEncryption?: boolean },
-  ): Promise<{ reference: string; historyAddress?: string }> {
+    options?: {
+      act?: boolean;
+      actHistoryAddress?: string;
+      skipEncryption?: boolean;
+      /** Track upload progress with a tag. Returns tagUid for polling via waitForConfirmation(). */
+      tracked?: boolean;
+      /** Use deferred upload (store locally first, push to network in background).
+       *  Faster upload — returns immediately. Use with tracked:true to get confirmation. */
+      deferred?: boolean;
+    },
+  ): Promise<{ reference: string; historyAddress?: string; tagUid?: number }> {
     let payload: string | Uint8Array = data;
 
     if (this.useEncryption && !options?.skipEncryption) {
       payload = await encrypt(data, this.encryptionKey);
     }
 
+    // Create a tag for upload tracking if requested
+    let tag: number | undefined;
+    if (options?.tracked || options?.deferred) {
+      const created = await this.bee.createTag();
+      tag = created.uid;
+    }
+
     const result = await this.bee.uploadData(this.batchId, payload, {
       act: options?.act,
       actHistoryAddress: options?.actHistoryAddress,
+      tag,
+      deferred: options?.deferred,
     });
     const historyRef = (result.historyAddress as any)?.value ?? result.historyAddress;
     return {
@@ -105,6 +123,7 @@ export class SwarmClient {
       historyAddress: historyRef && typeof historyRef === "object" && "toHex" in historyRef
         ? historyRef.toHex()
         : undefined,
+      tagUid: tag,
     };
   }
 
@@ -368,6 +387,139 @@ export class SwarmClient {
       const health = await this.bee.getHealth();
       return health.status === "ok";
     } catch { return false; }
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // Upload Confirmation (Tag Tracking)
+  // ═══════════════════════════════════════════════════════════════
+
+  /**
+   * Get the current status of an upload tag.
+   * Returns chunk-level progress: split, seen, stored, sent, synced.
+   */
+  async getTagStatus(tagUid: number): Promise<{
+    uid: number;
+    split: number;
+    seen: number;
+    stored: number;
+    sent: number;
+    synced: number;
+    done: boolean;
+  }> {
+    const tag = await this.bee.retrieveTag(tagUid);
+    return {
+      uid: tag.uid,
+      split: tag.split,
+      seen: tag.seen,
+      stored: tag.stored,
+      sent: tag.sent,
+      synced: tag.synced,
+      done: tag.split > 0 && tag.synced >= tag.split,
+    };
+  }
+
+  /**
+   * Wait for an upload to be fully confirmed by the network.
+   *
+   * Polls the tag until `synced >= split` (all chunks have valid receipts
+   * from the storage neighborhood). This is REAL network confirmation —
+   * not just "the Bee node accepted the data."
+   *
+   * @param tagUid - Tag UID from uploadData({ tracked: true })
+   * @param timeoutMs - Max time to wait (default 60s)
+   * @param intervalMs - Polling interval (default 2s)
+   * @param onProgress - Optional callback for progress updates
+   */
+  async waitForConfirmation(
+    tagUid: number,
+    timeoutMs = 60_000,
+    intervalMs = 2_000,
+    onProgress?: (status: { synced: number; total: number; percent: number }) => void,
+  ): Promise<{ synced: number; total: number; durationMs: number }> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const status = await this.getTagStatus(tagUid);
+      if (status.split > 0) {
+        const percent = Math.round((status.synced / status.split) * 100);
+        onProgress?.({ synced: status.synced, total: status.split, percent });
+        if (status.done) {
+          return { synced: status.synced, total: status.split, durationMs: Date.now() - start };
+        }
+      }
+      await new Promise((r) => setTimeout(r, intervalMs));
+    }
+    const final = await this.getTagStatus(tagUid);
+    throw new Error(
+      `Upload confirmation timed out after ${timeoutMs}ms. ` +
+      `Progress: ${final.synced}/${final.split} chunks synced.`,
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // Rich Node Status
+  // ═══════════════════════════════════════════════════════════════
+
+  /**
+   * Get detailed node status snapshot.
+   * Much richer than isHealthy() — includes mode, peers, sync rate, reachability.
+   */
+  async getNodeStatus(): Promise<{
+    overlay: string;
+    beeMode: "light" | "full" | "dev" | "ultra-light" | "unknown";
+    isReachable: boolean;
+    connectedPeers: number;
+    neighborhoodSize: number;
+    reserveSize: number;
+    pullsyncRate: number;
+    storageRadius: number;
+  }> {
+    const response = await fetch(`${this.bee.url}/status`);
+    if (!response.ok) throw new Error(`Failed to get node status: ${response.status}`);
+    const data = (await response.json()) as Record<string, unknown>;
+    return {
+      overlay: (data.overlay as string) ?? "",
+      beeMode: (data.beeMode as string as "full") ?? "unknown",
+      isReachable: (data.isReachable as boolean) ?? false,
+      connectedPeers: (data.connectedPeers as number) ?? 0,
+      neighborhoodSize: (data.neighborhoodSize as number) ?? 0,
+      reserveSize: (data.reserveSize as number) ?? 0,
+      pullsyncRate: (data.pullsyncRate as number) ?? 0,
+      storageRadius: (data.storageRadius as number) ?? 0,
+    };
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // Content Availability (Stewardship)
+  // ═══════════════════════════════════════════════════════════════
+
+  /**
+   * Check if content is still retrievable from the Swarm network.
+   * Returns true if the content can be downloaded, false if chunks are missing.
+   */
+  async isContentAvailable(reference: string): Promise<boolean> {
+    try {
+      const response = await fetch(`${this.bee.url}/stewardship/${reference}`);
+      if (!response.ok) return false;
+      const data = (await response.json()) as { isRetrievable?: boolean };
+      return data.isRetrievable ?? false;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Re-upload content that may no longer be available in the network.
+   * Uses the current stamp to re-stamp the chunks.
+   */
+  async reuploadContent(reference: string): Promise<void> {
+    const response = await fetch(`${this.bee.url}/stewardship/${reference}`, {
+      method: "PUT",
+      headers: { "swarm-postage-batch-id": this.batchId },
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`Failed to re-upload content: ${text}`);
+    }
   }
 
   async detectFeedSupport(): Promise<boolean> {
