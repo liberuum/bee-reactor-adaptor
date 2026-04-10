@@ -572,7 +572,7 @@ async function hydrateFromSwarm(
       const localId = d?.header?.id;
       if (localId) {
         driveIdMap.set(swarmDriveId, localId);
-        console.log(`[SwarmPlugin] Created drive "${driveName}" (${localId.slice(0, 8)}) for Swarm drive ${swarmDriveId.slice(0, 8)}`);
+        console.log(`[SwarmPlugin] Created drive "${driveName}" (${localId.slice(0, 8)}) for Swarm drive ${swarmDriveId.slice(0, 8)}${preferredEditor ? ` [editor: ${preferredEditor}]` : ""}`);
       }
       await new Promise((r) => setTimeout(r, 500));
     } catch (err) {
@@ -1272,15 +1272,36 @@ async function ensureDriveSynced(
   if (pendingSyncs.has(driveId)) return;
 
   let driveName = driveId;
+  let preferredEditor: string | undefined;
 
   try {
     const driveDoc = await reactorClient.get(driveId);
     const name = driveDoc?.state?.global?.name;
     if (name) {
       driveName = name;
-      driveNames.set(driveId, name); // Track for drive manifest writes
+      driveNames.set(driveId, name);
+    }
+    // Read preferredEditor from header.meta
+    preferredEditor = driveDoc?.header?.meta?.preferredEditor;
+    if (preferredEditor) {
+      console.log(`[SwarmPlugin] Drive ${driveId.slice(0, 8)}: preferredEditor = ${preferredEditor}`);
     }
   } catch { /* drive not accessible */ }
+
+  // Pre-populate drive manifest cache with preferredEditor so it persists to Swarm
+  if (preferredEditor) {
+    let cached = driveManifestCache.get(driveId);
+    if (!cached) {
+      cached = { driveId, name: driveName, documents: {}, updatedAt: new Date().toISOString() };
+      driveManifestCache.set(driveId, cached);
+    }
+    cached.preferredEditor = preferredEditor;
+    // Trigger a drive manifest write (even if no child docs yet)
+    // Use a dummy entry that flushDriveManifest will pick up via the cache
+    setTimeout(() => {
+      flushDriveManifest(swarmClient, driveId).catch(() => {});
+    }, 2000);
+  }
 
   // Sync drive ops to Swarm (may be 0 ops — but still adds to user manifest)
   scheduleSync(swarmClient, reactorClient, ownerAddress, driveId, "powerhouse/document-drive", driveName, "");
@@ -2007,7 +2028,13 @@ async function flushDriveManifest(
           const driveDoc = await rc.get(driveId);
           // Store preferredEditor for custom drive types
           const editor = driveDoc?.header?.meta?.preferredEditor;
-          if (editor) manifest.preferredEditor = editor;
+          if (editor) {
+            manifest.preferredEditor = editor;
+          }
+          // Debug: log header meta to verify preferredEditor is stored
+          if (driveDoc?.header?.meta) {
+            console.log(`[SwarmPlugin] Drive ${driveId.slice(0, 8)}: meta =`, JSON.stringify(driveDoc.header.meta));
+          }
           const nodes = driveDoc?.state?.global?.nodes ?? [];
           if (nodes.length > 0) {
             const folders: Record<string, { name: string; parentFolder?: string }> = {};
