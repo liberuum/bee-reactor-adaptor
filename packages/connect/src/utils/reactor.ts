@@ -18,8 +18,8 @@ import { createSignatureVerifier, type IRenown } from "@renown/sdk";
 import { ConsoleLogger } from "document-model";
 import { Kysely } from "kysely";
 import { PGliteDialect } from "kysely-pglite-dialect";
-// Swarm sync channel — register after reactor build
-import { registerSwarmChannel } from "../../../adapter/src/channel/register-swarm-channel.js";
+// Swarm sync channel — patch builder before build so persisted remotes work on restart
+import { patchReactorBuilderForSwarm } from "../../../adapter/src/channel/register-swarm-channel.js";
 
 /**
  * Creates a Reactor with GQL sync (via ChannelScheme.CONNECT).
@@ -76,15 +76,13 @@ export async function createBrowserReactor(
     builder.withDocumentModelLoader(documentModelLoader);
   }
 
-  const module = await builder.buildModule();
+  // Patch the builder so that after internal build + startup,
+  // the GQL channelFactory is wrapped in a CompositeChannelFactory
+  // with Swarm support. This ensures persisted Swarm remotes
+  // are re-registered on page reload.
+  patchReactorBuilderForSwarm(builder, logger);
 
-  // Register Swarm as an additional sync channel type.
-  // This wraps the existing GQL channelFactory in a CompositeChannelFactory
-  // so syncManager.add() can create both "gql" and "swarm" channels.
-  const syncModule = module.reactorModule?.syncModule;
-  if (syncModule?.syncManager && syncModule?.channelFactory) {
-    registerSwarmChannel(syncModule.syncManager, syncModule.channelFactory, logger);
-  }
+  const module = await builder.buildModule();
 
   return {
     ...module,

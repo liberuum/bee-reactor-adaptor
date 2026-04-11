@@ -629,7 +629,28 @@ export async function downloadOperations(
     try {
       const data = await swarmClient.downloadData(batch.reference);
       const ops = JSON.parse(new TextDecoder().decode(data));
-      allOps.push(...ops);
+      // Normalize: SwarmChannel writes OperationWithContext format
+      // ({ operation, context }), old plugin writes { index, action }.
+      // Handle both formats gracefully.
+      for (const op of ops) {
+        if (op.action) {
+          // Old plugin format: { index, action: { type, input, scope } }
+          allOps.push(op);
+        } else if (op.operation) {
+          // Reactor OperationWithContext format: { operation: { index, action }, context: { scope } }
+          allOps.push({
+            index: op.operation.index ?? op.context?.ordinal ?? 0,
+            action: {
+              ...(op.operation.action ?? op.operation),
+              scope: op.operation.action?.scope ?? op.context?.scope ?? "global",
+            },
+            id: op.operation.action?.id ?? op.operation.opId,
+          });
+        } else {
+          // Unknown format — try to use as-is
+          allOps.push({ index: op.index ?? 0, action: op, id: op.id });
+        }
+      }
     } catch (err) {
       console.warn(
         `[SwarmPlugin] Failed to download batch ${batch.reference.slice(0, 12)}...:`,
