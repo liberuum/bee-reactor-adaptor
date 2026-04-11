@@ -44,15 +44,7 @@ function ShareFolderNode({
   return (
     <div style={{ marginLeft: `${depth * 16}px` }}>
       <span className="text-gray-500 text-[10px]">{folder.name}/</span>
-      {folder.subFolders.map((sf) => (
-        <ShareFolderNode
-          key={sf.id}
-          folder={sf}
-          depth={depth + 1}
-          shareSelected={shareSelected}
-          toggleDoc={toggleDoc}
-        />
-      ))}
+      {/* Docs first, then sub-folders */}
       {folder.docs.map(([id, d]) => (
         <label
           key={id}
@@ -66,6 +58,15 @@ function ShareFolderNode({
           />
           <span className="text-gray-600">{d.name || id.slice(0, 8)}</span>
         </label>
+      ))}
+      {folder.subFolders.map((sf) => (
+        <ShareFolderNode
+          key={sf.id}
+          folder={sf}
+          depth={depth + 1}
+          shareSelected={shareSelected}
+          toggleDoc={toggleDoc}
+        />
       ))}
     </div>
   );
@@ -128,17 +129,7 @@ function ShareTreeGlobal({
                 ({children.length} doc{children.length !== 1 ? "s" : ""})
               </span>
             </label>
-            {/* Recursive folder tree */}
-            {tree.subFolders.map((sf) => (
-              <ShareFolderNode
-                key={sf.id}
-                folder={sf}
-                depth={1}
-                shareSelected={shareSelected}
-                toggleDoc={toggleDoc}
-              />
-            ))}
-            {/* Root docs */}
+            {/* Root docs first, then folders (top-down) */}
             {tree.docs.map(([id, d]) => (
               <label
                 key={id}
@@ -152,6 +143,15 @@ function ShareTreeGlobal({
                 />
                 <span className="text-gray-600">{d.name || id.slice(0, 8)}</span>
               </label>
+            ))}
+            {tree.subFolders.map((sf) => (
+              <ShareFolderNode
+                key={sf.id}
+                folder={sf}
+                depth={1}
+                shareSelected={shareSelected}
+                toggleDoc={toggleDoc}
+              />
             ))}
           </div>
         );

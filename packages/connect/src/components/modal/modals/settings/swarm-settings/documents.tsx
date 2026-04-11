@@ -99,26 +99,26 @@ function FolderNode({
         <span className="select-none text-gray-300">{"\u251C\u2500"}</span>
         <span className="font-medium">{folder.name}/</span>
       </div>
-      {/* Sub-folders first (recursive) */}
-      {folder.subFolders.map((sf) => (
-        <FolderNode
-          key={sf.id}
-          folder={sf}
-          depth={depth + 1}
-          syncStatus={syncStatus}
-          full={full}
-        />
-      ))}
-      {/* Then docs */}
+      {/* Docs first (top-down: immediate content visible first) */}
       {folder.docs.map(([docId, doc], i) => (
         <DocRow
           key={docId}
           docId={docId}
           doc={doc}
           indent
-          connector={i === folder.docs.length - 1 ? "\u2514\u2500" : "\u251C\u2500"}
+          connector={i === folder.docs.length - 1 && folder.subFolders.length === 0 ? "\u2514\u2500" : "\u251C\u2500"}
           syncState={syncStatus?.[docId]?.state}
           pendingOps={syncStatus?.[docId]?.pendingOps}
+          full={full}
+        />
+      ))}
+      {/* Then sub-folders (deeper levels) */}
+      {folder.subFolders.map((sf) => (
+        <FolderNode
+          key={sf.id}
+          folder={sf}
+          depth={depth + 1}
+          syncStatus={syncStatus}
           full={full}
         />
       ))}
@@ -212,17 +212,7 @@ export function DocsTreeSection({
                 {full ? driveId : driveId.slice(0, 8)}
               </span>
             </div>
-            {/* Folders first (recursive tree) */}
-            {tree.subFolders.map((sf) => (
-              <FolderNode
-                key={sf.id}
-                folder={sf}
-                depth={1}
-                syncStatus={syncStatus}
-                full={full}
-              />
-            ))}
-            {/* Root-level docs */}
+            {/* Root docs first, then folders (top-down: immediate children visible first) */}
             {tree.docs.map(([docId, doc], i) => (
               <DocRow
                 key={docId}
@@ -230,12 +220,21 @@ export function DocsTreeSection({
                 doc={doc}
                 indent
                 connector={
-                  i === tree.docs.length - 1
+                  i === tree.docs.length - 1 && tree.subFolders.length === 0
                     ? "\u2514\u2500"
                     : "\u251C\u2500"
                 }
                 syncState={syncStatus?.[docId]?.state}
                 pendingOps={syncStatus?.[docId]?.pendingOps}
+                full={full}
+              />
+            ))}
+            {tree.subFolders.map((sf) => (
+              <FolderNode
+                key={sf.id}
+                folder={sf}
+                depth={1}
+                syncStatus={syncStatus}
                 full={full}
               />
             ))}

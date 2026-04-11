@@ -425,9 +425,14 @@ async function flushUserManifest(
       if (generation !== state.manifestFlushGeneration) return;
 
       if (ph?.swarm) {
-        // Preserve the UI cache documents (populated from drive manifests)
+        // Preserve UI-only fields that don't exist on the Swarm manifest
         const existingDocs = ph.swarm.userManifest?.documents ?? {};
-        ph.swarm.userManifest = { ...userManifest, documents: existingDocs };
+        const existingDriveManifests = ph.swarm.userManifest?.driveManifests ?? {};
+        ph.swarm.userManifest = {
+          ...userManifest,
+          documents: existingDocs,
+          driveManifests: existingDriveManifests,
+        };
       }
 
       console.log(

@@ -475,6 +475,8 @@ async function reconcileUserManifest(
   const userManifest = ph?.swarm?.userManifest;
   if (!userManifest?.documents || Object.keys(userManifest.documents).length === 0) return;
 
+  // Build a complete set of all known IDs: drives + all nodes in drive state
+  // (including docs inside nested folders, not just direct children)
   const existingIds = new Set<string>();
   try {
     const drives = await reactorClient.getDrives();
@@ -482,13 +484,23 @@ async function reconcileUserManifest(
       const driveId = drive?.id ?? drive;
       existingIds.add(driveId);
       try {
-        const children = await reactorClient.getChildren(driveId);
-        const childResults = children?.results ?? children ?? [];
-        for (const child of childResults) {
-          const childId = typeof child === "string" ? child : child?.header?.id ?? child?.id;
-          if (childId) existingIds.add(childId);
+        // Strategy 1: read drive.state.global.nodes — includes ALL nested docs/folders
+        const driveDoc = await reactorClient.get(driveId);
+        const nodes = driveDoc?.state?.global?.nodes ?? [];
+        for (const node of nodes) {
+          if (node?.id) existingIds.add(node.id);
         }
-      } catch { /* no children */ }
+      } catch {
+        // Fallback: getChildren (only direct children)
+        try {
+          const children = await reactorClient.getChildren(driveId);
+          const childResults = children?.results ?? children ?? [];
+          for (const child of childResults) {
+            const childId = typeof child === "string" ? child : child?.header?.id ?? child?.id;
+            if (childId) existingIds.add(childId);
+          }
+        } catch { /* no children */ }
+      }
     }
   } catch { /* reactor not ready */ return; }
 
