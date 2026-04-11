@@ -16,7 +16,7 @@ const SWARM_BEE_URL_DEFAULT = "http://localhost:1633";
 export const DOCUMENT_MANIFEST_FLUSH_DELAY_MS = 3000;
 export const MAX_CONCURRENT_FLUSHES = 5;
 export const MANIFEST_FLUSH_DELAY_MS = 3000;
-export const DRIVE_MANIFEST_FLUSH_DELAY_MS = 2000;
+export const DRIVE_MANIFEST_FLUSH_DELAY_MS = 3000;
 
 // ─── Bee URL ────────────────────────────────────────────────────
 

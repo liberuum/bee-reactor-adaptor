@@ -403,22 +403,41 @@ export async function flushDriveManifest(
       const knownName = state.driveNames.get(driveId);
       if (knownName) manifest.name = knownName;
 
-      // Populate folder info + preferredEditor from drive's state (best effort)
+      // Populate folder info + preferredEditor from drive's state.
+      // The reactor may still be processing folder/doc actions, so we retry
+      // up to 3 times (with short delays) to let the state settle.
       try {
         const ph = (globalThis as any).window?.ph;
         const rc = ph?.reactorClient;
         if (rc) {
-          // driveId may be a Swarm ID — resolve to local for reactor queries
           const localDriveId = state.swarmToLocalDrive.get(driveId) ?? driveId;
-          const driveDoc = await rc.get(localDriveId);
+          const expectedDocCount = Object.keys(manifest!.documents).length;
+
+          let nodes: any[] = [];
+          let driveDoc: any = null;
+
+          // Retry to let reactor state settle after folder/file actions
+          for (let attempt = 0; attempt < 3; attempt++) {
+            driveDoc = await rc.get(localDriveId);
+            nodes = driveDoc?.state?.global?.nodes ?? [];
+
+            // Check if the drive state has caught up:
+            // - nodes should contain at least as many files as we have in the manifest
+            const fileNodes = nodes.filter((n: any) => n.kind === "file");
+            if (fileNodes.length >= expectedDocCount) break;
+
+            // State not settled yet — wait and retry
+            if (attempt < 2) {
+              console.log(`[SwarmPlugin] Drive ${driveId.slice(0, 8)}: waiting for state to settle (${fileNodes.length}/${expectedDocCount} files, attempt ${attempt + 1})`);
+              await new Promise((r) => setTimeout(r, 1000));
+            }
+          }
+
           const editor = driveDoc?.header?.meta?.preferredEditor;
           if (editor) {
             manifest!.preferredEditor = editor;
           }
-          if (driveDoc?.header?.meta) {
-            console.log(`[SwarmPlugin] Drive ${driveId.slice(0, 8)}: meta =`, JSON.stringify(driveDoc.header.meta));
-          }
-          const nodes = driveDoc?.state?.global?.nodes ?? [];
+
           if (nodes.length > 0) {
             const folders: Record<string, { name: string; parentFolder?: string }> = {};
             let folderCount = 0;
@@ -436,11 +455,26 @@ export async function flushDriveManifest(
             }
             if (folderCount > 0) {
               manifest!.folders = folders;
-              console.log(`[SwarmPlugin] Drive ${driveId.slice(0, 8)}: ${folderCount} folder(s) tracked`);
+              console.log(`[SwarmPlugin] Drive ${driveId.slice(0, 8)}: ${folderCount} folder(s), ${nodes.filter((n: any) => n.kind === "file").length} file(s) tracked`);
+            }
+
+            // Also check for files in the drive state that aren't in the manifest yet
+            // (created between the debounce trigger and this flush)
+            for (const node of nodes) {
+              if (node.kind === "file" && node.id && !manifest!.documents[node.id]) {
+                manifest!.documents[node.id] = {
+                  documentType: node.documentType ?? "unknown",
+                  name: node.name ?? node.id,
+                  parentFolder: node.parentFolder || undefined,
+                  lastUpdated: new Date().toISOString(),
+                };
+              }
             }
           }
         }
-      } catch { /* best effort — folder info is optional */ }
+      } catch (err) {
+        console.warn(`[SwarmPlugin] Drive ${driveId.slice(0, 8)}: folder capture failed:`, err instanceof Error ? err.message : err);
+      }
 
       await swarmClient.updateDriveManifest(driveId, manifest);
       state.driveManifestCache.set(driveId, manifest);
