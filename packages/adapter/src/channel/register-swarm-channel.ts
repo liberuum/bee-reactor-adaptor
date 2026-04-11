@@ -54,17 +54,6 @@ export function registerSwarmChannel(
 }
 
 /**
- * Pre-build hook: patches the ReactorBuilder so that the channelFactory
- * created internally during build() is automatically wrapped in a
- * CompositeChannelFactory before syncManager.startup() runs.
- *
- * This ensures persisted Swarm remotes can be recreated on restart.
- *
- * Usage:
- *   patchReactorBuilderForSwarm(reactorBuilder, logger);
- *   const module = await builder.buildModule(); // startup uses composite
- */
-/**
  * Patches the ReactorClientBuilder to inject SwarmChannelFactory BEFORE
  * SyncManager.startup() runs. This is critical: persisted Swarm remotes
  * from sync_remotes must be recreatable on page reload.

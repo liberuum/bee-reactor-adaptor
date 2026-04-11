@@ -6,9 +6,12 @@
  * - Import documents shared by others
  */
 import type { SwarmClient } from "../swarm-client.js";
-import { state } from "./state.js";
-import { flushDocumentManifest, flushDriveManifest } from "./flush.js";
 import { restoreFolderStructure } from "./hydration.js";
+
+/** Read Bee URL from window.ph.swarm (set by plugin init) */
+function getBeeUrl(): string {
+  return (globalThis as any).window?.ph?.swarm?.beeUrl ?? "http://localhost:1633";
+}
 
 // ═══════════════════════════════════════════════════════════════
 // Public Profile
@@ -28,7 +31,7 @@ export async function publishPublicProfile(
   let beeNodePublicKey = "";
   let overlayAddress = "";
   try {
-    const res = await fetch(`${state.beeUrl}/addresses`);
+    const res = await fetch(`${getBeeUrl()}/addresses`);
     const data = (await res.json()) as { publicKey?: string; overlay?: string };
     beeNodePublicKey = data.publicKey ?? "";
     overlayAddress = data.overlay ?? "";
@@ -74,30 +77,10 @@ export async function shareDocumentsWithUser(
   recipientSignerAddress: string,
 ): Promise<{ success: boolean; shared: number; error?: string }> {
   try {
-    if (state.syncPaused) {
-      return { success: false, shared: 0, error: "Please wait for document recovery to finish before sharing." };
-    }
-
     const mySignerAddress = client.getOwnerAddress();
     console.log(`[SwarmPlugin] Sharing ${docIds.length} doc(s) with signer ${recipientSignerAddress.slice(0, 10)}...`);
 
-    // Flush ALL pending docs before sharing — ensure ops are on Swarm
-    for (const docId of docIds) {
-      if (state.pendingManifests.has(docId) || state.pendingOps.has(docId)) {
-        await flushDocumentManifest(docId);
-      }
-    }
-    // Also flush any drive that contains shared docs
-    const drivesToFlush = new Set<string>();
-    for (const docId of docIds) {
-      const driveId = state.docToDrive.get(docId);
-      if (driveId && state.pendingDriveUpdates.has(driveId)) {
-        drivesToFlush.add(driveId);
-      }
-    }
-    for (const driveId of drivesToFlush) {
-      await flushDriveManifest(client, driveId);
-    }
+    // SwarmChannel handles flushing via SyncManager outbox — no manual flush needed.
 
     const ph = (globalThis as any).window?.ph;
     const userManifest = ph?.swarm?.userManifest;
@@ -126,8 +109,8 @@ export async function shareDocumentsWithUser(
         }
         if (allOps.length === 0) continue;
 
-        const docEntry = userManifest?.documents?.[docId];
-        const driveId = docEntry?.driveId ?? state.docToDrive.get(docId) ?? "_default";
+        const docEntry = userManifest?.documents?.[docId] as { driveId?: string; name?: string } | undefined;
+        const driveId = docEntry?.driveId ?? "_default";
 
         if (!docsByDrive.has(driveId)) docsByDrive.set(driveId, []);
         docsByDrive.get(driveId)!.push({
@@ -156,7 +139,6 @@ export async function shareDocumentsWithUser(
     for (const [driveId, docs] of docsByDrive) {
       // Resolve drive name
       let driveName = userManifest?.drives?.[driveId]?.name ?? "";
-      if (!driveName || driveName === driveId) driveName = state.driveNames.get(driveId) ?? "";
       if (!driveName || driveName === driveId) {
         try {
           if (reactorClient && driveId !== "_default") {
@@ -170,7 +152,7 @@ export async function shareDocumentsWithUser(
       // Include folder structure from drive manifest (only for docs being shared)
       const sharedDocIds = new Set(docs.map((d) => d.docId));
       let folderInfo: { folders?: Record<string, { name: string; parentFolder?: string }>; docFolders?: Record<string, string> } | undefined;
-      const dm = state.driveManifestCache.get(driveId);
+      const dm = await client.readDriveManifest(driveId);
       if (dm?.folders && Object.keys(dm.folders).length > 0) {
         const docFolders: Record<string, string> = {};
         const usedFolderIds = new Set<string>();
@@ -195,7 +177,7 @@ export async function shareDocumentsWithUser(
       }
 
       // Bundle ALL docs' ops for this drive into ONE upload
-      const cachedDm = state.driveManifestCache.get(driveId);
+      const cachedDm = dm;
       const bundle = {
         documents: docs.map((d) => ({
           documentId: d.docId,
@@ -376,18 +358,13 @@ export async function importFromUser(
             operations: { global: [], local: [] },
           };
 
-          state.recoveringDocs.add(newDocId);
-          try {
-            await reactorClient.createDocumentInDrive(localDriveId, shellDoc);
-            if (userOps.length > 0) {
-              await reactorClient.execute(newDocId, "main", userOps);
-            }
-            imported.push(newDocId);
-            origToLocal.set(origDocId, newDocId);
-            console.log(`[SwarmPlugin] Imported "${docName}" (${userOps.length} ops) → ${newDocId}`);
-          } finally {
-            state.recoveringDocs.delete(newDocId);
+          await reactorClient.createDocumentInDrive(localDriveId, shellDoc);
+          if (userOps.length > 0) {
+            await reactorClient.execute(newDocId, "main", userOps);
           }
+          imported.push(newDocId);
+          origToLocal.set(origDocId, newDocId);
+          console.log(`[SwarmPlugin] Imported "${docName}" (${userOps.length} ops) → ${newDocId}`);
         } catch (err) {
           console.warn(`[SwarmPlugin] Failed to import "${docName}":`, err instanceof Error ? err.message : err);
         }
