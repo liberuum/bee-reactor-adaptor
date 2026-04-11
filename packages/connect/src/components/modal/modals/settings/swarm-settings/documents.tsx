@@ -1,8 +1,30 @@
 import React, { useState } from "react";
 import type { SwarmUiSnapshot } from "./types.js";
 import { Section, SyncBadge, shortType } from "./primitives.js";
-import { buildFolderTree } from "../../../../../../adapter/src/folder-tree.js";
-import type { DocEntry, FolderEntry, TreeFolder } from "../../../../../../adapter/src/folder-tree.js";
+
+// ─── Tree types + builder (same as packages/adapter/src/folder-tree.ts) ──
+
+type DocEntry = { name?: string; documentType?: string; driveId?: string; parentFolder?: string };
+type FolderEntry = { name: string; parentFolder?: string };
+type TreeFolder = { id: string; name: string; subFolders: TreeFolder[]; docs: Array<[string, DocEntry]> };
+
+function buildFolderTree(
+  parentId: string | null,
+  folders: Record<string, FolderEntry>,
+  docs: Array<[string, DocEntry]>,
+): { subFolders: TreeFolder[]; docs: Array<[string, DocEntry]> } {
+  const matchingFolders = Object.entries(folders)
+    .filter(([, f]) => (f.parentFolder || null) === parentId)
+    .sort(([, a], [, b]) => (a.name ?? "").localeCompare(b.name ?? ""));
+  const matchingDocs = docs.filter(([, d]) => (d.parentFolder || null) === parentId);
+  return {
+    subFolders: matchingFolders.map(([id, f]) => {
+      const c = buildFolderTree(id, folders, docs);
+      return { id, name: f.name, subFolders: c.subFolders, docs: c.docs };
+    }),
+    docs: matchingDocs,
+  };
+}
 
 // ─── Components ─────────────────────────────────────────────────
 
