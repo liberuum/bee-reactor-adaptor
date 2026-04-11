@@ -344,18 +344,37 @@ export async function createReactor(localPackage?: DocumentModelLib) {
         return;
       }
 
+      // Check local drives first
       const drivesList = await getDrives(reactorClientModule.client);
-      console.log("[SwarmChannel] Raw drives:", JSON.stringify(drivesList.slice(0, 3)).slice(0, 500));
-      const driveIds = drivesList.map((d: any) => {
+      const localDriveIds = drivesList.map((d: any) => {
         if (typeof d === "string") return d;
         if (d?.id) return d.id;
         if (d?.slug) return d.slug;
         if (d?.header?.id) return d.header.id;
-        // Last resort: stringify to see shape
         return "";
       }).filter(Boolean);
-      console.log(`[SwarmChannel] Found ${driveIds.length} drives:`, driveIds.map((id: string) => id.slice(0, 8)));
+
+      // If no local drives, check Swarm user manifest for recovery.
+      // This is the "new device" case — PGlite is empty, drives are on Swarm.
+      let driveIds = localDriveIds;
+      if (driveIds.length === 0 && swarmState.client) {
+        try {
+          const userManifest = await swarmState.client.readUserManifest(
+            (window.ph as any)?.renown?.user?.address ?? "",
+          );
+          if (userManifest?.drives) {
+            driveIds = Object.keys(userManifest.drives);
+            if (driveIds.length > 0) {
+              console.log(`[SwarmChannel] No local drives, found ${driveIds.length} on Swarm:`, driveIds.map((id: string) => id.slice(0, 8)));
+            }
+          }
+        } catch {
+          // No user manifest on Swarm — truly fresh start
+        }
+      }
+
       if (driveIds.length === 0) return false;
+      console.log(`[SwarmChannel] Registering ${driveIds.length} drive(s):`, driveIds.map((id: string) => id.slice(0, 8)));
 
       const ownerAddr = (window.ph as any)?.renown?.user?.address ?? swarmState.ownerAddress ?? "";
       let registered = 0;
