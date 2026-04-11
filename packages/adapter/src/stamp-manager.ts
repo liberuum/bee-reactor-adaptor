@@ -254,19 +254,33 @@ export class StampManager {
 
 /**
  * Get xBZZ/USD market price from CoinGecko.
- * Returns null if the API is unreachable.
+ * Cached for 5 minutes to avoid rate limiting (CoinGecko free tier: 10-30 req/min).
  */
+let cachedBzzPrice: { value: number | null; fetchedAt: number } | null = null;
+const BZZ_PRICE_CACHE_MS = 5 * 60 * 1000; // 5 minutes
+
 export async function getBzzUsdPrice(): Promise<number | null> {
+  if (cachedBzzPrice && Date.now() - cachedBzzPrice.fetchedAt < BZZ_PRICE_CACHE_MS) {
+    return cachedBzzPrice.value;
+  }
   try {
     const res = await fetch(
       "https://api.coingecko.com/api/v3/simple/price?ids=swarm-bzz&vs_currencies=usd",
       { signal: AbortSignal.timeout(5000) },
     );
-    if (!res.ok) return null;
+    if (!res.ok) {
+      // Cache the failure too so we don't hammer a rate-limited endpoint
+      cachedBzzPrice = { value: cachedBzzPrice?.value ?? null, fetchedAt: Date.now() };
+      return cachedBzzPrice.value;
+    }
     const data = (await res.json()) as { "swarm-bzz"?: { usd?: number } };
-    return data["swarm-bzz"]?.usd ?? null;
+    const price = data["swarm-bzz"]?.usd ?? null;
+    cachedBzzPrice = { value: price, fetchedAt: Date.now() };
+    return price;
   } catch {
-    return null;
+    // On failure, keep the old cached value if we have one
+    if (!cachedBzzPrice) cachedBzzPrice = { value: null, fetchedAt: Date.now() };
+    return cachedBzzPrice.value;
   }
 }
 
