@@ -173,3 +173,27 @@ export async function waitForFeed<T>(
 export async function waitForPropagation(ms = 3000): Promise<void> {
   await new Promise((r) => setTimeout(r, ms));
 }
+
+/**
+ * Upload data with tag tracking and wait for network confirmation.
+ * Returns only after the Bee node confirms all chunks are synced to the neighborhood.
+ * Use this instead of plain uploadData + waitForPropagation for reliable tests.
+ */
+export async function uploadAndConfirm(
+  client: SwarmClient,
+  data: string | Uint8Array,
+  options?: { skipEncryption?: boolean },
+): Promise<{ reference: string; synced: number; total: number; durationMs: number }> {
+  const { reference, tagUid } = await client.uploadData(data, {
+    tracked: true,
+    deferred: false,
+    skipEncryption: options?.skipEncryption,
+  });
+  if (!tagUid) {
+    // Node doesn't support tags — fall back to propagation delay
+    await waitForPropagation(3000);
+    return { reference, synced: 0, total: 0, durationMs: 0 };
+  }
+  const result = await client.waitForConfirmation(tagUid, 30_000, 2_000);
+  return { reference, ...result };
+}
