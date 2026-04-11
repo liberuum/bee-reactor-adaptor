@@ -235,7 +235,7 @@ describe("Clear Cache Flow", () => {
     await waitForPropagation(3000);
 
     // A "new device" recovery would read this manifest and find 0 drives.
-    // hydrateFromSwarm would return early ("No drives found in manifest").
+    // SwarmChannel inbox poll would find no drives to recover.
     const after = await waitForFeed(() => client.readUserManifest(ownerAddress));
     expect(Object.keys(after!.drives)).toHaveLength(0);
     console.log("  After clear: user manifest has 0 drives — recovery would find nothing");

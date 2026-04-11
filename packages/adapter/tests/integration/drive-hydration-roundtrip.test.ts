@@ -2,7 +2,7 @@
  * Integration tests: Drive hydration round-trip
  *
  * Tests the FULL cycle:
- * 1. Build a drive manifest with nested folders + docs (simulating flush.ts capture)
+ * 1. Build a drive manifest with nested folders + docs (simulating ManifestManager)
  * 2. Store document operations on Swarm
  * 3. Read everything back (simulating hydration discovery)
  * 4. Verify the folder tree can be reconstructed via topological sort
@@ -55,11 +55,11 @@ describe("Drive hydration round-trip", () => {
     ownerAddress = client.getOwnerAddress();
   });
 
-  // ─── Phase 1: Simulate what flush.ts does ─────────────────────
+  // ─── Phase 1: Simulate what ManifestManager does ──────────────
   // Capture the drive state → build drive manifest → write to Swarm
 
   it("should build a drive manifest from simulated drive nodes", () => {
-    // Simulating what flush.ts reads from driveDoc.state.global.nodes
+    // Simulating what ManifestManager reads from driveDoc.state.global.nodes
     const nodes = [
       { id: FOLDER_A, kind: "folder", name: "folder-a", parentFolder: null },
       { id: FOLDER_B, kind: "folder", name: "folder-b", parentFolder: FOLDER_A },
@@ -70,7 +70,7 @@ describe("Drive hydration round-trip", () => {
       { id: DOC_IN_C, kind: "file", name: "doc-in-c", documentType: "powerhouse/document-model", parentFolder: FOLDER_C },
     ];
 
-    // This is the logic from flush.ts lines 421-436
+    // Extract folders and documents from nodes (same logic as ManifestManager)
     const folders: Record<string, { name: string; parentFolder?: string }> = {};
     const documents: Record<string, { documentType: string; name: string; parentFolder?: string; lastUpdated: string }> = {};
     const now = new Date().toISOString();
