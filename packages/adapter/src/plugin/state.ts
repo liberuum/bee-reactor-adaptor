@@ -35,7 +35,6 @@ export interface ReactorClient {
 const SWARM_BEE_URL_KEY = "swarm:beeUrl";
 const SWARM_BEE_URL_DEFAULT = "http://localhost:1633";
 
-export const DOCUMENT_MANIFEST_FLUSH_DELAY_MS = 3000;
 export const MAX_CONCURRENT_FLUSHES = 5;
 export const MANIFEST_FLUSH_DELAY_MS = 3000;
 export const DRIVE_MANIFEST_FLUSH_DELAY_MS = 3000;
@@ -83,15 +82,12 @@ export const state = {
   /** Bee node URL (mutable — changed via settings UI) */
   beeUrl: readBeeUrl(),
 
-  // ─── Sync tracking ─────────────────────────────────────────
+  // ─── Sync state (kept for sharing.ts compatibility) ────────
+  // These fields are inert — SwarmChannel handles sync via SyncManager.
+  // Sharing.ts reads them but they're always empty/false.
   syncPaused: false,
-  lastSeenDriveId: "",
-  hydrationRan: getHydrationRanStorage(),
-  syncedRevisions: new Map<string, number>(),
   docToDrive: new Map<string, string>(),
   recoveringDocs: new Set<string>(),
-  pendingSyncs: new Map<string, Promise<void>>(),
-  needsResync: new Set<string>(),
 
   // ─── Document manifest flush ───────────────────────────────
   pendingManifests: new Map<string, any>(),
@@ -214,17 +210,7 @@ export function resetUploadedBytes(): void {
  * Prevents hydration from running multiple times (HMR resets module state).
  * Use sessionStorage so it persists across HMR but resets on new tab.
  */
-function getHydrationRanStorage(): boolean {
-  try { return sessionStorage.getItem("__swarm_hydration_ran__") === "1"; } catch { return false; }
-}
-
-export function setHydrationRan(val: boolean): void {
-  state.hydrationRan = val;
-  try {
-    if (val) sessionStorage.setItem("__swarm_hydration_ran__", "1");
-    else sessionStorage.removeItem("__swarm_hydration_ran__");
-  } catch {}
-}
+// hydrationRan + setHydrationRan removed — SwarmChannel inbox handles recovery
 
 // ─── Utilities ──────────────────────────────────────────────────
 
@@ -239,7 +225,7 @@ export function setHydrationRan(val: boolean): void {
  * Strategy (in order of reliability):
  * 1. getChildren — works if the indexer processed it
  * 2. Drive state.global.nodes — how Connect does it
- * 3. lastSeenDriveId — fallback from subscriber
+ * 3. Returns null if not found
  */
 export async function findParentDrive(
   reactorClient: ReactorClient,
@@ -275,9 +261,6 @@ export async function findParentDrive(
         }
       } catch { /* not accessible */ }
     }
-
-    // Strategy 3: fallback
-    if (state.lastSeenDriveId) return state.lastSeenDriveId;
 
     return null;
   } catch { /* no drives */ }

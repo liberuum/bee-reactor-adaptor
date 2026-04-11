@@ -9,16 +9,13 @@
  * Also: IndexedDB manifest index persistence and clearSwarmStorage.
  */
 import type { SwarmClient } from "../swarm-client.js";
-// pending-ops-store removed — stub the functions for sharing.ts compatibility
-const clearPendingOps = async (_docId: string) => {};
-const clearAllPendingOps = async () => {};
+// pending-ops-store removed — sync_cursors in PGlite handles persistence
 import { emitSwarmEvent } from "./events.js";
 import {
   state,
   setSwarmStatus,
   setDocSyncStatus,
   addUploadedBytes,
-  setHydrationRan,
   resetUploadedBytes,
   findParentDrive,
   MAX_CONCURRENT_FLUSHES,
@@ -223,10 +220,7 @@ export async function flushDocumentManifest(docId: string): Promise<void> {
       driveId = found;
       state.docToDrive.set(docId, found);
     }
-    if (!driveId && state.lastSeenDriveId) {
-      driveId = state.lastSeenDriveId;
-      state.docToDrive.set(docId, state.lastSeenDriveId);
-    }
+    // lastSeenDriveId fallback removed — SwarmChannel tracks drive membership via SyncManager
   }
   setDocSyncStatus(docId, "flushing", opsSnapshot.length);
 
@@ -299,7 +293,6 @@ export async function flushDocumentManifest(docId: string): Promise<void> {
     state.pendingOps.delete(docId);
     state.pendingManifests.delete(docId);
     state.pendingFlushMeta.delete(docId);
-    clearPendingOps(docId).catch(() => {});
 
     // Persist manifest index for recovery after page reload
     await saveManifestIndex(swarmClient.getManifestIndex());
@@ -751,7 +744,6 @@ export async function clearSwarmStorage(
   state.pendingManifests.clear();
   state.pendingOps.clear();
   state.pendingFlushMeta.clear();
-  clearAllPendingOps().catch(() => {});
 
   // Cancel pending drive manifest flushes
   for (const timer of state.driveManifestTimers.values()) clearTimeout(timer);
@@ -760,15 +752,8 @@ export async function clearSwarmStorage(
   state.driveNames.clear();
   state.driveManifestCache.clear();
 
-  // Reset all sync state
-  state.syncedRevisions.clear();
+  // Reset drive mapping (SwarmChannel re-registers on reconnect)
   state.docToDrive.clear();
-  state.pendingSyncs.clear();
-  state.needsResync.clear();
-
-  // Allow hydration to re-run after reconnect
-  state.hydrationRan = false;
-  setHydrationRan(false);
   resetUploadedBytes();
 
   console.log("[SwarmPlugin] Swarm storage cleared — reconnecting...");
