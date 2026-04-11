@@ -448,17 +448,76 @@ export async function hydrateFromSwarm(
   }
 
   // ─── Restore folder structure from drive manifests ─────────
+  // Use ADD_FOLDER (topologically sorted) + direct parentFolder on ADD_FILE
+  // instead of create-at-root + MOVE_NODE (which loses folder placement).
   await new Promise((r) => setTimeout(r, 2000));
   for (const [swarmDriveId, localDriveId] of driveIdMap) {
     try {
       await reactorClient.get(localDriveId);
       const dm = await swarmClient.readDriveManifest(swarmDriveId);
-      if (dm?.folders && Object.keys(dm.folders).length > 0) {
-        const docMoves = Object.entries(dm.documents)
-          .filter(([_, e]) => e.parentFolder)
-          .map(([docId, e]) => ({ docId, targetFolder: e.parentFolder as string }));
-        await restoreFolderStructure(reactorClient, localDriveId, dm.folders, docMoves);
+      if (!dm?.folders || Object.keys(dm.folders).length === 0) continue;
+
+      // Topological sort: parents before children
+      const folders = dm.folders;
+      const sorted: Array<[string, { name: string; parentFolder?: string }]> = [];
+      const added = new Set<string>();
+      const visiting = new Set<string>();
+      function addF(id: string): void {
+        if (added.has(id)) return;
+        if (visiting.has(id)) return;
+        visiting.add(id);
+        const f = folders[id];
+        if (f.parentFolder && folders[f.parentFolder] && !added.has(f.parentFolder)) addF(f.parentFolder);
+        sorted.push([id, f]);
+        added.add(id);
+        visiting.delete(id);
+      }
+      for (const id of Object.keys(folders)) addF(id);
+
+      // Build batch: ADD_FOLDER actions only (files already created via createDocumentInDrive)
+      const folderActions = sorted.map(([folderId, folder]) => ({
+        id: crypto.randomUUID(),
+        timestampUtcMs: new Date().toISOString(),
+        type: "ADD_FOLDER",
+        input: {
+          id: folderId,
+          name: folder.name,
+          ...(folder.parentFolder ? { parentFolder: folder.parentFolder } : {}),
+        },
+        scope: "global",
+      }));
+
+      // MOVE_NODE for docs that belong in folders (since createDocumentInDrive puts them at root)
+      const moveActions = Object.entries(dm.documents)
+        .filter(([, e]) => e.parentFolder)
+        .map(([docId, e]) => ({
+          id: crypto.randomUUID(),
+          timestampUtcMs: new Date().toISOString(),
+          type: "MOVE_NODE",
+          input: { srcFolder: docId, targetParentFolder: e.parentFolder },
+          scope: "global",
+        }));
+
+      const allActions = [...folderActions, ...moveActions];
+      if (allActions.length === 0) continue;
+
+      console.log(`[SwarmPlugin] Restoring ${folderActions.length} folders + ${moveActions.length} moves for drive ${swarmDriveId.slice(0, 8)}`);
+
+      // Execute ALL folder actions as a single batch so the reactor processes them atomically
+      try {
+        await reactorClient.execute(localDriveId, "main", allActions);
         console.log(`[SwarmPlugin] Folder structure restored for drive ${swarmDriveId.slice(0, 8)}`);
+      } catch (err) {
+        // If batch fails, try one at a time as fallback
+        console.warn(`[SwarmPlugin] Batch folder restore failed, trying individually:`, err instanceof Error ? err.message : err);
+        for (const action of allActions) {
+          try {
+            await reactorClient.execute(localDriveId, "main", [action]);
+            await new Promise((r) => setTimeout(r, 200));
+          } catch (e) {
+            console.warn(`[SwarmPlugin] ${action.type}(${action.input.name || action.input.srcFolder?.slice(0, 8)}) failed:`, e instanceof Error ? e.message : e);
+          }
+        }
       }
     } catch (err) {
       console.warn(`[SwarmPlugin] Could not restore folders:`, err instanceof Error ? err.message : err);
