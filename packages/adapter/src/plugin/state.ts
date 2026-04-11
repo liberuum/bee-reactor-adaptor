@@ -4,7 +4,6 @@
  * All cross-module state lives here so every module can read/write it
  * without circular imports. Status helpers and small utilities included.
  */
-import type { SwarmClient } from "../swarm-client.js";
 import type { SwarmDriveManifest } from "../types.js";
 export { createEmptyManifest } from "../types.js";
 
@@ -55,58 +54,14 @@ export function persistBeeUrl(url: string): void {
   try { localStorage.setItem(SWARM_BEE_URL_KEY, url); } catch { /* */ }
 }
 
-// ─── Type Definitions ───────────────────────────────────────────
-
-/** Flush metadata captured during sync, consumed by flushDocumentManifest */
-export interface FlushMeta {
-  swarmClient: SwarmClient;
-  reactorClient: any;
-  ownerAddress: string;
-  docType: string;
-  docName: string;
-  driveId: string;
-}
-
-/** Single operation buffered for upload */
-export interface PendingOp {
-  index: number;
-  action: unknown;
-  hash?: string;
-  timestampUtcMs?: string;
-  id?: string;
-}
-
 // ─── Shared State ───────────────────────────────────────────────
 
 export const state = {
   /** Bee node URL (mutable — changed via settings UI) */
   beeUrl: readBeeUrl(),
 
-  // ─── Sync state (kept for sharing.ts compatibility) ────────
-  // These fields are inert — SwarmChannel handles sync via SyncManager.
-  // Sharing.ts reads them but they're always empty/false.
-  syncPaused: false,
+  // ─── UI cache (populated by populateUiCacheFromDrives) ────
   docToDrive: new Map<string, string>(),
-  recoveringDocs: new Set<string>(),
-
-  // ─── Document manifest flush ───────────────────────────────
-  pendingManifests: new Map<string, any>(),
-  docManifestTimers: new Map<string, ReturnType<typeof setTimeout>>(),
-  pendingOps: new Map<string, PendingOp[]>(),
-  pendingFlushMeta: new Map<string, FlushMeta>(),
-  activeFlushCount: 0,
-  flushQueue: [] as string[],
-
-  // ─── User manifest flush ───────────────────────────────────
-  pendingManifestDriveUpdates: new Map<string, { driveName: string }>(),
-  manifestFlushTimer: null as ReturnType<typeof setTimeout> | null,
-  manifestFlushInProgress: null as Promise<void> | null,
-  manifestFlushGeneration: 0,
-
-  // ─── Drive manifest ────────────────────────────────────────
-  pendingDriveUpdates: new Map<string, Map<string, { docType: string; docName: string }>>(),
-  driveManifestTimers: new Map<string, ReturnType<typeof setTimeout>>(),
-  driveManifestFlushInProgress: new Map<string, Promise<void>>(),
   driveNames: new Map<string, string>(),
   driveManifestCache: new Map<string, SwarmDriveManifest>(),
 
