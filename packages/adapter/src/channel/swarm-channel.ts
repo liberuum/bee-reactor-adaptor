@@ -375,10 +375,6 @@ export class SwarmChannel implements IChannel {
 
   // ─── Manifest Updates (drive + user) ───────────────────────────
 
-  /** Debounce drive manifest updates (same drive may get multiple op batches) */
-  private driveManifestTimer: ReturnType<typeof setTimeout> | null = null;
-  private pendingDriveUpdates = new Set<string>();
-
   /**
    * Update drive manifest and user manifest after pushing drive ops.
    *
@@ -603,7 +599,10 @@ export class SwarmChannel implements IChannel {
           }
         }
       } catch (err) {
-        // Manifest read failure — doc may not have ops on Swarm yet
+        // Only log unexpected errors — missing manifests are normal for new docs
+        if (err instanceof Error && !err.message.includes("404")) {
+          this.logger.warn(`[SwarmChannel] Manifest read failed for ${docId.slice(0, 8)}: ${err.message}`);
+        }
       }
     }
 

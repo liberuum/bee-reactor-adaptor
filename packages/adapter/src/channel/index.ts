@@ -14,3 +14,4 @@ export {
   updateDriveManifest,
   extractDriveInfoFromOps,
 } from "./manifest-manager.js";
+export { addSwarmRemoteForDrive, addSwarmRemotesForAllDrives, type SwarmRemoteConfig } from "./add-swarm-remote.js";

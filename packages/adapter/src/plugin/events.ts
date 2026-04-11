@@ -76,13 +76,6 @@ export function emitSwarmEvent<K extends SwarmEventType>(
 }
 
 /**
- * Clear all listeners (for cleanup on reconnect/HMR).
- */
-export function clearSwarmEventListeners(): void {
-  listeners.clear();
-}
-
-/**
  * Install the event system on window.ph.swarm.
  * Called from init.ts after plugin startup.
  */

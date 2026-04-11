@@ -23,8 +23,6 @@ import { installEventHandlers, emitSwarmEvent } from "./events.js";
 
 const FEED_TOPIC_PREFIX = "ph:v2";
 
-// cleanupSync removed — SwarmChannel lifecycle managed by SyncManager
-
 /** Idempotency guard — prevents double-init on HMR or duplicate processor registration */
 let initPromise: Promise<void> | undefined;
 
@@ -258,22 +256,10 @@ export async function initSwarmPlugin(): Promise<void> {
     stampCheckIntervalMs: 300_000,
     onUserManifestLoaded: (manifest) => {
       const driveCount = Object.keys(manifest.drives ?? {}).length;
-      console.log(`[SwarmPlugin] ${driveCount} drives found on Swarm`);
+      console.log(`[SwarmPlugin] ${driveCount} drives found on Swarm — recovery via SwarmChannel inbox pull`);
 
       populateUiCacheFromDrives(manifest).catch((err) =>
         console.warn("[SwarmPlugin] UI cache population failed:", err instanceof Error ? err.message : err));
-
-      if (driveCount > 0) {
-        // Old hydration disabled — SwarmChannel inbox pull handles recovery
-        // via SyncManager + reactor.load() which preserves original IDs.
-        // To re-enable old hydration (e.g. if SwarmChannel is removed),
-        // uncomment the following:
-        //
-        // hydrateFromSwarm(manifest).catch((err) =>
-        //   console.warn("[SwarmPlugin] Hydration failed:", err),
-        // );
-        console.log(`[SwarmPlugin] ${driveCount} drives on Swarm — recovery via SwarmChannel inbox pull`);
-      }
     },
     onSignatureRequired: () => {
       console.log("[SwarmPlugin] Wallet signature needed");
@@ -301,14 +287,7 @@ export async function initSwarmPlugin(): Promise<void> {
         (err) => console.warn("[SwarmPlugin] Profile publish failed:", err),
       );
 
-      // Old plugin sync disabled — SwarmChannel handles push via SyncManager outbox.
-      // To re-enable old sync (e.g. if SwarmChannel is removed), uncomment:
-      //
-      // startOperationSync(swarm, entry.ownerAddress).then(
-      //   (cleanup) => { cleanupSync = cleanup; },
-      //   (err) => console.warn("[SwarmPlugin] Sync setup failed:", err),
-      // );
-      console.log("[SwarmPlugin] Old sync disabled — SwarmChannel handles push + pull");
+      console.log("[SwarmPlugin] SwarmChannel handles push + pull");
     },
   });
 
@@ -316,9 +295,6 @@ export async function initSwarmPlugin(): Promise<void> {
 
   // plugin.start() overwrites ph.swarm — apply all our custom fields
   applySwarmExtensions((globalThis as any).window?.ph, isDevMode);
-
-  // Pending ops persistence removed — sync_cursors in PGlite handles this.
-  // SwarmChannel cursors survive page reload natively.
 
   console.log("[SwarmPlugin] Initialized");
 }
@@ -478,14 +454,10 @@ function applySwarmExtensions(ph: any, isDevMode: boolean): void {
         stampCheckIntervalMs: 300_000,
         onUserManifestLoaded: (manifest) => {
           const driveCount = Object.keys(manifest.drives ?? {}).length;
-          console.log(`[SwarmPlugin] ${driveCount} drives found on Swarm`);
+          console.log(`[SwarmPlugin] ${driveCount} drives found on Swarm — recovery via SwarmChannel inbox pull`);
 
           populateUiCacheFromDrives(manifest).catch((err) =>
             console.warn("[SwarmPlugin] UI cache population failed:", err instanceof Error ? err.message : err));
-
-          if (driveCount > 0) {
-            console.log(`[SwarmPlugin] ${driveCount} drives on Swarm — recovery via SwarmChannel inbox pull`);
-          }
         },
         onSignatureRequired: () => console.log("[SwarmPlugin] Wallet signature needed"),
         onReady: (client, readyEntry) => {
@@ -497,7 +469,6 @@ function applySwarmExtensions(ph: any, isDevMode: boolean): void {
           publishPublicProfile(client as SwarmClient, address, readyEntry.swarmPublicKey).catch(
             (err) => console.warn("[SwarmPlugin] Profile publish failed:", err),
           );
-          // Old sync disabled — SwarmChannel handles push + pull via SyncManager
           console.log("[SwarmPlugin] Reconnected — SwarmChannel handles sync");
         },
       });

@@ -2,7 +2,7 @@
  * Swarm storage utilities.
  *
  * - clearSwarmStorage: wipe all Swarm feeds (Settings UI button)
- * - loadManifestIndex / saveManifestIndex: IndexedDB cache for feed references
+ * - loadManifestIndex: IndexedDB cache for feed references
  */
 import type { SwarmClient } from "../swarm-client.js";
 
@@ -24,21 +24,6 @@ function openManifestDB(): Promise<IDBDatabase> {
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
-}
-
-export async function saveManifestIndex(index: Map<string, string>): Promise<void> {
-  try {
-    const db = await openManifestDB();
-    await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(MANIFEST_STORE, "readwrite");
-      tx.objectStore(MANIFEST_STORE).put(Object.fromEntries(index), "manifestIndex");
-      tx.oncomplete = () => { db.close(); resolve(); };
-      tx.onerror = () => { db.close(); reject(tx.error); };
-      tx.onabort = () => { db.close(); reject(tx.error); };
-    });
-  } catch {
-    // Non-critical — worst case we lose recovery on page reload
-  }
 }
 
 export async function loadManifestIndex(): Promise<Map<string, string>> {

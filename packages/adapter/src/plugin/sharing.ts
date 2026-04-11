@@ -177,7 +177,6 @@ export async function shareDocumentsWithUser(
       }
 
       // Bundle ALL docs' ops for this drive into ONE upload
-      const cachedDm = dm;
       const bundle = {
         documents: docs.map((d) => ({
           documentId: d.docId,
@@ -186,7 +185,7 @@ export async function shareDocumentsWithUser(
           operations: d.ops,
         })),
         ...(folderInfo ? { folders: folderInfo.folders, docFolders: folderInfo.docFolders } : {}),
-        ...(cachedDm?.preferredEditor ? { preferredEditor: cachedDm.preferredEditor } : {}),
+        ...(dm?.preferredEditor ? { preferredEditor: dm.preferredEditor } : {}),
       };
       const shareResult = await client.uploadSharedData(JSON.stringify(bundle), mySignerAddress, recipientSignerAddress);
 

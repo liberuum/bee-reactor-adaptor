@@ -48,7 +48,7 @@ export async function ensureDriveInUserManifest(
   const existing = manifest.drives[driveId];
   const now = new Date().toISOString();
 
-  if (existing && existing.name === driveName) {
+  if (existing && existing.name === driveName && existing.preferredEditor === preferredEditor) {
     // Already up to date
     return;
   }

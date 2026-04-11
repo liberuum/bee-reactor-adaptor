@@ -1,14 +1,13 @@
 /**
- * Swarm document recovery (hydration).
+ * Folder structure restore + UI cache population.
  *
- * Restores drives, documents, and folder structure from Swarm feeds
- * onto a fresh device. Uses wallet-derived keys for decryption.
+ * - restoreFolderStructure: topological folder sort + MOVE_NODE (used by sharing import)
+ * - populateUiCacheFromDrives: reads drive manifests for Settings UI tree view
  *
- * Also: UI cache population from drive manifests (runs on every manifest
- * load so the Settings tree always has data, even when hydration is skipped).
+ * Hydration (recovery from Swarm) is handled by SwarmChannel inbox pull.
  */
 import type { SwarmClient } from "../swarm-client.js";
-import { state, registerDriveMapping, type ReactorClient } from "./state.js";
+import { state, type ReactorClient } from "./state.js";
 
 // ═══════════════════════════════════════════════════════════════
 // Folder Structure Restore (shared with sharing)
@@ -117,7 +116,7 @@ export async function populateUiCacheFromDrives(
     try {
       const dm = await swarmClient.readDriveManifest(driveId);
       if (dm) {
-        // Seed the local cache so flushDriveManifest never reads stale data
+        // Cache for Settings UI tree view
         state.driveManifestCache.set(driveId, dm);
         for (const [docId, docEntry] of Object.entries(dm.documents) as Array<[string, any]>) {
           documents[docId] = {
@@ -159,7 +158,3 @@ export async function populateUiCacheFromDrives(
     }
   }
 }
-
-// hydrateFromSwarm + downloadOperations removed — SwarmChannel inbox handles recovery.
-// The functions were 450+ lines using old-pipeline state (syncPaused, syncedRevisions, etc.)
-// Recovery now works via: SyncManager → SwarmChannel.pollInbox() → reactor.load()
