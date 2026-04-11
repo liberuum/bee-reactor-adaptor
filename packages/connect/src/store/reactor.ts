@@ -41,6 +41,7 @@ import { initFeatureFlags } from "../feature-flags.js";
 // Monorepo relative import — for npm deployment use:
 // import { initSwarmPlugin } from "@liberuum-org/bee-reactor-adapter";
 import { initSwarmPlugin } from "../../../adapter/src/plugin/init.js";
+import type {} from "../../../adapter/src/channel/add-swarm-remote.js"; // type-only — actual import is dynamic below
 import { PackageDiscoveryService } from "../package-discovery.js";
 import { BrowserPackageManager } from "../package-manager.js";
 import { loadPackagesConfig } from "../packages.config.js";
@@ -296,8 +297,22 @@ export async function createReactor(localPackage?: DocumentModelLib) {
     on("sync:all-synced", () => {
       toast("All documents synced to Swarm", { type: "connect-success" });
     });
-    on("plugin:ready", () => {
+    on("plugin:ready", (e: Record<string, unknown>) => {
       toast("Connected to Swarm", { type: "connect-success" });
+
+      // Register Swarm sync remotes for all drives in the reactor.
+      // This enables the SyncManager to push operations to Swarm via SwarmChannel.
+      const sm = reactorClientModule.reactorModule?.syncModule?.syncManager;
+      const swarm = (window.ph as any)?.swarm;
+      if (sm && swarm?.beeUrl) {
+        addSwarmRemotesForAllDrives(sm, reactorClient, {
+          beeUrl: swarm.beeUrl,
+          batchId: swarm.client?.stamps?.batchId ?? "",
+          ownerAddress: String(e.ownerAddress ?? ""),
+        }).catch((err) =>
+          logger.warn("[SwarmChannel] Auto-register drives failed:", err),
+        );
+      }
     });
     // Show a one-time notification on first retry — auto-closes after 30s
     let retryToastShown = false;
@@ -314,6 +329,73 @@ export async function createReactor(localPackage?: DocumentModelLib) {
     });
 
     logger.info("[SwarmPlugin] Toast notifications active");
+
+    // Register Swarm remotes for drives — retry until drives exist.
+    // Drives may not exist yet if hydration is still running.
+    const registerSwarmRemotes = async () => {
+      const swarmState = (window.ph as any)?.swarm;
+      const sm = reactorClientModule.reactorModule?.syncModule?.syncManager;
+      if (!sm) {
+        console.log("[SwarmChannel] No syncManager — skipping drive registration");
+        return;
+      }
+      if (!swarmState?.ready || !swarmState?.beeUrl) {
+        console.log("[SwarmChannel] Swarm not ready — will retry");
+        return;
+      }
+
+      const drivesList = await getDrives(reactorClientModule.client);
+      console.log("[SwarmChannel] Raw drives:", JSON.stringify(drivesList.slice(0, 3)).slice(0, 500));
+      const driveIds = drivesList.map((d: any) => {
+        if (typeof d === "string") return d;
+        if (d?.id) return d.id;
+        if (d?.slug) return d.slug;
+        if (d?.header?.id) return d.header.id;
+        // Last resort: stringify to see shape
+        return "";
+      }).filter(Boolean);
+      console.log(`[SwarmChannel] Found ${driveIds.length} drives:`, driveIds.map((id: string) => id.slice(0, 8)));
+      if (driveIds.length === 0) return false;
+
+      const ownerAddr = (window.ph as any)?.renown?.user?.address ?? swarmState.ownerAddress ?? "";
+      let registered = 0;
+      for (const driveId of driveIds) {
+        if (!driveId) continue;
+        try {
+          const { addSwarmRemoteForDrive } = await import("../../../adapter/src/channel/add-swarm-remote.js");
+          const added = await addSwarmRemoteForDrive(sm, String(driveId), {
+            beeUrl: swarmState.beeUrl,
+            batchId: swarmState.client?.stamps?.batchId ?? "",
+            ownerAddress: ownerAddr,
+          });
+          if (added) registered++;
+        } catch (err) {
+          console.warn(`[SwarmChannel] Failed to register drive ${String(driveId).slice(0, 8)}:`, err);
+        }
+      }
+      if (registered > 0) {
+        console.log(`[SwarmChannel] Registered ${registered} Swarm remote(s)`);
+      }
+      return registered > 0;
+    };
+
+    // Try immediately, then retry every 3s up to 30s (drives may be hydrating)
+    let attempts = 0;
+    const retryInterval = setInterval(async () => {
+      attempts++;
+      try {
+        const done = await registerSwarmRemotes();
+        if (done || attempts >= 10) {
+          clearInterval(retryInterval);
+          if (!done && attempts >= 10) {
+            console.log("[SwarmChannel] Gave up waiting for drives after 30s");
+          }
+        }
+      } catch (err) {
+        console.warn("[SwarmChannel] Registration attempt failed:", err);
+        if (attempts >= 10) clearInterval(retryInterval);
+      }
+    }, 3000);
   }, 1000);
 
   window.ph.loading = false;

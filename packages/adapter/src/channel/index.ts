@@ -8,3 +8,4 @@ export { CompositeChannelFactory } from "./composite-factory.js";
 export { SwarmChannel, type SwarmChannelConfig } from "./swarm-channel.js";
 export { SwarmChannelFactory } from "./swarm-channel-factory.js";
 export { createSwarmSyncBuilder } from "./create-composite-factory.js";
+export { registerSwarmChannel } from "./register-swarm-channel.js";
