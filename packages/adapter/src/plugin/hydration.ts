@@ -520,7 +520,8 @@ export async function hydrateFromSwarm(
             await reactorClient.execute(localDriveId, "main", [action]);
             await new Promise((r) => setTimeout(r, 200));
           } catch (e) {
-            console.warn(`[SwarmPlugin] ${action.type}(${action.input.name || action.input.srcFolder?.slice(0, 8)}) failed:`, e instanceof Error ? e.message : e);
+            const label = (action.input as any).name || (action.input as any).srcFolder?.slice(0, 8) || "?";
+            console.warn(`[SwarmPlugin] ${action.type}(${label}) failed:`, e instanceof Error ? e.message : e);
           }
         }
       }

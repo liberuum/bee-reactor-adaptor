@@ -93,7 +93,8 @@ export class StampManager {
     const hotBuckets: Array<{ index: number; collisions: number; percentFull: number }> = [];
 
     for (let i = 0; i < batchBuckets.buckets.length; i++) {
-      const collisions = batchBuckets.buckets[i];
+      const bucket = batchBuckets.buckets[i];
+      const collisions = bucket.collisions;
       buckets.push({ index: i, collisions });
       const percentFull = Math.round((collisions / bucketUpperBound) * 100);
       if (percentFull >= 80) {

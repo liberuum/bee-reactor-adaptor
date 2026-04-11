@@ -63,6 +63,9 @@ const MAX_PUSH_RETRIES = 3;
 // SwarmChannel
 // ═══════════════════════════════════════════════════════════════
 
+/** IMailbox type extracted from IChannel — not directly exported by @powerhousedao/reactor */
+type IMailbox = IChannel["inbox"];
+
 export class SwarmChannel implements IChannel {
   readonly inbox: IMailbox;
   readonly outbox: IMailbox;

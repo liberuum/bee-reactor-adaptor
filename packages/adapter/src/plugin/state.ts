@@ -12,14 +12,21 @@ export { createEmptyManifest } from "../types.js";
 // Minimal type for the Connect reactor client used across plugin modules.
 // Replaces `any` for compile-time safety on method calls.
 
+/**
+ * Minimal interface for the Connect reactor client.
+ *
+ * The actual ReactorClient from @powerhousedao/reactor has a richer API,
+ * but these are the methods the plugin modules use. Return types are `any`
+ * because the reactor's response shapes vary by document type and version.
+ */
 export interface ReactorClient {
   get(documentId: string): Promise<any>;
-  getDrives(): Promise<Array<{ id: string } | string>>;
-  getChildren(driveId: string): Promise<{ results?: any[] } | any[]>;
-  getOperations(documentId: string): Promise<{ operations?: any[] } | any[]>;
+  getDrives(): Promise<any[]>;
+  getChildren(driveId: string): Promise<any>;
+  getOperations(documentId: string): Promise<any>;
   execute(documentId: string, branch: string, actions: any[]): Promise<any>;
   createDocumentInDrive(driveId: string, doc: any): Promise<any>;
-  getDocumentModelModule?(documentType: string): Promise<{ utils?: { createState?: () => any } } | null>;
+  getDocumentModelModule?(documentType: string): Promise<any>;
   subscribe?(filter: Record<string, unknown>, handler: (event: any) => void): (() => void) | undefined;
 }
 
