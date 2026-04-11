@@ -16,7 +16,7 @@ import type { PHDocumentHeader } from "document-model";
 import type { SwarmClient } from "../swarm-client.js";
 import { SwarmConnectPlugin } from "../connect-plugin.js";
 import { state, setSwarmStatus, getUploadedBytes, persistBeeUrl, loadDriveMapping } from "./state.js";
-import { loadManifestIndex, clearSwarmStorage } from "./flush.js";
+import { loadManifestIndex, clearSwarmStorage } from "./storage.js";
 import { populateUiCacheFromDrives } from "./hydration.js";
 import { publishPublicProfile, shareDocumentsWithUser, importFromUser } from "./sharing.js";
 import { installEventHandlers, emitSwarmEvent } from "./events.js";
@@ -28,8 +28,6 @@ const FEED_TOPIC_PREFIX = "ph:v2";
 /** Idempotency guard — prevents double-init on HMR or duplicate processor registration */
 let initPromise: Promise<void> | undefined;
 
-/** Guard: only register the beforeunload listener once */
-let beforeUnloadRegistered = false;
 
 // ═══════════════════════════════════════════════════════════════
 // Processor Builder (the single export consumed by index.ts)
