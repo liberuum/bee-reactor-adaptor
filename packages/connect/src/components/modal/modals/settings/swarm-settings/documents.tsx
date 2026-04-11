@@ -284,7 +284,7 @@ export function DocsTreeSection({
         }
       >
         {expanded ? (
-          <div className="max-h-48 overflow-y-auto">{treeContent(false)}</div>
+          <div className="max-h-96 overflow-y-auto">{treeContent(false)}</div>
         ) : (
           <p className="text-xs text-gray-400">
             {drives.length} drive{drives.length !== 1 ? "s" : ""}, {childDocs.length} document

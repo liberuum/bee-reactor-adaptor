@@ -97,7 +97,7 @@ function ShareTreeGlobal({
   let itemCount = 0;
 
   return (
-    <div className="mb-3 space-y-1 font-mono text-xs max-h-64 overflow-y-auto">
+    <div className="mb-3 space-y-1 font-mono text-xs max-h-96 overflow-y-auto">
       {drives.map(([driveId, drive]) => {
         const children = childDocs.filter(([, d]) => d.driveId === driveId);
         const allChecked =
