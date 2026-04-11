@@ -81,14 +81,18 @@ export async function startOperationSync(
         // Skip docs being recovered
         if (state.recoveringDocs.has(id)) continue;
 
-        // Drives: track as lastSeenDriveId for doc→drive resolution fallback
+        // Drives: sync the drive itself AND schedule drive manifest
         if (docType === "powerhouse/document-drive") {
           state.lastSeenDriveId = id;
-          // Use the Swarm drive ID if this local drive was created by hydration
           const swarmDriveId = state.localToSwarmDrive.get(id) ?? id;
+          const driveName = doc?.header?.name || id;
+          console.log(`[SwarmPlugin] Drive change: "${driveName}" (${id.slice(0, 8)} → swarm:${swarmDriveId.slice(0, 8)})`);
+          // Sync the drive document ops to Swarm
+          scheduleSync(swarmClient, reactorClient, ownerAddress, id, docType, driveName, "");
+          // Also update the drive manifest (with delay for state to settle)
           setTimeout(() => {
             ensureDriveSynced(swarmClient, reactorClient, ownerAddress, swarmDriveId).catch(() => {});
-          }, 1000);
+          }, 2000);
           continue;
         }
 
@@ -110,10 +114,24 @@ export async function startOperationSync(
             if (found) {
               const swarmFound = state.localToSwarmDrive.get(found) ?? found;
               state.docToDrive.set(id, swarmFound);
+              console.log(`[SwarmPlugin] Resolved drive for "${name}": ${swarmFound.slice(0, 8)}`);
               updateUserManifest(swarmClient, ownerAddress, id, docType, name, swarmFound);
               await ensureDriveSynced(swarmClient, reactorClient, ownerAddress, swarmFound);
+            } else {
+              // Fallback: use lastSeenDriveId
+              if (state.lastSeenDriveId) {
+                const fallback = state.localToSwarmDrive.get(state.lastSeenDriveId) ?? state.lastSeenDriveId;
+                state.docToDrive.set(id, fallback);
+                console.log(`[SwarmPlugin] Using lastSeenDrive fallback for "${name}": ${fallback.slice(0, 8)}`);
+                updateUserManifest(swarmClient, ownerAddress, id, docType, name, fallback);
+                await ensureDriveSynced(swarmClient, reactorClient, ownerAddress, fallback);
+              } else {
+                console.warn(`[SwarmPlugin] Could not find drive for "${name}" (${id.slice(0, 8)})`);
+              }
             }
-          }).catch(() => {});
+          }).catch((err) => {
+            console.warn(`[SwarmPlugin] findParentDrive failed for "${name}":`, err instanceof Error ? err.message : err);
+          });
         }
 
         scheduleSync(swarmClient, reactorClient, ownerAddress, id, docType, name, driveId);
