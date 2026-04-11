@@ -20,8 +20,17 @@ import { Kysely } from "kysely";
 import { PGliteDialect } from "kysely-pglite-dialect";
 
 /**
- * Creates a Reactor that plugs into legacy storage but syncs through the new
- * Reactor GQL API.
+ * Creates a Reactor with GQL sync (via ChannelScheme.CONNECT).
+ *
+ * The Swarm sync channel is registered separately after init via
+ * the existing plugin system (initSwarmPlugin). Once the SwarmChannel
+ * is proven stable, we'll switch to CompositeChannelFactory here.
+ *
+ * SWARM INTEGRATION NOTE:
+ * To switch to CompositeChannelFactory (GQL + Swarm dual sync):
+ * 1. Import { createSwarmSyncBuilder } from adapter/src/channel
+ * 2. Replace .withChannelScheme(ChannelScheme.CONNECT) with .withSync(syncBuilder)
+ * 3. This requires passing a queue — see swarm-channel-architecture.md
  */
 export async function createBrowserReactor(
   documentModelModules: DocumentModelModule[],
