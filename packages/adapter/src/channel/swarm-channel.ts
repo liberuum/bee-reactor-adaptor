@@ -609,6 +609,12 @@ export class SwarmChannel implements IChannel {
     if (newOpsCount > 0) {
       this.logger.info(`[SwarmChannel] Pulled ${newOpsCount} new ops from Swarm`);
     }
+
+    // Update UI recovery flag on window.ph.swarm
+    const phSwarm = (globalThis as any).window?.ph?.swarm;
+    if (phSwarm) {
+      phSwarm.recovering = newOpsCount > 0;
+    }
   }
 
   // ─── Helpers ──────────────────────────────────────────────────

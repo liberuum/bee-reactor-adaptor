@@ -22,11 +22,11 @@ export function DataManagementSection({
         old data expires when the stamp runs out. Use this to start fresh if feeds have stale
         data.
       </p>
-      {swarm.hydrating && (
+      {swarm.recovering && (
         <div className="mb-2 flex items-center gap-2 rounded-lg border border-yellow-200 bg-yellow-50 p-2">
           <div className="h-3 w-3 shrink-0 animate-spin rounded-full border-2 border-yellow-500 border-t-transparent" />
           <span className="text-[10px] font-medium text-yellow-700">
-            Restoration in progress — actions are disabled until hydration completes.
+            Recovery in progress — pulling documents from Swarm via sync channel.
           </span>
         </div>
       )}
@@ -78,7 +78,7 @@ export function DataManagementSection({
             }
           }}
           loading={clearingStorage}
-          disabled={!ready || !!swarm.hydrating}
+          disabled={!ready || !!swarm.recovering}
         >
           {clearingStorage ? "Clearing..." : "Clear Swarm Storage"}
         </ActionButton>
@@ -133,7 +133,7 @@ export function CacheSection({
         reconnect &mdash; your Swarm data is not lost since the same wallet always produces the
         same key.
       </p>
-      {swarm.hydrating && (
+      {swarm.recovering && (
         <div className="mb-2 flex items-center gap-2 rounded-lg border border-yellow-200 bg-yellow-50 p-2">
           <div className="h-3 w-3 shrink-0 animate-spin rounded-full border-2 border-yellow-500 border-t-transparent" />
           <span className="text-[10px] font-medium text-yellow-700">
@@ -143,7 +143,7 @@ export function CacheSection({
       )}
       <div className="flex items-center justify-between">
         <span className="text-sm text-gray-500">Clear and reconnect</span>
-        <ActionButton onClick={handleClearCache} loading={clearing} disabled={!ready || !!swarm.hydrating}>
+        <ActionButton onClick={handleClearCache} loading={clearing} disabled={!ready || !!swarm.recovering}>
           {clearing ? "Reconnecting..." : "Clear & Reconnect"}
         </ActionButton>
       </div>

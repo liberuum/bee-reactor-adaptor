@@ -445,14 +445,16 @@ adapter/src/ (kept — infrastructure)
   ├── swarm-operation-store.ts    — IOperationStore interface
   └── swarm-keyframe-store.ts     — IKeyframeStore interface
 
-adapter/src/plugin/ (old — to be removed)
+adapter/src/plugin/ (cleaned — supports SwarmChannel architecture)
   │
-  ├── sync.ts         — 649 lines — DISABLED (SwarmChannel outbox)
-  ├── flush.ts        — 788 lines — DISABLED (SwarmChannel outbox)
-  ├── hydration.ts    — 656 lines — DISABLED (SwarmChannel inbox)
-  ├── init.ts         — 552 lines — SIMPLIFIED (sync + hydration disabled)
-  ├── state.ts        — 278 lines — TO REMOVE (SyncManager tracks state)
-  ├── events.ts       —  94 lines — TO REMOVE (IChannel connection state)
-  ├── pending-ops.ts  — 137 lines — TO REMOVE (sync_cursors in PGlite)
-  └── sharing.ts      — 418 lines — KEPT (orthogonal feature)
+  ├── init.ts         — 508 lines — Orchestrator: Bee detection, stamps, wallet, events
+  ├── sharing.ts      — 394 lines — Cross-user encrypted sharing + import
+  ├── hydration.ts    — 160 lines — restoreFolderStructure + populateUiCacheFromDrives
+  ├── state.ts        — 114 lines — Bee URL, UI cache fields, drive mapping
+  ├── storage.ts      — 107 lines — clearSwarmStorage + loadManifestIndex (IndexedDB)
+  └── events.ts       —  87 lines — Toast event system (onSwarmEvent/emitSwarmEvent)
+  
+  Deleted (replaced by SwarmChannel):
+  ✗ sync.ts (649)  ✗ flush.ts (788)  ✗ pending-ops-store.ts (137)
+  Total removed: 3,574 lines → 1,370 lines
 ```

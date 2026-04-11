@@ -87,8 +87,8 @@ export type SwarmUiSnapshot = {
   setBeeUrl?: (url: string) => Promise<void>;
   /** Lightweight stamp refresh — re-reads stamp status without full reconnect */
   refreshStamp?: () => Promise<void>;
-  /** Whether hydration/restoration is currently in progress */
-  hydrating?: boolean;
+  /** Whether SwarmChannel inbox is recovering data from Swarm */
+  recovering?: boolean;
   /** Subscribe to plugin events. Returns unsubscribe function. */
   on?: (event: string, handler: (data: Record<string, unknown>) => void) => () => void;
   /** Get detailed node status (mode, peers, reachability, neighborhood) */
