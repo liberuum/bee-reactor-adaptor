@@ -8,6 +8,21 @@ import type { SwarmClient } from "../swarm-client.js";
 import type { SwarmDriveManifest } from "../types.js";
 export { createEmptyManifest } from "../types.js";
 
+// ─── Reactor Client Interface ──────────────────────────────────
+// Minimal type for the Connect reactor client used across plugin modules.
+// Replaces `any` for compile-time safety on method calls.
+
+export interface ReactorClient {
+  get(documentId: string): Promise<any>;
+  getDrives(): Promise<Array<{ id: string } | string>>;
+  getChildren(driveId: string): Promise<{ results?: any[] } | any[]>;
+  getOperations(documentId: string): Promise<{ operations?: any[] } | any[]>;
+  execute(documentId: string, branch: string, actions: any[]): Promise<any>;
+  createDocumentInDrive(driveId: string, doc: any): Promise<any>;
+  getDocumentModelModule?(documentType: string): Promise<{ utils?: { createState?: () => any } } | null>;
+  subscribe?(filter: Record<string, unknown>, handler: (event: any) => void): (() => void) | undefined;
+}
+
 // ─── Constants ──────────────────────────────────────────────────
 
 const SWARM_BEE_URL_KEY = "swarm:beeUrl";
@@ -220,7 +235,7 @@ export function setHydrationRan(val: boolean): void {
  * 3. lastSeenDriveId — fallback from subscriber
  */
 export async function findParentDrive(
-  reactorClient: any,
+  reactorClient: ReactorClient,
   docId: string,
 ): Promise<string | null> {
   try {

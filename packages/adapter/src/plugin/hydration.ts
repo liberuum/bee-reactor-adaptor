@@ -8,7 +8,7 @@
  * load so the Settings tree always has data, even when hydration is skipped).
  */
 import type { SwarmClient } from "../swarm-client.js";
-import { state, setHydrationRan, registerDriveMapping } from "./state.js";
+import { state, setHydrationRan, registerDriveMapping, type ReactorClient } from "./state.js";
 
 // ═══════════════════════════════════════════════════════════════
 // Folder Structure Restore (shared with sharing)
@@ -20,7 +20,7 @@ import { state, setHydrationRan, registerDriveMapping } from "./state.js";
  * Used by both hydration and import.
  */
 export async function restoreFolderStructure(
-  reactorClient: any,
+  reactorClient: ReactorClient,
   driveId: string,
   folders: Record<string, { name: string; parentFolder?: string }>,
   docMoves: Array<{ docId: string; targetFolder: string }>,
@@ -429,7 +429,8 @@ export async function hydrateFromSwarm(
             }
           }
 
-          state.docToDrive.set(docId, localDriveId!);
+          // Map doc to the Swarm drive ID (not local) so sync writes to the correct feed
+          state.docToDrive.set(docId, swarmDriveId);
 
           try {
             const localOps = await reactorClient.getOperations(docId);

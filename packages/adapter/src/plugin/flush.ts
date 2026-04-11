@@ -22,6 +22,7 @@ import {
   MAX_CONCURRENT_FLUSHES,
   MANIFEST_FLUSH_DELAY_MS,
   DRIVE_MANIFEST_FLUSH_DELAY_MS,
+  type ReactorClient,
 } from "./state.js";
 
 import type { SwarmDriveManifest } from "../types.js";
@@ -44,7 +45,7 @@ const DRIVE_STATE_TIMEOUT_MS = 5_000;
  * had the expected file count.
  */
 async function waitForDriveState(
-  reactorClient: any,
+  reactorClient: ReactorClient,
   localDriveId: string,
   expectedDocCount: number,
 ): Promise<{ driveDoc: any; nodes: any[]; settled: boolean }> {
@@ -694,7 +695,7 @@ export async function clearSwarmStorage(
   // Stop all syncing immediately
   state.syncPaused = true;
 
-  // Cancel user manifest flush — invalidate in-flight writes
+  // Cancel ALL pending flushes — invalidate in-flight writes
   if (state.manifestFlushTimer) {
     clearTimeout(state.manifestFlushTimer);
     state.manifestFlushTimer = null;
@@ -702,6 +703,13 @@ export async function clearSwarmStorage(
   state.pendingManifestDriveUpdates.clear();
   state.manifestFlushInProgress = null;
   state.manifestFlushGeneration++;
+
+  // Cancel drive manifest flushes
+  for (const [, timer] of state.driveManifestTimers) clearTimeout(timer);
+  state.driveManifestTimers.clear();
+  state.pendingDriveUpdates.clear();
+  state.driveManifestFlushInProgress.clear();
+  state.driveManifestCache.clear();
 
   const currentManifest = await swarmClient.readUserManifest(ownerAddress);
 

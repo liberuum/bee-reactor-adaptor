@@ -8,32 +8,22 @@
  * No Bee node needed — pure logic tests.
  */
 import { describe, it, expect } from "vitest";
+import { buildFolderTree } from "../../src/folder-tree.js";
+import type { DocEntry, FolderEntry, TreeFolder } from "../../src/folder-tree.js";
 
-// ─── Replicate the UI's tree-building logic ─────────────────────
+// ─── Helper: flatten tree docs to names for easy assertions ─────
 
-type DocEntry = { name?: string; documentType?: string; driveId?: string; parentFolder?: string };
-type FolderEntry = { name: string; parentFolder?: string };
+function flattenDocs(tree: { subFolders: TreeFolder[]; docs: Array<[string, DocEntry]> }): string[] {
+  return tree.docs.map(([, d]) => d.name!);
+}
 
-/**
- * Recursive tree builder — same algorithm as documents.tsx buildFolderTree()
- * and sharing.tsx buildShareTree(). Matches parentFolder === null for root.
- */
-function buildFolderTree(
-  parentId: string | null,
-  folders: Record<string, FolderEntry>,
-  docs: Array<[string, DocEntry]>,
-): { subFolders: Array<{ id: string; name: string; subFolders: any[]; docs: string[] }>; docs: string[] } {
-  const matchingFolders = Object.entries(folders)
-    .filter(([, f]) => (f.parentFolder || null) === parentId)
-    .sort(([, a], [, b]) => a.name.localeCompare(b.name));
-  const matchingDocs = docs
-    .filter(([, d]) => (d.parentFolder || null) === parentId)
-    .map(([, d]) => d.name!);
-  const subFolders = matchingFolders.map(([id, f]) => {
-    const children = buildFolderTree(id, folders, docs);
-    return { id, name: f.name, subFolders: children.subFolders, docs: children.docs };
-  });
-  return { subFolders, docs: matchingDocs };
+function flattenFolder(folder: TreeFolder): { id: string; name: string; subFolders: any[]; docs: string[] } {
+  return {
+    id: folder.id,
+    name: folder.name,
+    subFolders: folder.subFolders.map(flattenFolder),
+    docs: folder.docs.map(([, d]) => d.name!),
+  };
 }
 
 function buildTree(
@@ -69,8 +59,8 @@ function buildTree(
     const tree = buildFolderTree(null, folders, children);
     result[driveId] = {
       driveName: drive.name!,
-      rootFolders: tree.subFolders,
-      rootDocs: tree.docs,
+      rootFolders: tree.subFolders.map(flattenFolder),
+      rootDocs: flattenDocs(tree),
     };
   }
 

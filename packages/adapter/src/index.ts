@@ -66,3 +66,6 @@ export { swarmPluginProcessorBuilder } from "./swarm-plugin.js";
 export { initSwarmPlugin } from "./plugin/init.js";
 export { onSwarmEvent, emitSwarmEvent } from "./plugin/events.js";
 export type { SwarmEventType, SwarmEventData } from "./plugin/events.js";
+export { buildFolderTree } from "./folder-tree.js";
+export type { FolderEntry, DocEntry, TreeFolder } from "./folder-tree.js";
+export type { ReactorClient } from "./plugin/state.js";

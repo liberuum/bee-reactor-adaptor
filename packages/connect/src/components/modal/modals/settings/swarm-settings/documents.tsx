@@ -1,49 +1,8 @@
 import React, { useState } from "react";
 import type { SwarmUiSnapshot } from "./types.js";
 import { Section, SyncBadge, shortType } from "./primitives.js";
-
-// ─── Tree Data Types ────────────────────────────────────────────
-
-type DocEntry = { name?: string; documentType?: string; driveId?: string; parentFolder?: string };
-type FolderEntry = { name: string; parentFolder?: string };
-
-type TreeFolder = {
-  id: string;
-  name: string;
-  subFolders: TreeFolder[];
-  docs: Array<[string, DocEntry]>;
-};
-
-/**
- * Build a recursive tree from a flat folder map + document list.
- * Same algorithm as the Switchboard CLI's build_children():
- * 1. Find all nodes where parentFolder matches current parent
- * 2. Folders first (recurse), then files
- */
-function buildFolderTree(
-  folderId: string | null,
-  folders: Record<string, FolderEntry>,
-  docs: Array<[string, DocEntry]>,
-): { subFolders: TreeFolder[]; docs: Array<[string, DocEntry]> } {
-  const matchingFolders = Object.entries(folders)
-    .filter(([, f]) => {
-      const parent = f.parentFolder || null;
-      return parent === folderId;
-    })
-    .sort(([, a], [, b]) => (a.name ?? "").localeCompare(b.name ?? ""));
-
-  const matchingDocs = docs.filter(([, d]) => {
-    const parent = d.parentFolder || null;
-    return parent === folderId;
-  });
-
-  const subFolders: TreeFolder[] = matchingFolders.map(([id, f]) => {
-    const children = buildFolderTree(id, folders, docs);
-    return { id, name: f.name, subFolders: children.subFolders, docs: children.docs };
-  });
-
-  return { subFolders, docs: matchingDocs };
-}
+import { buildFolderTree } from "../../../../../../adapter/src/folder-tree.js";
+import type { DocEntry, FolderEntry, TreeFolder } from "../../../../../../adapter/src/folder-tree.js";
 
 // ─── Components ─────────────────────────────────────────────────
 

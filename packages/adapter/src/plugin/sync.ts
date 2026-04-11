@@ -11,6 +11,7 @@ import {
   findParentDrive,
   createEmptyManifest,
   DOCUMENT_MANIFEST_FLUSH_DELAY_MS,
+  type ReactorClient,
 } from "./state.js";
 import { emitSwarmEvent } from "./events.js";
 import {
@@ -222,7 +223,7 @@ export async function startOperationSync(
 
 export function scheduleSync(
   swarmClient: SwarmClient,
-  reactorClient: any,
+  reactorClient: ReactorClient,
   ownerAddress: string,
   id: string,
   docType: string,
@@ -263,7 +264,7 @@ export function scheduleSync(
  */
 async function syncDocumentToSwarm(
   swarmClient: SwarmClient,
-  reactorClient: any,
+  reactorClient: ReactorClient,
   ownerAddress: string,
   docId: string,
   docType: string,
@@ -394,7 +395,7 @@ async function syncDocumentToSwarm(
  *  but the drive itself may have missed its reactor event */
 export async function ensureDriveSynced(
   swarmClient: SwarmClient,
-  reactorClient: any,
+  reactorClient: ReactorClient,
   ownerAddress: string,
   driveId: string,
 ): Promise<void> {
@@ -437,7 +438,7 @@ export async function ensureDriveSynced(
 
 async function syncAllDrives(
   swarmClient: SwarmClient,
-  reactorClient: any,
+  reactorClient: ReactorClient,
   ownerAddress: string,
 ): Promise<void> {
   try {
@@ -468,7 +469,7 @@ async function syncAllDrives(
  */
 async function reconcileUserManifest(
   swarmClient: SwarmClient,
-  reactorClient: any,
+  reactorClient: ReactorClient,
   ownerAddress: string,
 ): Promise<void> {
   const ph = (globalThis as any).window?.ph;
