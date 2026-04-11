@@ -9,3 +9,8 @@ export { SwarmChannel, type SwarmChannelConfig } from "./swarm-channel.js";
 export { SwarmChannelFactory } from "./swarm-channel-factory.js";
 export { createSwarmSyncBuilder } from "./create-composite-factory.js";
 export { registerSwarmChannel } from "./register-swarm-channel.js";
+export {
+  ensureDriveInUserManifest,
+  updateDriveManifest,
+  extractDriveInfoFromOps,
+} from "./manifest-manager.js";

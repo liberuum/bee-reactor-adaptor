@@ -24,6 +24,11 @@ import {
   ChannelErrorSource,
 } from "@powerhousedao/reactor";
 import type { SwarmClient } from "../swarm-client.js";
+import {
+  ensureDriveInUserManifest,
+  updateDriveManifest,
+  extractDriveInfoFromOps,
+} from "./manifest-manager.js";
 
 // ═══════════════════════════════════════════════════════════════
 // Configuration
@@ -350,6 +355,82 @@ export class SwarmChannel implements IChannel {
 
     this.logger.info(
       `[SwarmChannel] Pushed ${ops.length} ops for ${docId.slice(0, 8)} (indices ${startIndex}-${endIndex})`,
+    );
+
+    // Update drive + user manifests for drive documents.
+    // Drive ops contain ADD_FILE, ADD_FOLDER, MOVE_NODE etc. that define
+    // the folder structure. We extract this and write to the drive manifest.
+    const docType = ops[0]?.context?.documentType ?? "";
+    if (docType === "powerhouse/document-drive") {
+      try {
+        await this.updateDriveAndUserManifests(docId, ops);
+      } catch (err) {
+        this.logger.warn(
+          `[SwarmChannel] Manifest update failed for drive ${docId.slice(0, 8)}: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+  }
+
+  // ─── Manifest Updates (drive + user) ───────────────────────────
+
+  /** Debounce drive manifest updates (same drive may get multiple op batches) */
+  private driveManifestTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingDriveUpdates = new Set<string>();
+
+  /**
+   * Update drive manifest and user manifest after pushing drive ops.
+   *
+   * Reads the current drive state from the reactor (via window.ph)
+   * for the most accurate nodes/name/editor. Falls back to extracting
+   * from operations if reactor isn't accessible.
+   */
+  private async updateDriveAndUserManifests(
+    driveId: string,
+    ops: any[],
+  ): Promise<void> {
+    const client = this.swarmClient;
+    if (!client) return;
+
+    // Try to read the live drive state from the reactor
+    const ph = (globalThis as any).window?.ph;
+    const reactorClient = ph?.reactorClient;
+
+    let driveName = "";
+    let preferredEditor: string | undefined;
+    let nodes: Array<{ id: string; kind: string; name: string; documentType?: string; parentFolder?: string | null }> = [];
+
+    if (reactorClient) {
+      try {
+        const driveDoc = await reactorClient.get(driveId);
+        driveName = driveDoc?.state?.global?.name ?? "";
+        preferredEditor = driveDoc?.header?.meta?.preferredEditor;
+        nodes = driveDoc?.state?.global?.nodes ?? [];
+      } catch {
+        // Reactor doesn't have this drive (maybe it's a Swarm-only ID)
+      }
+    }
+
+    // Fallback: extract from operations if reactor didn't have it
+    if (!driveName && ops.length > 0) {
+      const extracted = extractDriveInfoFromOps(ops);
+      driveName = extracted.driveName || driveId;
+      preferredEditor = extracted.preferredEditor;
+      nodes = extracted.nodes;
+    }
+
+    if (!driveName) driveName = driveId;
+
+    // Update drive manifest (docs + folders)
+    await updateDriveManifest(client, driveId, nodes, driveName, preferredEditor);
+
+    // Update user manifest (drive list)
+    await ensureDriveInUserManifest(
+      client,
+      this.config.ownerAddress,
+      driveId,
+      driveName,
+      preferredEditor,
     );
   }
 
