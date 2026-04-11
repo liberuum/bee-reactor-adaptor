@@ -2,14 +2,11 @@
  * Swarm Connect Plugin — Orchestrator
  *
  * Runs in the Connect browser context. Initializes the SwarmConnectPlugin
- * ASYNCHRONOUSLY when the processor factory is registered — does NOT block
- * startup, and does NOT require a drive to exist first.
+ * ASYNCHRONOUSLY — connects to Bee node, derives wallet key, starts sync.
  *
- * After initialization, delegates to:
- * - hydration.ts  — recovery from Swarm on new device
- * - sync.ts       — real-time operation sync (reactor → Swarm)
- * - flush.ts      — debounced manifest writes
- * - sharing.ts    — public profile and document sharing
+ * Sync is handled by SwarmChannel (native reactor IChannel).
+ * This module handles: Bee detection, stamp selection, wallet key,
+ * sharing, and UI cache population.
  */
 import type {
   IProcessorHostModule,
@@ -20,10 +17,8 @@ import type { SwarmClient } from "../swarm-client.js";
 import { SwarmConnectPlugin } from "../connect-plugin.js";
 import { state, setSwarmStatus, getUploadedBytes, persistBeeUrl, loadDriveMapping } from "./state.js";
 import { loadManifestIndex, clearSwarmStorage } from "./flush.js";
-import { hydrateFromSwarm, populateUiCacheFromDrives } from "./hydration.js";
-// startOperationSync removed — SwarmChannel handles push via SyncManager outbox
+import { populateUiCacheFromDrives } from "./hydration.js";
 import { publishPublicProfile, shareDocumentsWithUser, importFromUser } from "./sharing.js";
-// pending-ops-store removed — sync_cursors in PGlite handles persistence
 import { installEventHandlers, emitSwarmEvent } from "./events.js";
 
 const FEED_TOPIC_PREFIX = "ph:v2";
