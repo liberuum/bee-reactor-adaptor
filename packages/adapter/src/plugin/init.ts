@@ -486,9 +486,7 @@ function applySwarmExtensions(ph: any, isDevMode: boolean): void {
             console.warn("[SwarmPlugin] UI cache population failed:", err instanceof Error ? err.message : err));
 
           if (driveCount > 0) {
-            hydrateFromSwarm(manifest).catch((err) =>
-              console.warn("[SwarmPlugin] Hydration failed:", err),
-            );
+            console.log(`[SwarmPlugin] ${driveCount} drives on Swarm — recovery via SwarmChannel inbox pull`);
           }
         },
         onSignatureRequired: () => console.log("[SwarmPlugin] Wallet signature needed"),
