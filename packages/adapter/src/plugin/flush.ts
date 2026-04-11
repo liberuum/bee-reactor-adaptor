@@ -57,58 +57,61 @@ async function waitForDriveState(
     return { driveDoc, nodes, settled: true };
   }
 
-  // State not settled — race a subscription against a timeout
-  const result = await Promise.allSettled([
-    // Task 1: Subscribe to changes and resolve when file count matches
-    new Promise<{ driveDoc: any; nodes: any[] }>((resolve) => {
-      let unsub: (() => void) | undefined;
+  // State not settled — poll with proper cleanup on timeout
+  let interval: ReturnType<typeof setInterval> | undefined;
+  let unsub: (() => void) | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  try {
+    const result = await new Promise<{ driveDoc: any; nodes: any[]; settled: boolean }>((resolve) => {
+      let resolved = false;
+      const done = (doc: any, n: any[], settled: boolean) => {
+        if (resolved) return;
+        resolved = true;
+        resolve({ driveDoc: doc, nodes: n, settled });
+      };
+
       const check = async () => {
         try {
           const doc = await reactorClient.get(localDriveId);
           const n = doc?.state?.global?.nodes ?? [];
           if (n.filter((nd: any) => nd.kind === "file").length >= expectedDocCount) {
-            unsub?.();
-            resolve({ driveDoc: doc, nodes: n });
+            done(doc, n, true);
           }
         } catch { /* drive not ready */ }
       };
-      // Poll via subscription — the reactor's subscribe API notifies on changes
+
+      // Subscribe to changes if available
       try {
         unsub = reactorClient.subscribe?.(
           { documentId: localDriveId },
           () => { check(); },
         );
-      } catch { /* subscribe not available — fall through to timeout */ }
-      // Also check periodically in case subscribe doesn't fire
-      const interval = setInterval(check, 500);
-      // Clean up interval when promise settles
-      const origResolve = resolve;
-      resolve = ((val: any) => { clearInterval(interval); origResolve(val); }) as any;
-    }),
-    // Task 2: Timeout — always resolves with best-effort snapshot
-    new Promise<{ driveDoc: any; nodes: any[] }>((resolve) => {
-      setTimeout(async () => {
+      } catch { /* subscribe not available */ }
+
+      // Poll every 500ms as fallback
+      interval = setInterval(check, 500);
+
+      // Timeout: resolve with best-effort snapshot
+      timer = setTimeout(async () => {
         try {
           const doc = await reactorClient.get(localDriveId);
-          resolve({ driveDoc: doc, nodes: doc?.state?.global?.nodes ?? [] });
+          const n = doc?.state?.global?.nodes ?? [];
+          const settled = n.filter((nd: any) => nd.kind === "file").length >= expectedDocCount;
+          done(doc, n, settled);
         } catch {
-          resolve({ driveDoc, nodes });
+          done(driveDoc, nodes, false);
         }
       }, DRIVE_STATE_TIMEOUT_MS);
-    }),
-  ]);
+    });
 
-  // Use the first fulfilled result (subscription wins if it resolves before timeout)
-  for (const r of result) {
-    if (r.status === "fulfilled") {
-      const n = r.value.nodes;
-      const settled = n.filter((nd: any) => nd.kind === "file").length >= expectedDocCount;
-      return { driveDoc: r.value.driveDoc, nodes: n, settled };
-    }
+    return result;
+  } finally {
+    // Always clean up — no leaks regardless of which path resolved
+    if (interval) clearInterval(interval);
+    if (timer) clearTimeout(timer);
+    if (unsub) unsub();
   }
-
-  // Both rejected (shouldn't happen since timeout always resolves)
-  return { driveDoc, nodes, settled: false };
 }
 
 /**

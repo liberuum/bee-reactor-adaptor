@@ -34,6 +34,9 @@ let cleanupSync: (() => void) | undefined;
 /** Idempotency guard — prevents double-init on HMR or duplicate processor registration */
 let initPromise: Promise<void> | undefined;
 
+/** Guard: only register the beforeunload listener once */
+let beforeUnloadRegistered = false;
+
 // ═══════════════════════════════════════════════════════════════
 // Processor Builder (the single export consumed by index.ts)
 // ═══════════════════════════════════════════════════════════════
@@ -315,7 +318,9 @@ export async function initSwarmPlugin(): Promise<void> {
   // On page unload: pending ops are already persisted to IndexedDB (on every buffer).
   // Set a synchronous localStorage flag so the next session knows to replay them.
   // We do NOT attempt async flushes here — browsers abort them.
-  if (typeof window !== "undefined") {
+  // Guard: only register once (initSwarmPlugin can be called multiple times via setBeeUrl/reconnect)
+  if (typeof window !== "undefined" && !beforeUnloadRegistered) {
+    beforeUnloadRegistered = true;
     window.addEventListener("beforeunload", () => {
       if (state.pendingOps.size > 0) {
         const addr = (globalThis as any).window?.ph?.renown?.user?.address;

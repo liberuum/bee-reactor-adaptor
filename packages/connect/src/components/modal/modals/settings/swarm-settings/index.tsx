@@ -55,10 +55,10 @@ export const SwarmStorageSettings: React.FC = () => {
     return () => {
       dialog.style.maxWidth = prev.maxWidth;
       dialog.style.width = prev.width;
-      const timerId = setTimeout(() => {
+      // Clean up transition after animation completes
+      setTimeout(() => {
         dialog.style.transition = prev.transition;
       }, 350);
-      return () => clearTimeout(timerId);
     };
   }, []);
 
