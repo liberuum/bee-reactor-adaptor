@@ -8,7 +8,7 @@
  * load so the Settings tree always has data, even when hydration is skipped).
  */
 import type { SwarmClient } from "../swarm-client.js";
-import { state, setHydrationRan } from "./state.js";
+import { state, setHydrationRan, registerDriveMapping } from "./state.js";
 
 // ═══════════════════════════════════════════════════════════════
 // Folder Structure Restore (shared with sharing)
@@ -276,9 +276,16 @@ export async function hydrateFromSwarm(
   // Map: swarmDriveId → localDriveId (created below)
   const driveIdMap = new Map<string, string>();
 
-  // Reuse existing local drives if they match by name (not position).
-  // Position-based matching is wrong when the user has locally-created drives
-  // that aren't yet on Swarm.
+  // 1. Check persisted mapping from localStorage (survives page reloads)
+  for (const [swarmDriveId] of docsByDrive) {
+    const cachedLocal = state.swarmToLocalDrive.get(swarmDriveId);
+    if (cachedLocal) {
+      driveIdMap.set(swarmDriveId, cachedLocal);
+      console.log(`[SwarmPlugin] Drive mapping from cache: ${swarmDriveId.slice(0, 8)} → ${cachedLocal.slice(0, 8)}`);
+    }
+  }
+
+  // 2. Reuse existing local drives if they match by name
   try {
     const existing = await reactorClient.getDrives();
     for (const drive of (existing ?? [])) {
@@ -287,12 +294,12 @@ export async function hydrateFromSwarm(
         const driveDoc = await reactorClient.get(localId);
         const localName = driveDoc?.state?.global?.name;
         if (!localName) continue;
-        // Match by name against Swarm drives we're trying to recover
         for (const [swarmDriveId] of docsByDrive) {
           if (driveIdMap.has(swarmDriveId)) continue;
           const swarmName = swarmDriveNames.get(swarmDriveId);
           if (swarmName && swarmName === localName) {
             driveIdMap.set(swarmDriveId, localId);
+            registerDriveMapping(localId, swarmDriveId);
             console.log(`[SwarmPlugin] Reusing existing drive "${localName}" (${localId.slice(0, 8)}) for Swarm drive ${swarmDriveId.slice(0, 8)}`);
             break;
           }
@@ -301,8 +308,25 @@ export async function hydrateFromSwarm(
     }
   } catch { /* no drives */ }
 
+  // Verify cached mappings — if local drive doesn't exist in PGlite, remove stale mapping
+  for (const [swarmDriveId] of docsByDrive) {
+    if (!driveIdMap.has(swarmDriveId)) continue;
+    const cachedLocalId = driveIdMap.get(swarmDriveId)!;
+    try {
+      await reactorClient.get(cachedLocalId);
+      // Drive exists — mapping is valid
+    } catch {
+      // Drive doesn't exist in PGlite (wiped) — remove stale mapping
+      console.log(`[SwarmPlugin] Stale mapping: ${cachedLocalId.slice(0, 8)} no longer exists, will re-create`);
+      driveIdMap.delete(swarmDriveId);
+    }
+  }
+
   // Create local drives for each Swarm drive that doesn't have a local mapping
   state.syncPaused = true;
+  // Signal to the UI that hydration is in progress
+  const phHydrate = (globalThis as any).window?.ph;
+  if (phHydrate?.swarm) phHydrate.swarm.hydrating = true;
   try {
   for (const [swarmDriveId] of docsByDrive) {
     if (driveIdMap.has(swarmDriveId)) continue;
@@ -314,6 +338,7 @@ export async function hydrateFromSwarm(
       const localId = d?.header?.id;
       if (localId) {
         driveIdMap.set(swarmDriveId, localId);
+        registerDriveMapping(localId, swarmDriveId);
         console.log(`[SwarmPlugin] Created drive "${driveName}" (${localId.slice(0, 8)}) for Swarm drive ${swarmDriveId.slice(0, 8)}${preferredEditor ? ` [editor: ${preferredEditor}]` : ""}`);
       }
       await new Promise((r) => setTimeout(r, 500));
@@ -517,6 +542,8 @@ export async function hydrateFromSwarm(
   } finally {
     // Always resume sync — even if recovery partially failed
     state.syncPaused = false;
+    const phDone = (globalThis as any).window?.ph;
+    if (phDone?.swarm) phDone.swarm.hydrating = false;
   }
 }
 

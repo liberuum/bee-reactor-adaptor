@@ -84,8 +84,10 @@ export async function startOperationSync(
         // Drives: track as lastSeenDriveId for doc→drive resolution fallback
         if (docType === "powerhouse/document-drive") {
           state.lastSeenDriveId = id;
+          // Use the Swarm drive ID if this local drive was created by hydration
+          const swarmDriveId = state.localToSwarmDrive.get(id) ?? id;
           setTimeout(() => {
-            ensureDriveSynced(swarmClient, reactorClient, ownerAddress, id).catch(() => {});
+            ensureDriveSynced(swarmClient, reactorClient, ownerAddress, swarmDriveId).catch(() => {});
           }, 1000);
           continue;
         }
@@ -98,13 +100,18 @@ export async function startOperationSync(
         }
 
         // Resolve driveId from cache or query reactor
-        const driveId = state.docToDrive.get(id) ?? "";
+        // Map local drive IDs back to Swarm IDs for hydrated drives
+        let driveId = state.docToDrive.get(id) ?? "";
+        if (driveId) {
+          driveId = state.localToSwarmDrive.get(driveId) ?? driveId;
+        }
         if (!driveId && docType !== "powerhouse/document-drive") {
           findParentDrive(reactorClient, id).then(async (found) => {
             if (found) {
-              state.docToDrive.set(id, found);
-              updateUserManifest(swarmClient, ownerAddress, id, docType, name, found);
-              await ensureDriveSynced(swarmClient, reactorClient, ownerAddress, found);
+              const swarmFound = state.localToSwarmDrive.get(found) ?? found;
+              state.docToDrive.set(id, swarmFound);
+              updateUserManifest(swarmClient, ownerAddress, id, docType, name, swarmFound);
+              await ensureDriveSynced(swarmClient, reactorClient, ownerAddress, swarmFound);
             }
           }).catch(() => {});
         }
@@ -375,11 +382,14 @@ export async function ensureDriveSynced(
 ): Promise<void> {
   if (state.pendingSyncs.has(driveId)) return;
 
+  // driveId may be a Swarm ID — resolve to local ID for reactor queries
+  const localDriveId = state.swarmToLocalDrive.get(driveId) ?? driveId;
+
   let driveName = driveId;
   let preferredEditor: string | undefined;
 
   try {
-    const driveDoc = await reactorClient.get(driveId);
+    const driveDoc = await reactorClient.get(localDriveId);
     const name = driveDoc?.state?.global?.name;
     if (name) {
       driveName = name;

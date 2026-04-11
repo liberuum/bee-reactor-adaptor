@@ -408,7 +408,9 @@ export async function flushDriveManifest(
         const ph = (globalThis as any).window?.ph;
         const rc = ph?.reactorClient;
         if (rc) {
-          const driveDoc = await rc.get(driveId);
+          // driveId may be a Swarm ID — resolve to local for reactor queries
+          const localDriveId = state.swarmToLocalDrive.get(driveId) ?? driveId;
+          const driveDoc = await rc.get(localDriveId);
           const editor = driveDoc?.header?.meta?.preferredEditor;
           if (editor) {
             manifest!.preferredEditor = editor;

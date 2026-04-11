@@ -10,5 +10,8 @@
     "build:connect": "cd packages/connect && bun run build",
     "build": "npm run build:adapter && npm run build:connect",
     "test": "cd packages/adapter && vitest run"
+  },
+  "dependencies": {
+    "vite-plugin-node-polyfills": "^0.26.0"
   }
 }

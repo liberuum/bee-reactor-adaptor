@@ -101,6 +101,28 @@ export function SwarmLandingGate({ children }: { children: React.ReactNode }) {
         Log in with Renown to continue
       </p>
 
+      {/* Bee node requirement notice */}
+      <div style={{
+        maxWidth: 480, textAlign: "center", marginBottom: 40,
+        padding: "16px 24px", borderRadius: 12,
+        background: "rgba(255,140,50,0.06)", border: "1px solid rgba(255,140,50,0.15)",
+        animation: "swarmFadeIn 0.8s ease-out 0.35s both",
+      }}>
+        <p style={{ fontSize: 14, color: "rgba(255,255,255,0.55)", margin: 0, lineHeight: 1.6 }}>
+          Swarm Connect requires a running Bee node to store and sync your documents.
+          If you don&apos;t have one yet, install{" "}
+          <a
+            href="https://www.ethswarm.org/build/desktop"
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: "#ff8c32", fontWeight: 600, textDecoration: "none" }}
+          >
+            Swarm Desktop
+          </a>
+          {" "}&mdash; the easiest way to run a Bee node on your machine.
+        </p>
+      </div>
+
       {/* Renown login button — same component used in the sidebar, styled orange */}
       <div className="swarm-landing-btn" style={{ animation: "swarmFadeIn 0.8s ease-out 0.45s both", transform: "scale(1.8)" }}>
         <RenownAuthButton />

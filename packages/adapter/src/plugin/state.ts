@@ -91,7 +91,49 @@ export const state = {
   driveManifestFlushInProgress: new Map<string, Promise<void>>(),
   driveNames: new Map<string, string>(),
   driveManifestCache: new Map<string, SwarmDriveManifest>(),
+
+  // ─── Hydration drive mapping ───────────────────────────────
+  /** local drive ID → Swarm drive ID (set during hydration) */
+  localToSwarmDrive: new Map<string, string>(),
+  /** Swarm drive ID → local drive ID (set during hydration) */
+  swarmToLocalDrive: new Map<string, string>(),
 };
+
+// ─── Persistent Drive Mapping (localStorage) ──────────────────
+
+const DRIVE_MAP_KEY = "swarm:driveMap";
+
+/** Persist the swarm↔local drive mapping to localStorage */
+export function persistDriveMapping(): void {
+  const entries: Array<[string, string]> = [];
+  for (const [local, swarm] of state.localToSwarmDrive) {
+    entries.push([local, swarm]);
+  }
+  try { localStorage.setItem(DRIVE_MAP_KEY, JSON.stringify(entries)); } catch {}
+}
+
+/** Load drive mapping from localStorage into state */
+export function loadDriveMapping(): void {
+  try {
+    const raw = localStorage.getItem(DRIVE_MAP_KEY);
+    if (!raw) return;
+    const entries = JSON.parse(raw) as Array<[string, string]>;
+    for (const [local, swarm] of entries) {
+      state.localToSwarmDrive.set(local, swarm);
+      state.swarmToLocalDrive.set(swarm, local);
+    }
+    if (entries.length > 0) {
+      console.log(`[SwarmPlugin] Loaded ${entries.length} drive mapping(s) from cache`);
+    }
+  } catch {}
+}
+
+/** Register a swarm↔local drive mapping and persist it */
+export function registerDriveMapping(localId: string, swarmId: string): void {
+  state.localToSwarmDrive.set(localId, swarmId);
+  state.swarmToLocalDrive.set(swarmId, localId);
+  persistDriveMapping();
+}
 
 // ─── UI Status ──────────────────────────────────────────────────
 

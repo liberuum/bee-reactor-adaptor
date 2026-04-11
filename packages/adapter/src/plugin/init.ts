@@ -18,7 +18,7 @@ import type {
 import type { PHDocumentHeader } from "document-model";
 import type { SwarmClient } from "../swarm-client.js";
 import { SwarmConnectPlugin } from "../connect-plugin.js";
-import { state, setSwarmStatus, getUploadedBytes, persistBeeUrl } from "./state.js";
+import { state, setSwarmStatus, getUploadedBytes, persistBeeUrl, loadDriveMapping } from "./state.js";
 import { loadManifestIndex, clearSwarmStorage } from "./flush.js";
 import { hydrateFromSwarm, populateUiCacheFromDrives } from "./hydration.js";
 import { startOperationSync } from "./sync.js";
@@ -69,12 +69,52 @@ async function detectDevMode(): Promise<boolean> {
   }
 }
 
-async function fetchUsableStamp(): Promise<{ batchID: string } | null> {
+type BeeStampInfo = {
+  batchID: string;
+  usable: boolean;
+  depth: number;
+  amount: string;
+  bucketDepth: number;
+  immutableFlag: boolean;
+  exists: boolean;
+  batchTTL: number;
+  utilization: number;
+};
+
+async function fetchAllStamps(): Promise<BeeStampInfo[]> {
   const res = await fetch(`${state.beeUrl}/stamps`);
-  const data = (await res.json()) as {
-    stamps: Array<{ batchID: string; usable: boolean }>;
-  };
-  return data.stamps.find((s) => s.usable) ?? null;
+  const data = (await res.json()) as { stamps: BeeStampInfo[] };
+  return data.stamps ?? [];
+}
+
+/** Pick the best usable stamp: user preference > mutable > immutable, highest TTL wins ties */
+async function fetchUsableStamp(): Promise<{ batchID: string } | null> {
+  const stamps = await fetchAllStamps();
+  const usable = stamps.filter((s) => s.usable);
+  if (usable.length === 0) return null;
+
+  // Check if user has a preferred stamp
+  try {
+    const preferred = localStorage.getItem("swarm:preferredStamp");
+    if (preferred) {
+      const match = usable.find((s) => s.batchID === preferred);
+      if (match) {
+        console.log(`[SwarmPlugin] Using preferred stamp: ${preferred.slice(0, 12)}...`);
+        return match;
+      }
+    }
+  } catch {}
+
+  // Prefer mutable stamps (immutableFlag === false)
+  const mutable = usable.filter((s) => !s.immutableFlag);
+  if (mutable.length > 0) {
+    mutable.sort((a, b) => b.batchTTL - a.batchTTL);
+    console.log(`[SwarmPlugin] Auto-selected mutable stamp: ${mutable[0].batchID.slice(0, 12)}...`);
+    return mutable[0];
+  }
+  // Fallback to any usable stamp, highest TTL first
+  usable.sort((a, b) => b.batchTTL - a.batchTTL);
+  return usable[0];
 }
 
 /**
@@ -85,34 +125,111 @@ async function fetchUsableStamp(): Promise<{ batchID: string } | null> {
  */
 const BEE_HEALTH_RETRY_MS = 15_000;
 
+/** Abort controller for the current waitForBeeNode loop — aborted when setBeeUrl restarts init */
+let waitAbort: AbortController | undefined;
+
 async function waitForBeeNode(): Promise<boolean> {
-  while (true) {
+  // Cancel any previous wait loop
+  waitAbort?.abort();
+  waitAbort = new AbortController();
+  const { signal } = waitAbort;
+
+  let retryCount = 0;
+  while (!signal.aborted) {
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 3000);
-      const res = await fetch(`${state.beeUrl}/health`, { signal: controller.signal });
-      clearTimeout(timeout);
-      if (res.ok) {
-        console.log("[SwarmPlugin] Bee node is reachable");
-        return true;
+      const fetchCtrl = new AbortController();
+      const timeout = setTimeout(() => fetchCtrl.abort(), 3000);
+      const onAbort = () => fetchCtrl.abort();
+      signal.addEventListener("abort", onAbort, { once: true });
+      try {
+        const res = await fetch(`${state.beeUrl}/health`, { signal: fetchCtrl.signal });
+        clearTimeout(timeout);
+        if (res.ok) {
+          signal.removeEventListener("abort", onAbort);
+          console.log("[SwarmPlugin] Bee node is reachable");
+          return true;
+        }
+      } finally {
+        clearTimeout(timeout);
+        signal.removeEventListener("abort", onAbort);
       }
     } catch {
-      // Not reachable yet
+      if (signal.aborted) return false;
     }
 
-    console.log(`[SwarmPlugin] Bee node not reachable at ${state.beeUrl} — retrying in ${BEE_HEALTH_RETRY_MS / 1000}s`);
+    retryCount++;
+    // Log only first 3 retries to avoid flooding the console
+    if (retryCount <= 3) {
+      console.log(`[SwarmPlugin] Bee node not reachable at ${state.beeUrl} — retrying in ${BEE_HEALTH_RETRY_MS / 1000}s (attempt ${retryCount})`);
+    }
     setSwarmStatus("disconnected", `Bee node not reachable at ${state.beeUrl}. Retrying automatically...`);
-    emitSwarmEvent("plugin:retrying", { beeUrl: state.beeUrl, retryInMs: BEE_HEALTH_RETRY_MS });
-    await new Promise((r) => setTimeout(r, BEE_HEALTH_RETRY_MS));
+    // Only emit the event once — the toast subscription handles the one-time notification
+    if (retryCount === 1) {
+      emitSwarmEvent("plugin:retrying", { beeUrl: state.beeUrl, retryInMs: BEE_HEALTH_RETRY_MS });
+    }
+    await new Promise((r) => {
+      const timer = setTimeout(r, BEE_HEALTH_RETRY_MS);
+      const onAbortWait = () => { clearTimeout(timer); r(undefined); };
+      signal.addEventListener("abort", onAbortWait, { once: true });
+    });
   }
+  return false; // Aborted — a new init will take over
 }
 
 // ═══════════════════════════════════════════════════════════════
 // Initialization
 // ═══════════════════════════════════════════════════════════════
 
-async function initSwarmPlugin(): Promise<void> {
+export async function initSwarmPlugin(): Promise<void> {
   setSwarmStatus("initializing", "Connecting to Bee node...");
+
+  // Load persisted drive mappings from localStorage so hydration
+  // knows which local drives correspond to which Swarm drives
+  loadDriveMapping();
+
+  // Make setBeeUrl + beeUrl available IMMEDIATELY so the user can change
+  // the Bee URL in the settings UI before the node is connected.
+  const ph = (globalThis as any).window?.ph;
+  if (ph) {
+    if (!ph.swarm) ph.swarm = { status: "initializing", statusMessage: "Connecting to Bee node..." };
+    // Install event system EARLY so toast subscriptions can catch plugin:retrying
+    installEventHandlers(ph.swarm);
+    ph.swarm.beeUrl = state.beeUrl;
+    ph.swarm.setBeeUrl = async (url: string) => {
+      const cleaned = url.trim().replace(/\/+$/, "");
+      if (!cleaned) return;
+      persistBeeUrl(cleaned);
+      state.beeUrl = cleaned;
+      if (ph.swarm) ph.swarm.beeUrl = cleaned;
+      console.log(`[SwarmPlugin] Bee URL changed to ${cleaned} — restarting init...`);
+      // Abort the current waitForBeeNode loop and restart init fresh
+      waitAbort?.abort();
+      initPromise = undefined;
+      initPromise = initSwarmPlugin().catch((err) => {
+        console.warn("[SwarmPlugin] Re-init failed:", err);
+        initPromise = undefined;
+      });
+    };
+
+    // getAllStamps: fetch every stamp on the Bee node for the stamp picker UI
+    ph.swarm.getAllStamps = async () => {
+      try { return await fetchAllStamps(); } catch { return []; }
+    };
+
+    // switchStamp: select a different stamp and reconnect
+    ph.swarm.switchStamp = async (batchId: string) => {
+      console.log(`[SwarmPlugin] Switching to stamp ${batchId.slice(0, 12)}...`);
+      // Store selected stamp preference
+      try { localStorage.setItem("swarm:preferredStamp", batchId); } catch {}
+      // Reconnect — the plugin will pick up the preferred stamp
+      waitAbort?.abort();
+      initPromise = undefined;
+      initPromise = initSwarmPlugin().catch((err) => {
+        console.warn("[SwarmPlugin] Switch failed:", err);
+        initPromise = undefined;
+      });
+    };
+  }
 
   // Wait for Bee node to become reachable — retries every 15s in the background
   const healthy = await waitForBeeNode();
@@ -193,8 +310,7 @@ async function initSwarmPlugin(): Promise<void> {
   await plugin.start();
 
   // plugin.start() overwrites ph.swarm — apply all our custom fields
-  const ph = (globalThis as any).window?.ph;
-  applySwarmExtensions(ph, isDevMode);
+  applySwarmExtensions((globalThis as any).window?.ph, isDevMode);
 
   // On page unload: pending ops are already persisted to IndexedDB (on every buffer).
   // Set a synchronous localStorage flag so the next session knows to replay them.
@@ -254,6 +370,46 @@ function applySwarmExtensions(ph: any, isDevMode: boolean): void {
     await clearSwarmStorage(client, address);
   };
 
+  // getNodeStatus: rich node health snapshot (mode, peers, reachable, neighborhood)
+  ph.swarm.getNodeStatus = async () => {
+    const client = ph.swarm?.client as SwarmClient | undefined;
+    if (!client) return null;
+    try { return await client.getNodeStatus(); } catch { return null; }
+  };
+
+  // isContentAvailable: stewardship check — is content still retrievable?
+  ph.swarm.isContentAvailable = async (reference: string) => {
+    const client = ph.swarm?.client as SwarmClient | undefined;
+    if (!client) return false;
+    return client.isContentAvailable(reference);
+  };
+
+  // reuploadContent: re-stamp chunks for content aging out of the network
+  ph.swarm.reuploadContent = async (reference: string) => {
+    const client = ph.swarm?.client as SwarmClient | undefined;
+    if (!client) throw new Error("Swarm client not connected");
+    return client.reuploadContent(reference);
+  };
+
+  // getBucketUtilization: per-bucket fill levels and hot bucket detection
+  ph.swarm.getBucketUtilization = async () => {
+    const client = ph.swarm?.client as SwarmClient | undefined;
+    if (!client) return null;
+    try { return await client.getBucketUtilization(); } catch { return null; }
+  };
+
+  // getAllStamps: list all stamps on the Bee node for the stamp picker UI
+  ph.swarm.getAllStamps = async () => {
+    try { return await fetchAllStamps(); } catch { return []; }
+  };
+
+  // switchStamp: select a different stamp and reconnect
+  ph.swarm.switchStamp = async (batchId: string) => {
+    console.log(`[SwarmPlugin] Switching to stamp ${batchId.slice(0, 12)}...`);
+    try { localStorage.setItem("swarm:preferredStamp", batchId); } catch {}
+    if (ph.swarm?.reconnect) await ph.swarm.reconnect();
+  };
+
   // refreshBalances: re-fetch node wallet balances
   ph.swarm.refreshBalances = async () => {
     try {
@@ -269,11 +425,38 @@ function applySwarmExtensions(ph: any, isDevMode: boolean): void {
     } catch { /* node unreachable */ }
   };
 
-  // reconnect: re-derive key, create fresh plugin with current beeUrl
+  // refreshStamp: lightweight refresh — just re-read stamp status without full reconnect
+  // Use this after top-up/expand/create operations
+  ph.swarm.refreshStamp = async () => {
+    console.log("[SwarmPlugin] Refreshing stamp status...");
+    const client = ph.swarm?.client as SwarmClient | undefined;
+    if (!client) return;
+    try {
+      const stampStatus = await client.getStampStatus();
+      if (ph.swarm) {
+        ph.swarm.stampStatus = stampStatus;
+        ph.swarm.ready = true;
+        ph.swarm.status = "ready";
+      }
+      // Also refresh wallet balances
+      try {
+        const res = await fetch(`${state.beeUrl}/wallet`);
+        const data = (await res.json()) as { bzzBalance?: string; nativeTokenBalance?: string };
+        if (ph.swarm) {
+          ph.swarm.nodeBalances = { xBZZ: data.bzzBalance ?? "0", xDAI: data.nativeTokenBalance ?? "0" };
+        }
+      } catch {}
+      console.log("[SwarmPlugin] Stamp status refreshed");
+    } catch (err) {
+      console.warn("[SwarmPlugin] Stamp refresh failed:", err);
+    }
+  };
+
+  // reconnect: full reconnect — re-derive key, create fresh plugin with current beeUrl
+  // Only needed when switching Bee URL or clearing cache — NOT for stamp operations
   ph.swarm.reconnect = async () => {
     console.log("[SwarmPlugin] Reconnecting...");
-    const currentPlugin = ph.swarm?.plugin;
-    if (currentPlugin?.clearCache) await currentPlugin.clearCache();
+    // Do NOT clear the key cache — reuse the existing derived key
 
     const renown = ph.renown;
     const address = renown?.user?.address;

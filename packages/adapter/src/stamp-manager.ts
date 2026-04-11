@@ -233,10 +233,10 @@ export class StampManager {
     options?: { immutable?: boolean },
   ): Promise<string> {
     const immutable = options?.immutable ?? false;
-    const headers: Record<string, string> = {};
-    if (immutable) {
-      headers["Immutable"] = "true";
-    }
+    // Always send the header explicitly — some Bee versions default to immutable when absent
+    const headers: Record<string, string> = {
+      "Immutable": String(immutable),
+    };
     const response = await fetch(
       `${this.bee.url}/stamps/${amount}/${depth}`,
       { method: "POST", headers },

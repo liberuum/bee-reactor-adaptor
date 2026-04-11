@@ -16,15 +16,41 @@
   ],
   "exports": {
     ".": {
+      "source": "./src/index.ts",
       "types": "./dist/start-connect.d.ts",
       "import": "./dist/start-connect.js"
     },
+    "./package.json": "./package.json",
     "./main.js": {
+      "source": "./main.tsx",
       "types": "./dist/main.d.ts",
       "import": "./dist/main.js"
     },
     "./assets/*": "./assets/*",
-    "./style.css": "./dist/style.css"
+    "./public/*": "./public/*",
+    "./style.css": {
+      "source": "./style.css",
+      "default": "./dist/style.css"
+    },
+    "./index.html": "./index.html",
+    "./vite.config.ts": "./vite.config.ts",
+    "./services": {
+      "source": "./src/services/index.ts",
+      "import": "./src/services/index.ts"
+    },
+    "./services/*": {
+      "source": "./src/services/*.ts",
+      "import": "./src/services/*.ts"
+    },
+    "./components": {
+      "source": "./src/components/index.ts",
+      "import": "./src/components/index.ts"
+    },
+    "./components/*": {
+      "source": "./src/components/*.ts",
+      "import": "./src/components/*.ts"
+    },
+    "./*": "./*"
   },
   "sideEffects": [
     "./dist/main.js",

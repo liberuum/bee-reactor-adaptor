@@ -7,7 +7,7 @@ import { About } from "./settings/about.js";
 import { DangerZone } from "./settings/danger-zone.js";
 import { DefaultEditor } from "./settings/default-editor.js";
 import { ConnectPackageManager } from "./settings/package-manager.js";
-import { SwarmStorageSettings } from "./settings/swarm-storage.js";
+import { SwarmStorageSettings } from "./settings/swarm-settings/index.js";
 
 /** Ethswarm logo mark — simplified for use as a 12-16px settings tab icon. */
 function SwarmIcon({ size = 12 }: { size?: number }) {

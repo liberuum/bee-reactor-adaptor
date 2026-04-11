@@ -38,6 +38,9 @@ import {
 } from "@renown/sdk";
 import { logger, type DocumentModelLib } from "document-model";
 import { initFeatureFlags } from "../feature-flags.js";
+// Monorepo relative import — for npm deployment use:
+// import { initSwarmPlugin } from "@liberuum-org/bee-reactor-adapter";
+import { initSwarmPlugin } from "../../../adapter/src/plugin/init.js";
 import { PackageDiscoveryService } from "../package-discovery.js";
 import { BrowserPackageManager } from "../package-manager.js";
 import { loadPackagesConfig } from "../packages.config.js";
@@ -258,6 +261,56 @@ export async function createReactor(localPackage?: DocumentModelLib) {
       );
     }
   }
+
+  // Initialize Swarm plugin in the background (non-blocking)
+  // Connects to Bee node, derives wallet key, starts sync
+  initSwarmPlugin().catch((err) =>
+    logger.warn("[SwarmPlugin] Init failed:", err),
+  );
+
+  // Subscribe to Swarm events for toast notifications at the app level.
+  // These must live here (not in the settings modal) so toasts fire even
+  // when the settings panel is closed — e.g. during normal document editing.
+  let pollCount = 0;
+  const pollSwarmEvents = setInterval(() => {
+    pollCount++;
+    const on = (window.ph as any)?.swarm?.on;
+    if (!on) {
+      // Give up after 30s (30 attempts) to avoid infinite polling
+      if (pollCount > 30) clearInterval(pollSwarmEvents);
+      return;
+    }
+    clearInterval(pollSwarmEvents);
+
+    on("sync:confirmed", (e: Record<string, unknown>) => {
+      const chunks = e.chunksTotal ? ` (${e.chunksSynced}/${e.chunksTotal} chunks)` : "";
+      toast(`"${e.docName}" synced to Swarm${chunks} in ${e.durationMs}ms`, { type: "connect-success" });
+    });
+    on("sync:error", (e: Record<string, unknown>) => {
+      toast(`Sync failed: ${e.error}`, { type: "connect-warning" });
+    });
+    on("sync:all-synced", () => {
+      toast("All documents synced to Swarm", { type: "connect-success" });
+    });
+    on("plugin:ready", () => {
+      toast("Connected to Swarm", { type: "connect-success" });
+    });
+    // Show a one-time notification on first retry — auto-closes after 30s
+    let retryToastShown = false;
+    on("plugin:retrying", () => {
+      if (retryToastShown) return;
+      retryToastShown = true;
+      toast(
+        "Bee node not reachable. Go to Settings \u2192 Swarm Storage to configure your node URL.",
+        { type: "connect-warning", autoClose: 30000 } as any,
+      );
+    });
+    on("storage:cleared", () => {
+      toast("Swarm storage cleared", { type: "connect-success" });
+    });
+
+    logger.info("[SwarmPlugin] Toast notifications active");
+  }, 1000);
 
   window.ph.loading = false;
 }
