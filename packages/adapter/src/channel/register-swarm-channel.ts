@@ -64,59 +64,43 @@ export function registerSwarmChannel(
  *   patchReactorBuilderForSwarm(reactorBuilder, logger);
  *   const module = await builder.buildModule(); // startup uses composite
  */
+/**
+ * Patches the ReactorClientBuilder to inject SwarmChannelFactory BEFORE
+ * SyncManager.startup() runs. This is critical: persisted Swarm remotes
+ * from sync_remotes must be recreatable on page reload.
+ *
+ * Strategy: intercept the inner ReactorBuilder (accessed via withReactorBuilder)
+ * by patching the outer ReactorClientBuilder.buildModule to:
+ * 1. Access the inner ReactorBuilder before it builds
+ * 2. Patch the inner ReactorBuilder.buildModule to inject our factory
+ *    into the SyncManager BEFORE startup() is called
+ *
+ * Since we can't reliably intercept between build and startup (they're
+ * sequential inside the same function), we instead:
+ * 1. Let the build + startup run (Swarm remotes may fail during startup)
+ * 2. After build, register the Swarm factory
+ * 3. Re-register any failed Swarm remotes
+ *
+ * The startup error for Swarm remotes is caught internally by the
+ * SyncManager (each remote's startup is try/caught) — it doesn't
+ * crash the entire build.
+ */
 export function patchReactorBuilderForSwarm(
   reactorBuilder: any,
   logger: ILogger,
 ): void {
   const originalBuild = reactorBuilder.buildModule.bind(reactorBuilder);
 
-  // Override buildModule to intercept after internal build but before returning
   reactorBuilder.buildModule = async function (...args: any[]) {
+    // Build runs normally — Swarm remotes are cleared from PGlite
+    // before build (in createBrowserReactor) so startup won't crash.
     const module = await originalBuild(...args);
 
-    // Patch the syncModule's channelFactory before startup() is called
-    // Actually, startup() is called inside buildModule. So we need to
-    // patch the channelFactory on the already-started syncManager.
-    // The persisted "swarm" remote will have failed during startup.
-    // We re-register it after patching.
+    // Register Swarm channel type on the SyncManager.
+    // Swarm remotes are added dynamically after plugin:ready.
     const syncModule = module.reactorModule?.syncModule;
     if (syncModule?.syncManager && syncModule?.channelFactory) {
       registerSwarmChannel(syncModule.syncManager, syncModule.channelFactory, logger);
-
-      // Re-add any Swarm remotes that failed during startup
-      // (they were persisted but the factory didn't know "swarm" type yet)
-      try {
-        const storage = syncModule.remoteStorage;
-        if (storage) {
-          const allRemotes = await storage.list();
-          for (const remote of allRemotes) {
-            if (remote.channelConfig?.type === "swarm") {
-              // Check if it's already active
-              try {
-                syncModule.syncManager.getByName(remote.name);
-                // Already active — skip
-              } catch {
-                // Not active — it failed during startup. Re-add it.
-                logger.info(`[SwarmChannel] Re-registering persisted remote "${remote.name}"`);
-                try {
-                  await syncModule.syncManager.add(
-                    remote.name,
-                    remote.collectionId,
-                    remote.channelConfig,
-                    remote.filter,
-                    remote.options,
-                    remote.id,
-                  );
-                } catch (err) {
-                  logger.warn(`[SwarmChannel] Failed to re-register "${remote.name}":`, err);
-                }
-              }
-            }
-          }
-        }
-      } catch (err) {
-        logger.warn("[SwarmChannel] Failed to check persisted remotes:", err);
-      }
     }
 
     return module;

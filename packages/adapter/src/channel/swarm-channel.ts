@@ -170,14 +170,17 @@ export class SwarmChannel implements IChannel {
       }).catch(() => {});
     }, HEALTH_CHECK_INTERVAL_MS);
 
-    // Start inbox poll timer
-    this.pollTimer = setInterval(() => {
-      if (this.connectionState === "connected") {
-        this.pollInbox().catch((err) => {
-          this.logger.warn("[SwarmChannel] Poll error:", err instanceof Error ? err.message : err);
-        });
-      }
-    }, this.config.pollIntervalMs);
+    // Inbox poll timer — disabled by default.
+    // The old plugin's hydration handles recovery for now.
+    // Enable once SwarmChannel fully replaces the plugin:
+    //
+    // this.pollTimer = setInterval(() => {
+    //   if (this.connectionState === "connected") {
+    //     this.pollInbox().catch((err) => {
+    //       this.logger.warn("[SwarmChannel] Poll error:", err instanceof Error ? err.message : err);
+    //     });
+    //   }
+    // }, this.config.pollIntervalMs);
   }
 
   async shutdown(): Promise<void> {
@@ -352,11 +355,18 @@ export class SwarmChannel implements IChannel {
 
   // ─── Inbox Pull (Swarm → local) ──────────────────────────────
 
+  /** Track which batch references we've already processed (per doc) */
+  private processedBatches = new Set<string>();
+
   /**
    * Poll Swarm feeds for new operations not yet in the local reactor.
    *
    * Reads the user manifest → iterates document manifests → downloads
-   * operation batches beyond the inbox cursor → adds to inbox.
+   * new operation batches → wraps as SyncOperation → adds to inbox.
+   * The SyncManager then applies them via reactor.load().
+   *
+   * Batch deduplication: tracks processed batch references to avoid
+   * re-downloading and re-applying the same operations.
    */
   private async pollInbox(): Promise<void> {
     if (this.isShutdown || !this.swarmClient) return;
@@ -365,42 +375,114 @@ export class SwarmChannel implements IChannel {
     const ownerAddress = this.config.ownerAddress;
 
     // Read user manifest to discover documents
-    const userManifest = await client.readUserManifest(ownerAddress);
+    let userManifest: any;
+    try {
+      userManifest = await client.readUserManifest(ownerAddress);
+    } catch {
+      // User manifest not found — nothing to pull
+      return;
+    }
     if (!userManifest) return;
 
-    const docs = userManifest.documents ?? {};
-    const currentAck = this.inbox.ackOrdinal;
+    // Discover docs from user manifest + drive manifests
+    const docIds = new Set<string>();
+    const docMeta = new Map<string, { documentType: string; scope: string }>();
 
-    for (const [docId, entry] of Object.entries(docs)) {
+    // Direct documents in user manifest
+    for (const [docId, entry] of Object.entries(userManifest.documents ?? {}) as Array<[string, any]>) {
+      docIds.add(docId);
+      docMeta.set(docId, {
+        documentType: entry.documentType ?? "unknown",
+        scope: "global",
+      });
+    }
+
+    // Drive manifests (contains docs grouped by drive)
+    for (const [driveId] of Object.entries(userManifest.drives ?? {}) as Array<[string, any]>) {
+      docIds.add(driveId);
+      docMeta.set(driveId, { documentType: "powerhouse/document-drive", scope: "global" });
+      try {
+        const dm = await client.readDriveManifest(driveId);
+        if (dm?.documents) {
+          for (const [docId, entry] of Object.entries(dm.documents) as Array<[string, any]>) {
+            docIds.add(docId);
+            docMeta.set(docId, {
+              documentType: entry.documentType ?? "unknown",
+              scope: "global",
+            });
+          }
+        }
+      } catch { /* drive manifest not available */ }
+    }
+
+    if (docIds.size === 0) return;
+
+    let newOpsCount = 0;
+
+    for (const docId of docIds) {
       try {
         const manifest = await client.readManifest(docId);
         if (!manifest || manifest.operationBatches.length === 0) continue;
 
-        // Download batches we haven't seen yet
         for (const batch of manifest.operationBatches) {
-          // Simple heuristic: skip batches whose endIndex is at or below
-          // what we've already processed. A more sophisticated approach
-          // would track per-document cursors.
-          if (batch.endIndex <= currentAck) continue;
+          // Skip batches we've already processed
+          const batchKey = `${docId}:${batch.reference}`;
+          if (this.processedBatches.has(batchKey)) continue;
 
           try {
             const data = await client.downloadData(batch.reference);
-            const ops = JSON.parse(new TextDecoder().decode(data));
+            const rawOps = JSON.parse(new TextDecoder().decode(data));
 
-            if (!Array.isArray(ops) || ops.length === 0) continue;
+            if (!Array.isArray(rawOps) || rawOps.length === 0) {
+              this.processedBatches.add(batchKey);
+              continue;
+            }
+
+            // Normalize: ensure OperationWithContext format.
+            // Push cycle writes OperationWithContext[], old plugin writes { index, action }.
+            const ops = rawOps.map((op: any) => {
+              if (op.operation && op.context) {
+                // Already OperationWithContext format
+                return op;
+              }
+              // Old plugin format: { index, action: { type, input, scope, ... } }
+              const action = op.action ?? op;
+              return {
+                operation: {
+                  id: action.id ?? op.id ?? crypto.randomUUID(),
+                  index: op.index ?? 0,
+                  skip: 0,
+                  timestampUtcMs: action.timestampUtcMs ?? op.timestampUtcMs ?? new Date().toISOString(),
+                  hash: op.hash ?? "",
+                  action,
+                },
+                context: {
+                  documentId: docId,
+                  documentType: docMeta.get(docId)?.documentType ?? "unknown",
+                  scope: action.scope ?? batch.scope ?? "global",
+                  branch: batch.branch ?? "main",
+                  ordinal: 0,
+                },
+              };
+            });
+
+            const scope = ops[0]?.context?.scope ?? "global";
+            const branch = ops[0]?.context?.branch ?? "main";
 
             const syncOp = new SyncOperation(
               crypto.randomUUID(),
-              "",
-              [],
+              "",       // jobId — empty for non-keyed (processed individually)
+              [],       // jobDependencies
               this.remoteName,
               docId,
-              [ops[0]?.context?.scope ?? "global"],
-              ops[0]?.context?.branch ?? "main",
+              [scope],
+              branch,
               ops,
             );
 
             this.inbox.add(syncOp);
+            this.processedBatches.add(batchKey);
+            newOpsCount += ops.length;
           } catch (err) {
             this.logger.warn(
               `[SwarmChannel] Failed to download batch ${batch.reference.slice(0, 12)}: ${err instanceof Error ? err.message : err}`,
@@ -408,10 +490,12 @@ export class SwarmChannel implements IChannel {
           }
         }
       } catch (err) {
-        this.logger.warn(
-          `[SwarmChannel] Failed to poll doc ${docId.slice(0, 8)}: ${err instanceof Error ? err.message : err}`,
-        );
+        // Manifest read failure — doc may not have ops on Swarm yet
       }
+    }
+
+    if (newOpsCount > 0) {
+      this.logger.info(`[SwarmChannel] Pulled ${newOpsCount} new ops from Swarm`);
     }
   }
 
