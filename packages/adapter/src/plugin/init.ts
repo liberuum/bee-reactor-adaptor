@@ -272,9 +272,15 @@ export async function initSwarmPlugin(): Promise<void> {
         console.warn("[SwarmPlugin] UI cache population failed:", err instanceof Error ? err.message : err));
 
       if (driveCount > 0) {
-        hydrateFromSwarm(manifest).catch((err) =>
-          console.warn("[SwarmPlugin] Hydration failed:", err),
-        );
+        // Old hydration disabled — SwarmChannel inbox pull handles recovery
+        // via SyncManager + reactor.load() which preserves original IDs.
+        // To re-enable old hydration (e.g. if SwarmChannel is removed),
+        // uncomment the following:
+        //
+        // hydrateFromSwarm(manifest).catch((err) =>
+        //   console.warn("[SwarmPlugin] Hydration failed:", err),
+        // );
+        console.log(`[SwarmPlugin] ${driveCount} drives on Swarm — recovery via SwarmChannel inbox pull`);
       }
     },
     onSignatureRequired: () => {

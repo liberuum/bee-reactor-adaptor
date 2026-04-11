@@ -175,17 +175,15 @@ export class SwarmChannel implements IChannel {
       }).catch(() => {});
     }, HEALTH_CHECK_INTERVAL_MS);
 
-    // Inbox poll timer — disabled by default.
-    // The old plugin's hydration handles recovery for now.
-    // Enable once SwarmChannel fully replaces the plugin:
-    //
-    // this.pollTimer = setInterval(() => {
-    //   if (this.connectionState === "connected") {
-    //     this.pollInbox().catch((err) => {
-    //       this.logger.warn("[SwarmChannel] Poll error:", err instanceof Error ? err.message : err);
-    //     });
-    //   }
-    // }, this.config.pollIntervalMs);
+    // Inbox poll timer — pulls new operations from Swarm feeds.
+    // On a fresh device, this recovers drives + docs via reactor.load().
+    this.pollTimer = setInterval(() => {
+      if (this.connectionState === "connected") {
+        this.pollInbox().catch((err) => {
+          this.logger.warn("[SwarmChannel] Poll error:", err instanceof Error ? err.message : err);
+        });
+      }
+    }, this.config.pollIntervalMs);
   }
 
   async shutdown(): Promise<void> {
@@ -498,9 +496,23 @@ export class SwarmChannel implements IChannel {
 
     if (docIds.size === 0) return;
 
+    // Process drives first (they must exist before child docs can reference them).
+    // Drives are document-drive type; all others are child documents.
+    const driveIds: string[] = [];
+    const childDocIds: string[] = [];
+    for (const docId of docIds) {
+      const meta = docMeta.get(docId);
+      if (meta?.documentType === "powerhouse/document-drive") {
+        driveIds.push(docId);
+      } else {
+        childDocIds.push(docId);
+      }
+    }
+    const orderedDocIds = [...driveIds, ...childDocIds];
+
     let newOpsCount = 0;
 
-    for (const docId of docIds) {
+    for (const docId of orderedDocIds) {
       try {
         const manifest = await client.readManifest(docId);
         if (!manifest || manifest.operationBatches.length === 0) continue;
@@ -547,23 +559,40 @@ export class SwarmChannel implements IChannel {
               };
             });
 
-            const scope = ops[0]?.context?.scope ?? "global";
+            // Group operations by scope — reactor.load() processes one scope at a time.
+            // "document" scope ops (CREATE_DOCUMENT, UPGRADE_DOCUMENT) must be
+            // loaded before "global" scope ops (ADD_FILE, SET_DRIVE_NAME, etc.).
+            const byScope = new Map<string, any[]>();
+            for (const op of ops) {
+              const scope = op.context?.scope ?? "global";
+              if (!byScope.has(scope)) byScope.set(scope, []);
+              byScope.get(scope)!.push(op);
+            }
+
+            // Process "document" scope first (creates the document), then others
+            const scopeOrder = ["document", ...Array.from(byScope.keys()).filter(s => s !== "document")];
             const branch = ops[0]?.context?.branch ?? "main";
 
-            const syncOp = new SyncOperation(
-              crypto.randomUUID(),
-              "",       // jobId — empty for non-keyed (processed individually)
-              [],       // jobDependencies
-              this.remoteName,
-              docId,
-              [scope],
-              branch,
-              ops,
-            );
+            for (const scope of scopeOrder) {
+              const scopeOps = byScope.get(scope);
+              if (!scopeOps || scopeOps.length === 0) continue;
 
-            this.inbox.add(syncOp);
+              const syncOp = new SyncOperation(
+                crypto.randomUUID(),
+                "",       // jobId — empty for non-keyed (processed individually)
+                [],       // jobDependencies
+                this.remoteName,
+                docId,
+                [scope],
+                branch,
+                scopeOps,
+              );
+
+              this.inbox.add(syncOp);
+              newOpsCount += scopeOps.length;
+            }
+
             this.processedBatches.add(batchKey);
-            newOpsCount += ops.length;
           } catch (err) {
             this.logger.warn(
               `[SwarmChannel] Failed to download batch ${batch.reference.slice(0, 12)}: ${err instanceof Error ? err.message : err}`,
