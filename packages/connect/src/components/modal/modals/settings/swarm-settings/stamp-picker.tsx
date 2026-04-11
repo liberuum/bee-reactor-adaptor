@@ -198,7 +198,7 @@ export function StampPicker({
                     </div>
                     <div className="flex items-center gap-3 text-[10px] text-gray-400">
                       <span className="font-mono">{s.batchID.slice(0, 16)}...</span>
-                      <span>Util: {s.utilization}%</span>
+                      <span>Util: {Math.round((s.utilization / Math.pow(2, s.depth - s.bucketDepth)) * 100)}%</span>
                     </div>
                   </div>
                   {s.usable && !isCurrent && (

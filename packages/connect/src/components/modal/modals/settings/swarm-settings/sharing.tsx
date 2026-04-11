@@ -4,6 +4,73 @@ import { ActionButton, Section } from "./primitives.js";
 import { isValidHexAddress, normalizeAddr } from "./constants.js";
 import { toast } from "../../../../../services/toast.js";
 
+type FolderEntry = { name: string; parentFolder?: string };
+type DocEntry = { name?: string; documentType?: string; driveId?: string; parentFolder?: string };
+
+type ShareTreeFolder = {
+  id: string;
+  name: string;
+  subFolders: ShareTreeFolder[];
+  docs: Array<[string, DocEntry]>;
+};
+
+function buildShareTree(
+  parentId: string | null,
+  folders: Record<string, FolderEntry>,
+  docs: Array<[string, DocEntry]>,
+): { subFolders: ShareTreeFolder[]; docs: Array<[string, DocEntry]> } {
+  const matchingFolders = Object.entries(folders)
+    .filter(([, f]) => (f.parentFolder || null) === parentId)
+    .sort(([, a], [, b]) => a.name.localeCompare(b.name));
+  const matchingDocs = docs.filter(([, d]) => (d.parentFolder || null) === parentId);
+  const subFolders = matchingFolders.map(([id, f]) => {
+    const children = buildShareTree(id, folders, docs);
+    return { id, name: f.name, subFolders: children.subFolders, docs: children.docs };
+  });
+  return { subFolders, docs: matchingDocs };
+}
+
+function ShareFolderNode({
+  folder,
+  depth,
+  shareSelected,
+  toggleDoc,
+}: {
+  folder: ShareTreeFolder;
+  depth: number;
+  shareSelected: Set<string>;
+  toggleDoc: (id: string) => void;
+}) {
+  return (
+    <div style={{ marginLeft: `${depth * 16}px` }}>
+      <span className="text-gray-500 text-[10px]">{folder.name}/</span>
+      {folder.subFolders.map((sf) => (
+        <ShareFolderNode
+          key={sf.id}
+          folder={sf}
+          depth={depth + 1}
+          shareSelected={shareSelected}
+          toggleDoc={toggleDoc}
+        />
+      ))}
+      {folder.docs.map(([id, d]) => (
+        <label
+          key={id}
+          className="flex items-center gap-1.5 ml-3 cursor-pointer hover:bg-gray-50 rounded px-1 py-0.5"
+        >
+          <input
+            type="checkbox"
+            checked={shareSelected.has(id)}
+            onChange={() => toggleDoc(id)}
+            className="accent-blue-600"
+          />
+          <span className="text-gray-600">{d.name || id.slice(0, 8)}</span>
+        </label>
+      ))}
+    </div>
+  );
+}
+
 function ShareTreeGlobal({
   drives,
   childDocs,
@@ -16,14 +83,9 @@ function ShareTreeGlobal({
   needsGlobalExpand,
 }: {
   drives: Array<[string, { name?: string; documentType?: string }]>;
-  childDocs: Array<
-    [string, { name?: string; documentType?: string; driveId?: string; parentFolder?: string }]
-  >;
+  childDocs: Array<[string, DocEntry]>;
   orphans: Array<[string, { name?: string; documentType?: string }]>;
-  driveManifests: Record<
-    string,
-    { folders?: Record<string, { name: string; parentFolder?: string }> }
-  >;
+  driveManifests: Record<string, { folders?: Record<string, FolderEntry> }>;
   shareSelected: Set<string>;
   toggleDrive: (id: string) => void;
   toggleDoc: (id: string) => void;
@@ -40,10 +102,9 @@ function ShareTreeGlobal({
         const allChecked =
           children.length > 0 && children.every(([id]) => shareSelected.has(id));
         const folders = driveManifests[driveId]?.folders ?? {};
-        const rootChildren = children.filter(
-          ([, d]) => !d.parentFolder || !folders[d.parentFolder!],
-        );
-        const rootFolders = Object.entries(folders).filter(([, f]) => !f.parentFolder);
+
+        // Build recursive tree — same algorithm as documents view
+        const tree = buildShareTree(null, folders, children);
 
         const driveStart = itemCount;
         itemCount += 1 + children.length;
@@ -67,32 +128,18 @@ function ShareTreeGlobal({
                 ({children.length} doc{children.length !== 1 ? "s" : ""})
               </span>
             </label>
-            {/* Folders */}
-            {rootFolders.map(([fId, f]) => {
-              const docsInFolder = children.filter(([, d]) => d.parentFolder === fId);
-              if (docsInFolder.length === 0) return null;
-              return (
-                <div key={fId} className="ml-5">
-                  <span className="text-gray-500 text-[10px]">{f.name}/</span>
-                  {docsInFolder.map(([id, d]) => (
-                    <label
-                      key={id}
-                      className="flex items-center gap-1.5 ml-3 cursor-pointer hover:bg-gray-50 rounded px-1 py-0.5"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={shareSelected.has(id)}
-                        onChange={() => toggleDoc(id)}
-                        className="accent-blue-600"
-                      />
-                      <span className="text-gray-600">{d.name || id.slice(0, 8)}</span>
-                    </label>
-                  ))}
-                </div>
-              );
-            })}
-            {/* Root docs (not in folder) */}
-            {rootChildren.map(([id, d]) => (
+            {/* Recursive folder tree */}
+            {tree.subFolders.map((sf) => (
+              <ShareFolderNode
+                key={sf.id}
+                folder={sf}
+                depth={1}
+                shareSelected={shareSelected}
+                toggleDoc={toggleDoc}
+              />
+            ))}
+            {/* Root docs */}
+            {tree.docs.map(([id, d]) => (
               <label
                 key={id}
                 className="flex items-center gap-1.5 ml-5 cursor-pointer hover:bg-gray-50 rounded px-1 py-0.5"

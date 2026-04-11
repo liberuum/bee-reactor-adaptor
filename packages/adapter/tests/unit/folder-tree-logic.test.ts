@@ -14,6 +14,28 @@ import { describe, it, expect } from "vitest";
 type DocEntry = { name?: string; documentType?: string; driveId?: string; parentFolder?: string };
 type FolderEntry = { name: string; parentFolder?: string };
 
+/**
+ * Recursive tree builder — same algorithm as documents.tsx buildFolderTree()
+ * and sharing.tsx buildShareTree(). Matches parentFolder === null for root.
+ */
+function buildFolderTree(
+  parentId: string | null,
+  folders: Record<string, FolderEntry>,
+  docs: Array<[string, DocEntry]>,
+): { subFolders: Array<{ id: string; name: string; subFolders: any[]; docs: string[] }>; docs: string[] } {
+  const matchingFolders = Object.entries(folders)
+    .filter(([, f]) => (f.parentFolder || null) === parentId)
+    .sort(([, a], [, b]) => a.name.localeCompare(b.name));
+  const matchingDocs = docs
+    .filter(([, d]) => (d.parentFolder || null) === parentId)
+    .map(([, d]) => d.name!);
+  const subFolders = matchingFolders.map(([id, f]) => {
+    const children = buildFolderTree(id, folders, docs);
+    return { id, name: f.name, subFolders: children.subFolders, docs: children.docs };
+  });
+  return { subFolders, docs: matchingDocs };
+}
+
 function buildTree(
   docs: Array<[string, DocEntry]>,
   driveManifests?: Record<string, { folders?: Record<string, FolderEntry> }>,
@@ -22,7 +44,6 @@ function buildTree(
   const childDocs = docs.filter(([, d]) => d.documentType !== "powerhouse/document-drive");
   const driveIds = new Set(drives.map(([id]) => id));
 
-  // Group children by drive
   const driveChildren = new Map<string, typeof childDocs>();
   const orphans: typeof childDocs = [];
   for (const entry of childDocs) {
@@ -36,38 +57,20 @@ function buildTree(
     }
   }
 
-  // Build per-drive tree
   const result: Record<string, {
     driveName: string;
     rootFolders: Array<{ id: string; name: string; subFolders: any[]; docs: string[] }>;
     rootDocs: string[];
-    orphanDocs: string[];
   }> = {};
 
   for (const [driveId, drive] of drives) {
     const children = driveChildren.get(driveId) ?? [];
     const folders = driveManifests?.[driveId]?.folders ?? {};
-    const rootFolders = Object.entries(folders).filter(([, f]) => !f.parentFolder);
-    const rootDocs = children.filter(
-      ([, d]) => !d.parentFolder || !folders[d.parentFolder!],
-    );
-
-    function buildFolder(folderId: string, folderName: string): any {
-      const docsInFolder = children.filter(([, d]) => d.parentFolder === folderId);
-      const subFolders = Object.entries(folders).filter(([, f]) => f.parentFolder === folderId);
-      return {
-        id: folderId,
-        name: folderName,
-        subFolders: subFolders.map(([sfId, sf]) => buildFolder(sfId, sf.name)),
-        docs: docsInFolder.map(([, d]) => d.name!),
-      };
-    }
-
+    const tree = buildFolderTree(null, folders, children);
     result[driveId] = {
       driveName: drive.name!,
-      rootFolders: rootFolders.map(([fId, f]) => buildFolder(fId, f.name)),
-      rootDocs: rootDocs.map(([, d]) => d.name!),
-      orphanDocs: [],
+      rootFolders: tree.subFolders,
+      rootDocs: tree.docs,
     };
   }
 
@@ -167,9 +170,11 @@ describe("Folder tree display logic", () => {
       ["doc-2", { name: "Doc B", documentType: "powerhouse/document-model", driveId: "drive-1" }],
     ];
 
-    // No driveManifests at all — docs with parentFolder fall back to root
+    // No driveManifests — Doc A has a parentFolder that doesn't exist,
+    // so it's effectively orphaned within the drive (not shown at root).
+    // Only Doc B (no parentFolder) appears at root.
     const { result } = buildTree(docs);
-    expect(result["drive-1"].rootDocs).toEqual(["Doc A", "Doc B"]);
+    expect(result["drive-1"].rootDocs).toEqual(["Doc B"]);
     expect(result["drive-1"].rootFolders).toHaveLength(0);
   });
 
@@ -255,6 +260,56 @@ describe("Folder tree display logic", () => {
     const { result, orphans } = buildTree(docs);
     expect(result["drive-1"].rootDocs).toEqual(["Linked"]);
     expect(orphans).toEqual(["Orphan", "No Drive"]);
+  });
+
+  it("should handle parallel folders at the same level", () => {
+    // The user's exact test case:
+    // my drive/
+    //   ├── first folder/
+    //   │   ├── doc in first
+    //   │   └── another folder/
+    //   │       └── doc in another
+    //   ├── parallel folder/
+    //   │   └── doc in parallel
+    //   └── root doc
+
+    const docs: Array<[string, DocEntry]> = [
+      ["drive-1", { name: "my drive", documentType: "powerhouse/document-drive" }],
+      ["doc-root", { name: "root doc", documentType: "powerhouse/document-model", driveId: "drive-1" }],
+      ["doc-in-first", { name: "doc in first", documentType: "powerhouse/document-model", driveId: "drive-1", parentFolder: "folder-first" }],
+      ["doc-in-another", { name: "doc in another", documentType: "powerhouse/document-model", driveId: "drive-1", parentFolder: "folder-another" }],
+      ["doc-in-parallel", { name: "doc in parallel", documentType: "powerhouse/document-model", driveId: "drive-1", parentFolder: "folder-parallel" }],
+    ];
+
+    const driveManifests = {
+      "drive-1": {
+        folders: {
+          "folder-first": { name: "first folder" },
+          "folder-another": { name: "another folder", parentFolder: "folder-first" },
+          "folder-parallel": { name: "parallel folder" },
+        },
+      },
+    };
+
+    const { result } = buildTree(docs, driveManifests);
+
+    // Root level: 2 parallel folders + 1 root doc
+    expect(result["drive-1"].rootDocs).toEqual(["root doc"]);
+    expect(result["drive-1"].rootFolders).toHaveLength(2);
+
+    // first folder
+    const first = result["drive-1"].rootFolders.find(f => f.name === "first folder");
+    expect(first).toBeDefined();
+    expect(first!.docs).toEqual(["doc in first"]);
+    expect(first!.subFolders).toHaveLength(1);
+    expect(first!.subFolders[0].name).toBe("another folder");
+    expect(first!.subFolders[0].docs).toEqual(["doc in another"]);
+
+    // parallel folder (sibling of first folder at root)
+    const parallel = result["drive-1"].rootFolders.find(f => f.name === "parallel folder");
+    expect(parallel).toBeDefined();
+    expect(parallel!.docs).toEqual(["doc in parallel"]);
+    expect(parallel!.subFolders).toHaveLength(0);
   });
 
   it("should handle empty folders correctly (show folder, no docs)", () => {

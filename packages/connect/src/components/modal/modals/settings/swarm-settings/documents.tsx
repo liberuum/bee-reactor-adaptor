@@ -2,6 +2,51 @@ import React, { useState } from "react";
 import type { SwarmUiSnapshot } from "./types.js";
 import { Section, SyncBadge, shortType } from "./primitives.js";
 
+// ─── Tree Data Types ────────────────────────────────────────────
+
+type DocEntry = { name?: string; documentType?: string; driveId?: string; parentFolder?: string };
+type FolderEntry = { name: string; parentFolder?: string };
+
+type TreeFolder = {
+  id: string;
+  name: string;
+  subFolders: TreeFolder[];
+  docs: Array<[string, DocEntry]>;
+};
+
+/**
+ * Build a recursive tree from a flat folder map + document list.
+ * Same algorithm as the Switchboard CLI's build_children():
+ * 1. Find all nodes where parentFolder matches current parent
+ * 2. Folders first (recurse), then files
+ */
+function buildFolderTree(
+  folderId: string | null,
+  folders: Record<string, FolderEntry>,
+  docs: Array<[string, DocEntry]>,
+): { subFolders: TreeFolder[]; docs: Array<[string, DocEntry]> } {
+  const matchingFolders = Object.entries(folders)
+    .filter(([, f]) => {
+      const parent = f.parentFolder || null;
+      return parent === folderId;
+    })
+    .sort(([, a], [, b]) => (a.name ?? "").localeCompare(b.name ?? ""));
+
+  const matchingDocs = docs.filter(([, d]) => {
+    const parent = d.parentFolder || null;
+    return parent === folderId;
+  });
+
+  const subFolders: TreeFolder[] = matchingFolders.map(([id, f]) => {
+    const children = buildFolderTree(id, folders, docs);
+    return { id, name: f.name, subFolders: children.subFolders, docs: children.docs };
+  });
+
+  return { subFolders, docs: matchingDocs };
+}
+
+// ─── Components ─────────────────────────────────────────────────
+
 function DocRow({
   docId,
   doc,
@@ -12,12 +57,11 @@ function DocRow({
   full,
 }: {
   docId: string;
-  doc: { name?: string; documentType?: string };
+  doc: DocEntry;
   indent?: boolean;
   connector?: string;
   syncState?: string;
   pendingOps?: number;
-  /** Show full IDs and types instead of truncated */
   full?: boolean;
 }) {
   return (
@@ -38,6 +82,52 @@ function DocRow({
   );
 }
 
+function FolderNode({
+  folder,
+  depth,
+  syncStatus,
+  full,
+}: {
+  folder: TreeFolder;
+  depth: number;
+  syncStatus?: Record<string, { state: string; pendingOps: number }>;
+  full?: boolean;
+}) {
+  return (
+    <div className="mb-0.5" style={{ paddingLeft: `${depth * 16}px` }}>
+      <div className="flex items-center gap-1 text-gray-500">
+        <span className="select-none text-gray-300">{"\u251C\u2500"}</span>
+        <span className="font-medium">{folder.name}/</span>
+      </div>
+      {/* Sub-folders first (recursive) */}
+      {folder.subFolders.map((sf) => (
+        <FolderNode
+          key={sf.id}
+          folder={sf}
+          depth={depth + 1}
+          syncStatus={syncStatus}
+          full={full}
+        />
+      ))}
+      {/* Then docs */}
+      {folder.docs.map(([docId, doc], i) => (
+        <DocRow
+          key={docId}
+          docId={docId}
+          doc={doc}
+          indent
+          connector={i === folder.docs.length - 1 ? "\u2514\u2500" : "\u251C\u2500"}
+          syncState={syncStatus?.[docId]?.state}
+          pendingOps={syncStatus?.[docId]?.pendingOps}
+          full={full}
+        />
+      ))}
+    </div>
+  );
+}
+
+// ─── Main Component ─────────────────────────────────────────────
+
 export function DocsTreeSection({
   docs,
   syncStatus,
@@ -45,14 +135,9 @@ export function DocsTreeSection({
   isContentAvailable,
   reuploadContent,
 }: {
-  docs: Array<
-    [string, { name?: string; documentType?: string; driveId?: string; parentFolder?: string }]
-  >;
+  docs: Array<[string, DocEntry]>;
   syncStatus?: Record<string, { state: string; pendingOps: number }>;
-  driveManifests?: Record<
-    string,
-    { folders?: Record<string, { name: string; parentFolder?: string }> }
-  >;
+  driveManifests?: Record<string, { folders?: Record<string, FolderEntry> }>;
   isContentAvailable?: SwarmUiSnapshot["isContentAvailable"];
   reuploadContent?: SwarmUiSnapshot["reuploadContent"];
 }) {
@@ -90,15 +175,14 @@ export function DocsTreeSection({
     );
   }
 
-  // Group: drives first, then child docs grouped under their drive
+  // Separate drives from child docs
   const drives = docs.filter(([, d]) => d.documentType === "powerhouse/document-drive");
   const childDocs = docs.filter(([, d]) => d.documentType !== "powerhouse/document-drive");
   const driveIds = new Set(drives.map(([id]) => id));
 
-  // Build drive -> children map
+  // Group children by drive
   const driveChildren = new Map<string, typeof childDocs>();
   const orphans: typeof childDocs = [];
-
   for (const entry of childDocs) {
     const driveId = entry[1].driveId;
     if (driveId && driveIds.has(driveId)) {
@@ -110,57 +194,14 @@ export function DocsTreeSection({
     }
   }
 
-  /** Render docs for a folder (recursive) */
-  const renderFolder = (
-    folderId: string,
-    folderName: string,
-    allChildren: typeof childDocs,
-    folders: Record<string, { name: string; parentFolder?: string }>,
-    depth: number,
-    full: boolean,
-  ): React.ReactNode => {
-    const docsInFolder = allChildren.filter(([, d]) => d.parentFolder === folderId);
-    const subFolders = Object.entries(folders).filter(([, f]) => f.parentFolder === folderId);
-    if (docsInFolder.length === 0 && subFolders.length === 0) return null;
-    return (
-      <div key={folderId} className="mb-0.5" style={{ paddingLeft: `${depth * 16}px` }}>
-        <div className="flex items-center gap-1 text-gray-500">
-          <span className="select-none text-gray-300">{"\u251C\u2500"}</span>
-          <span className="font-medium">{folderName}/</span>
-        </div>
-        {subFolders.map(([sfId, sf]) =>
-          renderFolder(sfId, sf.name, allChildren, folders, depth + 1, full),
-        )}
-        {docsInFolder.map(([docId, doc], i) => (
-          <DocRow
-            key={docId}
-            docId={docId}
-            doc={doc}
-            indent
-            connector={i === docsInFolder.length - 1 ? "\u2514\u2500" : "\u251C\u2500"}
-            syncState={syncStatus?.[docId]?.state}
-            pendingOps={syncStatus?.[docId]?.pendingOps}
-            full={full}
-          />
-        ))}
-      </div>
-    );
-  };
-
   const treeContent = (full: boolean) => (
     <div className="font-mono text-xs leading-6 text-gray-600">
       {drives.map(([driveId, drive]) => {
         const children = driveChildren.get(driveId) ?? [];
         const folders = driveManifests?.[driveId]?.folders ?? {};
-        const rootDocs = children.filter(
-          ([, d]) => !d.parentFolder || !folders[d.parentFolder],
-        );
-        const folderDocIds = new Set(
-          children
-            .filter(([, d]) => d.parentFolder && folders[d.parentFolder])
-            .map(([id]) => id),
-        );
-        const rootFolders = Object.entries(folders).filter(([, f]) => !f.parentFolder);
+
+        // Build recursive tree from flat folder map + doc list
+        const tree = buildFolderTree(null, folders, children);
 
         return (
           <div key={driveId} className="mb-1">
@@ -171,19 +212,25 @@ export function DocsTreeSection({
                 {full ? driveId : driveId.slice(0, 8)}
               </span>
             </div>
-            {/* Root-level folders */}
-            {rootFolders.map(([fId, f]) =>
-              renderFolder(fId, f.name, children, folders, 1, full),
-            )}
-            {/* Root-level docs (not in any folder) */}
-            {rootDocs.map(([docId, doc], i) => (
+            {/* Folders first (recursive tree) */}
+            {tree.subFolders.map((sf) => (
+              <FolderNode
+                key={sf.id}
+                folder={sf}
+                depth={1}
+                syncStatus={syncStatus}
+                full={full}
+              />
+            ))}
+            {/* Root-level docs */}
+            {tree.docs.map(([docId, doc], i) => (
               <DocRow
                 key={docId}
                 docId={docId}
                 doc={doc}
                 indent
                 connector={
-                  i === rootDocs.length - 1 && folderDocIds.size === 0
+                  i === tree.docs.length - 1
                     ? "\u2514\u2500"
                     : "\u251C\u2500"
                 }
