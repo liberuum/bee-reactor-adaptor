@@ -9,7 +9,9 @@
  * Also: IndexedDB manifest index persistence and clearSwarmStorage.
  */
 import type { SwarmClient } from "../swarm-client.js";
-import { clearPendingOps, clearAllPendingOps } from "./pending-ops-store.js";
+// pending-ops-store removed — stub the functions for sharing.ts compatibility
+const clearPendingOps = async (_docId: string) => {};
+const clearAllPendingOps = async () => {};
 import { emitSwarmEvent } from "./events.js";
 import {
   state,

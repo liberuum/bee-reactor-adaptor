@@ -21,15 +21,14 @@ import { SwarmConnectPlugin } from "../connect-plugin.js";
 import { state, setSwarmStatus, getUploadedBytes, persistBeeUrl, loadDriveMapping } from "./state.js";
 import { loadManifestIndex, clearSwarmStorage } from "./flush.js";
 import { hydrateFromSwarm, populateUiCacheFromDrives } from "./hydration.js";
-import { startOperationSync } from "./sync.js";
+// startOperationSync removed — SwarmChannel handles push via SyncManager outbox
 import { publishPublicProfile, shareDocumentsWithUser, importFromUser } from "./sharing.js";
-import { markPendingOpsExist } from "./pending-ops-store.js";
+// pending-ops-store removed — sync_cursors in PGlite handles persistence
 import { installEventHandlers, emitSwarmEvent } from "./events.js";
 
 const FEED_TOPIC_PREFIX = "ph:v2";
 
-/** Cleanup function returned by startOperationSync — called on reconnect to prevent subscriber leaks */
-let cleanupSync: (() => void) | undefined;
+// cleanupSync removed — SwarmChannel lifecycle managed by SyncManager
 
 /** Idempotency guard — prevents double-init on HMR or duplicate processor registration */
 let initPromise: Promise<void> | undefined;
@@ -325,19 +324,8 @@ export async function initSwarmPlugin(): Promise<void> {
   // plugin.start() overwrites ph.swarm — apply all our custom fields
   applySwarmExtensions((globalThis as any).window?.ph, isDevMode);
 
-  // On page unload: pending ops are already persisted to IndexedDB (on every buffer).
-  // Set a synchronous localStorage flag so the next session knows to replay them.
-  // We do NOT attempt async flushes here — browsers abort them.
-  // Guard: only register once (initSwarmPlugin can be called multiple times via setBeeUrl/reconnect)
-  if (typeof window !== "undefined" && !beforeUnloadRegistered) {
-    beforeUnloadRegistered = true;
-    window.addEventListener("beforeunload", () => {
-      if (state.pendingOps.size > 0) {
-        const addr = (globalThis as any).window?.ph?.renown?.user?.address;
-        markPendingOpsExist(addr);
-      }
-    });
-  }
+  // Pending ops persistence removed — sync_cursors in PGlite handles this.
+  // SwarmChannel cursors survive page reload natively.
 
   console.log("[SwarmPlugin] Initialized");
 }
@@ -518,12 +506,8 @@ function applySwarmExtensions(ph: any, isDevMode: boolean): void {
           publishPublicProfile(client as SwarmClient, address, readyEntry.swarmPublicKey).catch(
             (err) => console.warn("[SwarmPlugin] Profile publish failed:", err),
           );
-          // Clean up old subscriber before creating a new one
-          if (cleanupSync) { cleanupSync(); cleanupSync = undefined; }
-          startOperationSync(client as SwarmClient, readyEntry.ownerAddress).then(
-            (cleanup) => { cleanupSync = cleanup; },
-            (err) => console.warn("[SwarmPlugin] Sync setup failed:", err),
-          );
+          // Old sync disabled — SwarmChannel handles push + pull via SyncManager
+          console.log("[SwarmPlugin] Reconnected — SwarmChannel handles sync");
         },
       });
 
