@@ -197,6 +197,9 @@ export async function createReactor(localPackage?: DocumentModelLib) {
   // Subscribe via ReactorClient interface
   const reactorClient = reactorClientModule.client;
   reactorClient.subscribe({ type: "powerhouse/document-drive" }, (event) => {
+    const docs = (event as any).documents ?? [];
+    const docNames = docs.map((d: any) => d?.header?.name || d?.header?.id?.slice(0, 8) || "?").join(", ");
+    console.log(`[Reactor] drive-change event type="${(event as any).type}" docs=[${docNames}]`);
     logger.verbose("ReactorClient subscription event: @event", event);
     refreshReactorDataClient(reactorClientModule.client).catch((e) =>
       logger.error("@error", e),
@@ -205,6 +208,7 @@ export async function createReactor(localPackage?: DocumentModelLib) {
 
   // Redirect when a currently-viewed document or drive is deleted remotely
   reactorClient.subscribe({}, (event) => {
+    console.log(`[Reactor] global event type="${event.type}" context=${JSON.stringify(event.context ?? {}).slice(0, 120)}`);
     if (event.type !== DocumentChangeType.Deleted) return;
     const deletedId = event.context?.childId;
     if (!deletedId) return;

@@ -70,17 +70,28 @@ export async function startOperationSync(
       type: string;
       documents?: Array<{ header?: { id?: string; documentType?: string; name?: string } }>;
     }) => {
-      if (event.type === "deleted") return;
-      if (state.syncPaused) return;
-
       const docs = event.documents ?? [];
+      const docSummary = docs.map(d => `${d?.header?.name || "?"} (${d?.header?.documentType?.split("/")[1] || "?"} ${d?.header?.id?.slice(0, 8)})`).join(", ");
+      const phCheck = (globalThis as any).window?.ph;
+      const isHydrating = phCheck?.swarm?.hydrating ?? false;
+      console.log(`[Reactor→Swarm] event.type="${event.type}" docs=[${docSummary}] syncPaused=${state.syncPaused} hydrating=${isHydrating} recovering=${state.recoveringDocs.size}`);
+
+      if (event.type === "deleted") return;
+      if (state.syncPaused) {
+        console.log(`[Reactor→Swarm] SKIPPED (syncPaused=true)`);
+        return;
+      }
+
       for (const doc of docs) {
         const id = doc?.header?.id;
         const docType = doc?.header?.documentType;
         if (!id || !docType) continue;
 
         // Skip docs being recovered
-        if (state.recoveringDocs.has(id)) continue;
+        if (state.recoveringDocs.has(id)) {
+          console.log(`[Reactor→Swarm] SKIPPED recovering doc "${doc?.header?.name}" (${id.slice(0, 8)})`);
+          continue;
+        }
 
         // Drives: sync the drive itself AND schedule drive manifest
         if (docType === "powerhouse/document-drive") {
@@ -148,6 +159,7 @@ export async function startOperationSync(
     (event: { type: string; context?: { childId?: string } }) => {
       if (event.type !== "deleted" && event.type !== "child_removed") return;
       const deletedId = event.context?.childId;
+      console.log(`[Reactor→Swarm] DELETE event type="${event.type}" childId=${deletedId?.slice(0, 8) ?? "none"}`);
       if (!deletedId) return;
 
       state.docToDrive.delete(deletedId);

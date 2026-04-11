@@ -208,18 +208,22 @@ export async function hydrateFromSwarm(
   const localDocIds = new Set<string>();
   try {
     const drives = await reactorClient.getDrives();
+    console.log(`[Hydration] Local reactor has ${(drives ?? []).length} drives`);
     for (const drive of (drives ?? [])) {
       const driveId = drive?.id ?? drive;
       localDocIds.add(driveId);
       try {
         const driveDoc = await reactorClient.get(driveId);
+        const driveName = driveDoc?.state?.global?.name ?? "unnamed";
         const nodes = driveDoc?.state?.global?.nodes ?? [];
+        console.log(`[Hydration] Local drive "${driveName}" (${driveId.slice(0, 8)}) has ${nodes.length} nodes`);
         for (const node of nodes) {
           if (node.id) localDocIds.add(node.id);
         }
       } catch { /* drive not accessible */ }
     }
   } catch { /* no drives */ }
+  console.log(`[Hydration] Total local doc IDs: ${localDocIds.size}`);
 
   // ─── Recovery: Drive manifests are the source of truth ─────
   const { addDrive } = await import("@powerhousedao/reactor-browser");
@@ -601,6 +605,7 @@ export async function hydrateFromSwarm(
   console.log("[SwarmPlugin] Hydration complete");
   } finally {
     // Always resume sync — even if recovery partially failed
+    console.log(`[Hydration] Releasing sync pause. recoveringDocs=${state.recoveringDocs.size} syncedRevisions=${state.syncedRevisions.size}`);
     state.syncPaused = false;
     const phDone = (globalThis as any).window?.ph;
     if (phDone?.swarm) phDone.swarm.hydrating = false;
