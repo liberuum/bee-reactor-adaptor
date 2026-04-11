@@ -309,10 +309,14 @@ export async function initSwarmPlugin(): Promise<void> {
         (err) => console.warn("[SwarmPlugin] Profile publish failed:", err),
       );
 
-      startOperationSync(swarm, entry.ownerAddress).then(
-        (cleanup) => { cleanupSync = cleanup; },
-        (err) => console.warn("[SwarmPlugin] Sync setup failed:", err),
-      );
+      // Old plugin sync disabled — SwarmChannel handles push via SyncManager outbox.
+      // To re-enable old sync (e.g. if SwarmChannel is removed), uncomment:
+      //
+      // startOperationSync(swarm, entry.ownerAddress).then(
+      //   (cleanup) => { cleanupSync = cleanup; },
+      //   (err) => console.warn("[SwarmPlugin] Sync setup failed:", err),
+      // );
+      console.log("[SwarmPlugin] Old sync disabled — SwarmChannel handles push + pull");
     },
   });
 
