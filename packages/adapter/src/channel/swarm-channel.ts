@@ -561,6 +561,37 @@ export class SwarmChannel implements IChannel {
 
     if (docIds.size === 0) return;
 
+    // Filter out documents that already exist in the local reactor.
+    // The outbox handles pushing local ops to Swarm — the inbox should
+    // only pull ops for documents that need recovery (don't exist locally).
+    const ph = (globalThis as any).window?.ph;
+    const reactorClient = ph?.reactorClient;
+    if (reactorClient) {
+      const localDocIds = new Set<string>();
+      try {
+        const drives = await reactorClient.getDrives();
+        for (const drive of drives ?? []) {
+          const did = drive?.id ?? drive?.header?.id ?? drive;
+          if (did) localDocIds.add(String(did));
+          try {
+            const driveDoc = await reactorClient.get(String(did));
+            for (const node of driveDoc?.state?.global?.nodes ?? []) {
+              if (node?.id) localDocIds.add(node.id);
+            }
+          } catch { /* drive not accessible */ }
+        }
+      } catch { /* no drives */ }
+
+      // Remove locally-existing docs from the pull list
+      if (localDocIds.size > 0) {
+        for (const localId of localDocIds) {
+          docIds.delete(localId);
+        }
+      }
+    }
+
+    if (docIds.size === 0) return;
+
     // Process drives first (they must exist before child docs can reference them).
     // Drives are document-drive type; all others are child documents.
     const driveIds: string[] = [];
