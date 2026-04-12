@@ -66,12 +66,19 @@ export function StampPicker({
       try {
         const fresh = await swarm.getAllStamps();
         // Check if any previously pending stamp just became usable
+        let newlyUsable = false;
         for (const pid of prevPendingRef.current) {
           const now = fresh.find((s) => s.batchID === pid);
           if (now?.usable) {
             const label = now.immutableFlag ? "immutable" : "mutable";
             toast(`Stamp ${pid.slice(0, 8)}... is now usable (${label})`, { type: "connect-success" });
+            newlyUsable = true;
           }
+        }
+        // Auto-reconnect if plugin is still waiting for a stamp
+        if (newlyUsable && swarm.status === "no-stamp" && swarm.reconnect) {
+          toast("Stamp confirmed — connecting to Swarm...", { type: "connect-success" });
+          swarm.reconnect().catch(() => {});
         }
         prevPendingRef.current = fresh.filter((s) => !s.usable && s.batchTTL > 0).map((s) => s.batchID);
         // Update the list
