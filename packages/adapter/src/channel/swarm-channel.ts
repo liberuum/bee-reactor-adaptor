@@ -178,11 +178,10 @@ export class SwarmChannel implements IChannel {
       }).catch(() => {});
     }, HEALTH_CHECK_INTERVAL_MS);
 
-    // Inbox poll timer — only activates for recovery (fresh PGlite).
-    // Once recovery pulls ops, the poll stops. Normal sync is outbox-only.
-    // This prevents the feedback loop where the inbox re-downloads ops
-    // that the outbox just pushed.
-    this.startRecoveryPollIfNeeded();
+    // Inbox poll is NOT started automatically.
+    // Normal operation is outbox-only (push local changes to Swarm).
+    // Recovery (inbox pull) is triggered explicitly by the registration
+    // code in reactor.ts when drives are found on Swarm but not locally.
   }
 
   async shutdown(): Promise<void> {
@@ -495,57 +494,19 @@ export class SwarmChannel implements IChannel {
 
   // ─── Inbox Pull (Swarm → local) ──────────────────────────────
 
-  /**
-   * Start inbox poll ONLY if there are no local drives (recovery scenario).
-   * Once recovery completes, the poll stops. Normal sync is outbox-only.
-   */
-  private async startRecoveryPollIfNeeded(): Promise<void> {
-    // Check if local reactor has drives
-    const ph = (globalThis as any).window?.ph;
-    const rc = ph?.reactorClient;
-    if (rc) {
-      try {
-        const drives = await rc.getDrives();
-        if (drives && drives.length > 0) {
-          this.logger.info("[SwarmChannel] Local drives exist — inbox poll skipped (outbox-only mode)");
-          return;
-        }
-      } catch { /* no drives API — proceed with poll */ }
-    }
-
-    // No local drives — start recovery poll
-    this.logger.info("[SwarmChannel] No local drives — starting inbox recovery poll");
-    this.pollTimer = setInterval(() => {
-      if (this.connectionState === "connected") {
-        this.pollInbox().then((pulled) => {
-          // Stop polling once recovery is complete (no new ops found)
-          if (!pulled && this.pollTimer) {
-            clearInterval(this.pollTimer);
-            this.pollTimer = null;
-            this.logger.info("[SwarmChannel] Recovery complete — inbox poll stopped");
-          }
-        }).catch((err) => {
-          this.logger.warn("[SwarmChannel] Poll error:", err instanceof Error ? err.message : err);
-        });
-      }
-    }, this.config.pollIntervalMs);
-  }
-
   /** Track which batch references we've already processed (per doc) */
   private processedBatches = new Set<string>();
 
   /**
-   * Poll Swarm feeds for new operations not yet in the local reactor.
-   * Returns true if new ops were pulled (recovery in progress).
-   *
-   * Reads the user manifest → iterates document manifests → downloads
-   * new operation batches → wraps as SyncOperation → adds to inbox.
+   * Pull operations from Swarm feeds for documents not in the local reactor.
+   * Called explicitly for recovery (fresh PGlite). NOT called during normal operation.
+   * Returns true if new ops were pulled.
    * The SyncManager then applies them via reactor.load().
    *
    * Batch deduplication: tracks processed batch references to avoid
    * re-downloading and re-applying the same operations.
    */
-  private async pollInbox(): Promise<boolean> {
+  async pullFromSwarm(): Promise<boolean> {
     if (this.isShutdown || !this.swarmClient) return false;
 
     const client = this.swarmClient;

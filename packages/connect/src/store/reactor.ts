@@ -419,6 +419,17 @@ export async function createReactor(localPackage?: DocumentModelLib) {
       }
       if (registered > 0) {
         console.log(`[SwarmChannel] Registered ${registered} Swarm remote(s)`);
+
+        // If this was a recovery (drives from Swarm, not local), trigger one pull
+        if (localDriveIds.length === 0) {
+          console.log("[SwarmChannel] Recovery mode — triggering inbox pull");
+          const remotes = sm.list();
+          for (const remote of remotes) {
+            if ((remote.channel as any)?.pullFromSwarm) {
+              (remote.channel as any).pullFromSwarm().catch(() => {});
+            }
+          }
+        }
       }
       return registered > 0;
     };
