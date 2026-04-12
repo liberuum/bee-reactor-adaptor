@@ -1,5 +1,7 @@
 import { Bee, Topic } from "@ethersphere/bee-js";
 import { encrypt, decrypt, isEncrypted } from "./swarm-crypto.js";
+import { StampManager, getBzzUsdPrice } from "./stamp-manager.js";
+import { ShareManager } from "./share-manager.js";
 /**
  * Thin wrapper around the Bee SDK providing the specific operations
  * needed by the reactor storage adapter.
@@ -9,6 +11,9 @@ import { encrypt, decrypt, isEncrypted } from "./swarm-crypto.js";
  *   Requires a full Bee node (not dev mode).
  * - **Bytes mode** (dev/testing): Stores manifests as /bytes and maintains
  *   a local in-memory index of document -> reference. Works with `bee dev`.
+ *
+ * Stamp management is delegated to StampManager.
+ * Sharing and profiles are delegated to ShareManager.
  */
 export class SwarmClient {
     bee;
@@ -26,8 +31,16 @@ export class SwarmClient {
     manifestIndex = new Map();
     /** Per-topic write lock — serializes feed writes to prevent concurrent index conflicts */
     feedWriteLocks = new Map();
+    /** Feed index from the last readFeedJson call (for debugging/optimization) */
+    lastFeedIndex = undefined;
+    /** Next feed index from the last readFeedJson call */
+    lastFeedIndexNext = undefined;
+    /** Stamp management (status, top-up, pricing, presets) */
+    stamps;
+    /** Document sharing and public profiles */
+    sharing;
     constructor(config) {
-        this.bee = new Bee(config.beeUrl, {
+        this.bee = config.bee ?? new Bee(config.beeUrl, {
             signer: config.signerPrivateKey,
         });
         this.batchId = config.batchId;
@@ -35,25 +48,35 @@ export class SwarmClient {
         this.feedTopicPrefix = config.feedTopicPrefix ?? "ph";
         this.encryptionKey = config.signerPrivateKey;
         this.useEncryption = config.useEncryption ?? true;
+        this.stamps = new StampManager(this.bee, this.batchId);
+        this.sharing = new ShareManager(this);
     }
+    // ═══════════════════════════════════════════════════════════════
+    // Core Data Operations
+    // ═══════════════════════════════════════════════════════════════
     /**
      * Upload data to Swarm /bytes.
      *
      * When encryption is enabled (default), data is encrypted with AES-256-GCM
      * using the wallet-derived key BEFORE upload. The Bee node never sees plaintext.
-     *
-     * @param data - Data to upload (will be encrypted if useEncryption is true)
-     * @param options - Optional: skip encryption, enable ACT, provide history
      */
     async uploadData(data, options) {
         let payload = data;
-        // App-layer encryption: encrypt before upload
         if (this.useEncryption && !options?.skipEncryption) {
             payload = await encrypt(data, this.encryptionKey);
+        }
+        // Create a tag for upload tracking if requested
+        let tag;
+        if (options?.tracked || options?.deferred) {
+            const created = await this.bee.createTag();
+            tag = created.uid;
         }
         const result = await this.bee.uploadData(this.batchId, payload, {
             act: options?.act,
             actHistoryAddress: options?.actHistoryAddress,
+            redundancyLevel: options?.redundancyLevel,
+            tag,
+            deferred: options?.deferred,
         });
         const historyRef = result.historyAddress?.value ?? result.historyAddress;
         return {
@@ -61,16 +84,13 @@ export class SwarmClient {
             historyAddress: historyRef && typeof historyRef === "object" && "toHex" in historyRef
                 ? historyRef.toHex()
                 : undefined,
+            tagUid: tag,
         };
     }
     /**
      * Download data from Swarm /bytes by reference.
      *
      * Automatically detects and decrypts AES-256-GCM encrypted data (SWE prefix).
-     * Handles mixed encrypted/unencrypted content for backward compatibility.
-     *
-     * @param reference - Content reference
-     * @param options - Optional: ACT parameters, skip decryption
      */
     async downloadData(reference, options) {
         const raw = await this.bee.downloadData(reference, {
@@ -79,190 +99,130 @@ export class SwarmClient {
             actTimestamp: options?.actTimestamp,
         });
         const data = raw.toUint8Array();
-        // Auto-decrypt if data has the SWE prefix (backward compatible with unencrypted data)
         if (!options?.skipDecryption && isEncrypted(data)) {
             return decrypt(data, this.encryptionKey);
         }
         return data;
     }
-    // ─── ACT Access Control ────────────────────────────────────────
     /**
-     * Grant access to encrypted content for specific Ethereum public keys.
+     * Upload raw bytes without SwarmClient encryption (for ShareManager).
+     * The caller handles its own encryption with the shared key.
      */
+    async uploadRawData(data) {
+        const result = await this.bee.uploadData(this.batchId, data);
+        return { reference: result.reference.toHex() };
+    }
+    /**
+     * Download raw bytes without SwarmClient decryption (for ShareManager).
+     * The caller handles its own decryption with the shared key.
+     */
+    async downloadRawData(reference) {
+        const raw = await this.bee.downloadData(reference);
+        return raw.toUint8Array();
+    }
+    // ═══════════════════════════════════════════════════════════════
+    // ACT Access Control
+    // ═══════════════════════════════════════════════════════════════
     async grantAccess(granteeRef, historyRef, publicKeys) {
         const result = await this.bee.patchGrantees(this.batchId, granteeRef, historyRef, { add: publicKeys });
-        return {
-            ref: result.ref.toHex(),
-            historyRef: result.historyref.toHex(),
-        };
+        return { ref: result.ref.toHex(), historyRef: result.historyref.toHex() };
     }
-    /**
-     * Revoke access to encrypted content from specific Ethereum public keys.
-     */
     async revokeAccess(granteeRef, historyRef, publicKeys) {
         const result = await this.bee.patchGrantees(this.batchId, granteeRef, historyRef, { revoke: publicKeys });
-        return {
-            ref: result.ref.toHex(),
-            historyRef: result.historyref.toHex(),
-        };
+        return { ref: result.ref.toHex(), historyRef: result.historyref.toHex() };
     }
-    /**
-     * Create a new grantee list for ACT access control.
-     */
     async createGrantees(publicKeys) {
         const result = await this.bee.createGrantees(this.batchId, publicKeys);
-        return {
-            ref: result.ref.toHex(),
-            historyRef: result.historyref.toHex(),
-        };
+        return { ref: result.ref.toHex(), historyRef: result.historyref.toHex() };
     }
-    /**
-     * Get the current grantee list (publisher only).
-     */
     async getGrantees(granteeRef) {
         const result = await this.bee.getGrantees(granteeRef);
         return result.grantees.map((pk) => pk.toCompressedHex());
     }
-    /**
-     * Read the document manifest.
-     * Uses feeds in production, or /bytes + local index in dev mode.
-     */
+    // ═══════════════════════════════════════════════════════════════
+    // Document Manifest
+    // ═══════════════════════════════════════════════════════════════
     async readManifest(documentId) {
-        if (this.useFeedMode) {
+        if (this.useFeedMode)
             return this.readManifestFromFeed(documentId);
-        }
         return this.readManifestFromBytes(documentId);
     }
-    /**
-     * Update the document manifest.
-     * Uses feeds in production, or /bytes + local index in dev mode.
-     */
     async updateManifest(documentId, manifest) {
-        if (this.useFeedMode) {
+        if (this.useFeedMode)
             return this.updateManifestViaFeed(documentId, manifest);
-        }
         return this.updateManifestViaBytes(documentId, manifest);
     }
     /**
-     * Get the Ethereum address derived from the signer private key.
+     * Compact a document's manifest by merging many small operation batches
+     * into fewer large ones. Keeps recovery fast (fewer downloads).
      */
-    getOwnerAddress() {
-        if (!this.bee.signer) {
-            throw new Error("No signer configured on Bee instance");
-        }
-        const hex = this.bee.signer.publicKey().address().toHex();
-        return hex.startsWith("0x") ? hex : `0x${hex}`;
-    }
-    /**
-     * Get the Bee node's public key (for ACT sharing — this is what other
-     * users need to grant you access to their encrypted content).
-     */
-    async getBeeNodePublicKey() {
-        const response = await fetch(`${this.bee.url}/addresses`);
-        if (!response.ok) {
-            throw new Error(`Failed to get Bee node addresses: ${response.status}`);
-        }
-        const data = (await response.json());
-        return data.publicKey;
-    }
-    /**
-     * Get the Bee node's Gnosis Chain wallet address and balances.
-     * The wallet endpoint returns everything we need for the settings UI.
-     */
-    async getNodeWallet() {
-        const response = await fetch(`${this.bee.url}/wallet`);
-        if (!response.ok) {
-            throw new Error(`Failed to get Bee wallet: ${response.status}`);
-        }
-        const data = (await response.json());
-        return {
-            address: data.walletAddress,
-            xBZZ: data.bzzBalance,
-            xDAI: data.nativeTokenBalance,
-        };
-    }
-    /**
-     * @deprecated Use getNodeWallet() instead
-     */
-    async getNodeWalletAddress() {
-        const wallet = await this.getNodeWallet();
-        return wallet.address;
-    }
-    /**
-     * @deprecated Use getNodeWallet() instead
-     */
-    async getNodeBalances() {
-        const wallet = await this.getNodeWallet();
-        return { xBZZ: wallet.xBZZ, xDAI: wallet.xDAI };
-    }
-    /**
-     * Create a new postage stamp batch. The Bee node's wallet must be funded
-     * with xBZZ and xDAI first.
-     * @param amount Per-chunk xBZZ allocation (determines duration)
-     * @param depth Batch depth (determines capacity, minimum 17)
-     */
-    async createStamp(amount, depth) {
-        const response = await fetch(`${this.bee.url}/stamps/${amount}/${depth}`, { method: "POST" });
-        if (!response.ok) {
-            const text = await response.text();
-            throw new Error(`Failed to create stamp: ${text}`);
-        }
-        const data = (await response.json());
-        return data.batchID;
-    }
-    /**
-     * Check if the Bee node is reachable.
-     */
-    async isHealthy() {
-        try {
-            const health = await this.bee.getHealth();
-            return health.status === "ok";
-        }
-        catch {
+    async compactManifest(documentId, maxBatches = 20) {
+        const manifest = await this.readManifest(documentId);
+        if (!manifest || manifest.operationBatches.length <= maxBatches)
             return false;
+        // Group batches by scope:branch to compact each bucket independently
+        const buckets = new Map();
+        for (const batch of manifest.operationBatches) {
+            const key = `${batch.scope}:${batch.branch}`;
+            const bucket = buckets.get(key) ?? [];
+            bucket.push(batch);
+            buckets.set(key, bucket);
         }
-    }
-    /**
-     * Auto-detect whether feeds are supported by the connected node.
-     * Updates the internal mode accordingly.
-     */
-    async detectFeedSupport() {
-        try {
-            const topic = Topic.fromString("ph:probe:" + Date.now());
-            const owner = this.getOwnerAddress();
-            const reader = this.bee.makeFeedReader(topic, owner);
-            await reader.downloadPayload();
-            return true;
-        }
-        catch (error) {
-            if (isNotImplementedError(error)) {
-                return false;
+        const compactedBatches = [];
+        let compacted = false;
+        for (const [key, batches] of buckets) {
+            // Only compact buckets with multiple batches
+            if (batches.length <= 1) {
+                compactedBatches.push(...batches);
+                continue;
             }
-            // 404 means feeds are supported but this feed doesn't exist yet
-            if (isNotFoundError(error)) {
+            const [scope, branch] = key.split(":");
+            // Download all ops in this bucket
+            const allOps = [];
+            for (const batch of batches) {
+                try {
+                    const data = await this.downloadData(batch.reference);
+                    const ops = JSON.parse(new TextDecoder().decode(data));
+                    allOps.push(...ops);
+                }
+                catch { /* skip unreadable batches */ }
+            }
+            if (allOps.length === 0)
+                continue;
+            // Dedup and sort
+            allOps.sort((a, b) => a.index - b.index);
+            const seen = new Set();
+            const deduped = allOps.filter((op) => {
+                if (seen.has(op.index))
+                    return false;
+                seen.add(op.index);
                 return true;
-            }
-            return false;
+            });
+            // Upload merged ops as one batch
+            const { reference } = await this.uploadData(JSON.stringify(deduped));
+            const startIndex = deduped[0].index;
+            const endIndex = deduped[deduped.length - 1].index;
+            compactedBatches.push({
+                reference,
+                scope,
+                branch,
+                startIndex,
+                endIndex,
+                timestamp: new Date().toISOString(),
+            });
+            manifest.latestRevision[scope] = Math.max(manifest.latestRevision[scope] ?? -1, endIndex);
+            compacted = true;
         }
+        if (!compacted)
+            return false;
+        manifest.operationBatches = compactedBatches;
+        manifest.updatedAt = new Date().toISOString();
+        await this.updateManifest(documentId, manifest);
+        return true;
     }
-    /**
-     * Get the local manifest index (for bytes mode).
-     * Useful for persisting the index across restarts.
-     */
-    getManifestIndex() {
-        return new Map(this.manifestIndex);
-    }
-    /**
-     * Restore the local manifest index (for bytes mode).
-     */
-    setManifestIndex(index) {
-        this.manifestIndex = new Map(index);
-    }
-    // ─── User manifest ──────────────────────────────────────────────
-    /**
-     * Read the user manifest from Swarm for a given Ethereum address.
-     * Returns null if no manifest exists.
-     */
+    // ═══════════════════════════════════════════════════════════════
+    // User Manifest
+    // ═══════════════════════════════════════════════════════════════
     async readUserManifest(address) {
         if (this.useFeedMode) {
             const topic = this.userTopic(address);
@@ -271,7 +231,6 @@ export class SwarmClient {
                 return await this.readFeedJson(topic, owner);
             }
             catch {
-                // Feed doesn't exist or has stale/incompatible format — treat as empty
                 return null;
             }
         }
@@ -287,14 +246,10 @@ export class SwarmClient {
             return null;
         }
     }
-    /**
-     * Update the user manifest on Swarm.
-     */
     async updateUserManifest(address, manifest) {
         const payload = JSON.stringify(manifest);
         if (this.useFeedMode) {
             const topic = this.userTopic(address);
-            // Upload to /bytes first, then write reference to feed (72-byte SOC)
             const { reference } = await this.uploadData(payload);
             await this.writeFeedPayload(topic, reference);
         }
@@ -303,349 +258,9 @@ export class SwarmClient {
             this.manifestIndex.set(`user:${address.toLowerCase()}`, reference);
         }
     }
-    // ─── Stamp management ─────────────────────────────────────────
-    /**
-     * Get the current status of the postage stamp.
-     */
-    async getStampStatus() {
-        const batch = await this.bee.getPostageBatch(this.batchId);
-        const ttlSeconds = batch.duration.toSeconds();
-        // Use bee-js computed values for sizes
-        const effectiveCapacityBytes = batch.size.toBytes();
-        const remainingBytes = batch.remainingSize.toBytes();
-        const usedBytes = effectiveCapacityBytes - remainingBytes;
-        // Use bee-js usage (0-1 float) for utilization — more accurate than our size ratio
-        // The size ratio can be misleading for small stamps where both values are tiny
-        const utilization = Math.round(batch.usage * 100);
-        let health;
-        if (ttlSeconds <= 0)
-            health = "expired";
-        else if (ttlSeconds < 86400)
-            health = "critical";
-        else if (ttlSeconds < 604800)
-            health = "warning";
-        else
-            health = "healthy";
-        // Compute total cost: amount * 2^depth / 10^16 = xBZZ
-        const amount = BigInt(batch.amount.toString());
-        const totalPlur = amount * BigInt(2 ** batch.depth);
-        const totalBzz = Number(totalPlur) / 1e16;
-        const bzzUsdPrice = await this.getBzzUsdPrice();
-        const totalUsd = bzzUsdPrice != null ? (totalBzz * bzzUsdPrice).toFixed(4) : null;
-        return {
-            batchId: this.batchId,
-            usable: batch.usable,
-            ttlSeconds,
-            ttlHuman: formatDuration(ttlSeconds),
-            utilization,
-            capacityBytes: effectiveCapacityBytes,
-            usedBytes,
-            remainingBytes,
-            capacityHuman: batch.size.toFormattedString(),
-            remainingHuman: batch.remainingSize.toFormattedString(),
-            depth: batch.depth,
-            bucketDepth: batch.bucketDepth,
-            rawUtilization: batch.utilization,
-            maxUtilization: Math.pow(2, batch.depth - batch.bucketDepth),
-            totalCostBzz: totalBzz.toFixed(6),
-            totalCostUsd: totalUsd ? `$${totalUsd}` : null,
-            bzzUsdPrice,
-            expiresAt: new Date(Date.now() + ttlSeconds * 1000).toISOString(),
-            health,
-        };
-    }
-    /**
-     * Top up the postage stamp to extend its TTL.
-     */
-    async topUpStamp(additionalAmount) {
-        await this.bee.topUpBatch(this.batchId, additionalAmount.toString());
-    }
-    /**
-     * Dilute the stamp to increase capacity (trades TTL for space).
-     */
-    async expandStamp(newDepth) {
-        await this.bee.diluteBatch(this.batchId, newDepth);
-    }
-    /**
-     * Get current storage price from the Bee node's chain state.
-     * Returns pricePerBlock (PLUR per chunk per block) and blockTime (seconds).
-     */
-    async getStoragePrice() {
-        const chainState = await this.bee.getChainState();
-        return {
-            pricePerBlock: chainState.currentPrice,
-            blockTime: 5, // Gnosis Chain default
-        };
-    }
-    /**
-     * Get xBZZ/USD market price from CoinGecko.
-     * Returns null if the API is unreachable.
-     */
-    async getBzzUsdPrice() {
-        try {
-            const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=swarm-bzz&vs_currencies=usd", { signal: AbortSignal.timeout(5000) });
-            if (!res.ok)
-                return null;
-            const data = (await res.json());
-            return data["swarm-bzz"]?.usd ?? null;
-        }
-        catch {
-            return null;
-        }
-    }
-    /**
-     * Estimate cost for a stamp operation.
-     *
-     * @param depth - Batch depth
-     * @param days - Duration in days
-     * @returns Cost estimate in xBZZ and USD (if price available)
-     */
-    async estimateStampCost(depth, days) {
-        const { pricePerBlock, blockTime } = await this.getStoragePrice();
-        const blocksPerDay = Math.ceil(86400 / blockTime);
-        const amountPerChunk = BigInt(pricePerBlock) * BigInt(blocksPerDay) * BigInt(days);
-        const totalPlur = amountPerChunk * BigInt(2 ** depth);
-        const xBZZ = Number(totalPlur) / 1e16;
-        const bzzPrice = await this.getBzzUsdPrice();
-        const usd = bzzPrice != null ? (xBZZ * bzzPrice).toFixed(4) : null;
-        return {
-            xBZZ: xBZZ.toFixed(6),
-            usd: usd ? `$${usd}` : null,
-            amountPlur: amountPerChunk.toString(),
-        };
-    }
-    /**
-     * Get stamp management options with human-readable presets.
-     * Fetches current price and computes costs for common operations.
-     */
-    async getStampOptions() {
-        const batch = await this.bee.getPostageBatch(this.batchId);
-        const chainState = await this.bee.getChainState();
-        const pricePerBlock = chainState.currentPrice;
-        const blockTime = 5; // Gnosis Chain
-        // Effective bytes per depth (from bee-js stamp tables for unencrypted, no erasure)
-        const sizeTable = [
-            { depth: 19, label: "110 MB", effectiveBytes: 110 * 1_000_000 },
-            { depth: 20, label: "680 MB", effectiveBytes: 680 * 1_000_000 },
-            { depth: 21, label: "2.6 GB", effectiveBytes: 2_600_000_000 },
-            { depth: 22, label: "7.7 GB", effectiveBytes: 7_700_000_000 },
-            { depth: 23, label: "17 GB", effectiveBytes: 17_000_000_000 },
-            { depth: 24, label: "43 GB", effectiveBytes: 43_000_000_000 },
-            { depth: 25, label: "97 GB", effectiveBytes: 97_000_000_000 },
-        ];
-        // Only show sizes >= current depth
-        const sizeOptions = sizeTable.filter((s) => s.depth >= batch.depth);
-        // Compute PLUR amount for each duration preset
-        // amount = (durationSeconds / blockTime) * pricePerBlock
-        const durationPresets = [1, 2, 7, 15, 30, 90];
-        const durationOptions = durationPresets.map((days) => {
-            const seconds = days * 86400;
-            const blocks = Math.ceil(seconds / blockTime);
-            const amount = BigInt(blocks) * BigInt(pricePerBlock);
-            return {
-                days,
-                label: days === 1 ? "~1 day" : `~${days} days`,
-                amount: amount.toString(),
-            };
-        });
-        return {
-            currentDepth: batch.depth,
-            currentTtlSeconds: batch.duration.toSeconds(),
-            pricePerBlock,
-            blockTime,
-            sizeOptions,
-            durationOptions,
-        };
-    }
-    // ─── Public Profile (unencrypted, discoverable by ETH address) ─
-    /**
-     * Publish the user's public profile to an UNENCRYPTED feed.
-     * The profile is keyed by the signer address (= feed owner), so
-     * anyone who knows the signer address can discover the profile.
-     *
-     * @param signerAddress - The signer's address (from getOwnerAddress())
-     * @param profile - The profile data to publish
-     */
-    async publishPublicProfile(signerAddress, profile) {
-        const topic = this.profileTopic(signerAddress);
-        const payload = JSON.stringify(profile);
-        // Upload WITHOUT encryption — this is public data
-        const { reference } = await this.uploadData(payload, { skipEncryption: true });
-        await this.writeFeedPayload(topic, reference);
-    }
-    /**
-     * Read a user's public profile by their Swarm signer address.
-     * Returns null if the user hasn't published a profile yet.
-     *
-     * The signer address IS the feed owner, so this works for cross-user reads.
-     * Note: this takes a signer address, NOT an ETH wallet address.
-     *
-     * @param signerAddress - The target user's signer address (NOT their ETH wallet address)
-     */
-    async readPublicProfile(signerAddress) {
-        const topic = this.profileTopic(signerAddress);
-        const ownerAddr = normalizeAddress(signerAddress);
-        try {
-            return await this.readFeedJson(topic, ownerAddr, { skipDecryption: true });
-        }
-        catch {
-            return null;
-        }
-    }
-    // ─── Document Sharing (ACT-based) ─────────────────────────────
-    /**
-     * Upload data for sharing — encrypted with a key derived from both parties' addresses.
-     * Both sender and recipient can derive the same key: SHA-256(sender:recipient).
-     * Third parties can't decrypt without knowing both signer addresses.
-     *
-     * @param data - The operation data to share
-     * @param senderAddress - Sender's signer address
-     * @param recipientAddress - Recipient's signer address
-     */
-    async uploadSharedData(data, senderAddress, recipientAddress) {
-        const shareKey = await deriveShareKey(senderAddress, recipientAddress);
-        const encrypted = await encrypt(data, shareKey);
-        const result = await this.bee.uploadData(this.batchId, encrypted);
-        return { reference: result.reference.toHex() };
-    }
-    /**
-     * Download shared data and decrypt with the shared key.
-     * The key is derived from both parties' addresses: SHA-256(sender:recipient).
-     *
-     * @param reference - Swarm reference
-     * @param senderAddress - Sender's signer address
-     * @param recipientAddress - Recipient's signer address (= our address when importing)
-     */
-    async downloadSharedData(reference, senderAddress, recipientAddress) {
-        const raw = await this.bee.downloadData(reference);
-        const shareKey = await deriveShareKey(senderAddress, recipientAddress);
-        return decrypt(raw.toUint8Array(), shareKey);
-    }
-    /**
-     * Write a share manifest to the share feed between sender and recipient.
-     */
-    async writeShareManifest(senderAddress, recipientAddress, manifest) {
-        const topic = this.shareTopic(senderAddress, recipientAddress);
-        const payload = JSON.stringify(manifest);
-        // Upload WITHOUT encryption — the recipient needs to read this manifest
-        // to discover shared documents. The actual document data is ACT-encrypted.
-        const { reference } = await this.uploadData(payload, { skipEncryption: true });
-        await this.writeFeedPayload(topic, reference);
-    }
-    /**
-     * Read the share manifest from another user.
-     * Alice reads: shareTopic(bob, alice) with owner = bob's address.
-     *
-     * Note: The share manifest is encrypted with the sender's key.
-     * The recipient needs their own copy or the manifest should use
-     * a shared encryption scheme. For now, we store it unencrypted
-     * on the feed (the feed topic is obscure enough).
-     */
-    async readShareManifest(senderAddress, recipientAddress) {
-        const senderNorm = normalizeAddress(senderAddress);
-        const topic = this.shareTopic(senderAddress, recipientAddress);
-        try {
-            return await this.readFeedJson(topic, senderNorm, { skipDecryption: true });
-        }
-        catch {
-            return null;
-        }
-    }
-    // ─── Manifest compaction ───────────────────────────────────────
-    /**
-     * Compact a document's manifest by merging many small operation batches
-     * into fewer large ones. This keeps recovery fast (fewer downloads).
-     *
-     * Called periodically or on startup. Old batches remain on Swarm but
-     * expire naturally when the stamp runs out.
-     *
-     * @param documentId - The document to compact
-     * @param maxBatches - Don't compact if batch count is at or below this (default: 20)
-     * @returns true if compaction was performed, false if not needed
-     */
-    async compactManifest(documentId, maxBatches = 20) {
-        const manifest = await this.readManifest(documentId);
-        if (!manifest || manifest.operationBatches.length <= maxBatches) {
-            return false;
-        }
-        // Download all batches, merge ops, dedup, sort
-        const allOps = [];
-        for (const batch of manifest.operationBatches) {
-            try {
-                const data = await this.downloadData(batch.reference);
-                const ops = JSON.parse(new TextDecoder().decode(data));
-                allOps.push(...ops);
-            }
-            catch {
-                // Skip unreadable batches (expired or corrupted)
-            }
-        }
-        if (allOps.length === 0)
-            return false;
-        // Dedup by op ID or index, sort
-        allOps.sort((a, b) => a.index - b.index);
-        const seen = new Set();
-        const deduped = allOps.filter((op) => {
-            if (seen.has(op.index))
-                return false;
-            seen.add(op.index);
-            return true;
-        });
-        // Upload merged ops as one batch
-        const { reference } = await this.uploadData(JSON.stringify(deduped));
-        const startIndex = deduped[0].index;
-        const endIndex = deduped[deduped.length - 1].index;
-        // Replace all batch entries with one
-        manifest.operationBatches = [{
-                reference,
-                scope: "global",
-                branch: "main",
-                startIndex,
-                endIndex,
-                timestamp: new Date().toISOString(),
-            }];
-        manifest.latestRevision["global"] = endIndex;
-        manifest.updatedAt = new Date().toISOString();
-        await this.updateManifest(documentId, manifest);
-        return true;
-    }
-    // ─── Topic helpers ─────────────────────────────────────────────
-    /**
-     * Derive a deterministic feed topic for a document.
-     */
-    documentTopic(documentId) {
-        return Topic.fromString(`${this.feedTopicPrefix}:doc:${documentId}`);
-    }
-    /**
-     * Derive a deterministic feed topic for a user's manifest.
-     */
-    userTopic(address) {
-        // MUST keep 0x prefix — existing feeds were written with it
-        return Topic.fromString(`${this.feedTopicPrefix}:user:${address.toLowerCase()}`);
-    }
-    /**
-     * Derive a deterministic feed topic for a user's public profile.
-     */
-    profileTopic(address) {
-        return Topic.fromString(`${this.feedTopicPrefix}:profile:${address.toLowerCase()}`);
-    }
-    /**
-     * Derive a deterministic feed topic for shares between two users.
-     */
-    shareTopic(fromAddress, toAddress) {
-        return Topic.fromString(`${this.feedTopicPrefix}:share:${fromAddress.toLowerCase()}:${toAddress.toLowerCase()}`);
-    }
-    // ─── Drive manifest (hierarchical v2) ──────────────────────────
-    /**
-     * Derive a deterministic feed topic for a drive manifest.
-     */
-    driveTopic(driveId) {
-        return Topic.fromString(`${this.feedTopicPrefix}:drive:${driveId}`);
-    }
-    /**
-     * Read a drive manifest from its feed.
-     * Returns null if no manifest exists (new drive, or v1 user without drive feeds).
-     */
+    // ═══════════════════════════════════════════════════════════════
+    // Drive Manifest (hierarchical v2)
+    // ═══════════════════════════════════════════════════════════════
     async readDriveManifest(driveId) {
         if (!this.useFeedMode)
             return null;
@@ -658,10 +273,6 @@ export class SwarmClient {
             return null;
         }
     }
-    /**
-     * Write a drive manifest to its feed.
-     * Uses the manifest-as-reference pattern (upload JSON to /bytes, write ref to feed).
-     */
     async updateDriveManifest(driveId, manifest) {
         if (!this.useFeedMode)
             return;
@@ -669,74 +280,254 @@ export class SwarmClient {
         const { reference } = await this.uploadData(JSON.stringify(manifest));
         await this.writeFeedPayload(topic, reference);
     }
-    // ─── Feed mode (production) ────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════
+    // Identity & Node Info
+    // ═══════════════════════════════════════════════════════════════
+    getOwnerAddress() {
+        if (!this.bee.signer)
+            throw new Error("No signer configured on Bee instance");
+        const hex = this.bee.signer.publicKey().address().toHex();
+        return hex.startsWith("0x") ? hex : `0x${hex}`;
+    }
+    async getBeeNodePublicKey() {
+        const response = await fetch(`${this.bee.url}/addresses`);
+        if (!response.ok)
+            throw new Error(`Failed to get Bee node addresses: ${response.status}`);
+        const data = (await response.json());
+        return data.publicKey;
+    }
+    async getNodeWallet() {
+        const response = await fetch(`${this.bee.url}/wallet`);
+        if (!response.ok)
+            throw new Error(`Failed to get Bee wallet: ${response.status}`);
+        const data = (await response.json());
+        return { address: data.walletAddress, xBZZ: data.bzzBalance, xDAI: data.nativeTokenBalance };
+    }
+    async isHealthy() {
+        try {
+            const health = await this.bee.getHealth();
+            return health.status === "ok";
+        }
+        catch {
+            return false;
+        }
+    }
+    // ═══════════════════════════════════════════════════════════════
+    // Upload Confirmation (Tag Tracking)
+    // ═══════════════════════════════════════════════════════════════
     /**
-     * Read JSON data from a feed. The feed stores a native 32-byte reference
-     * (written by uploadReference) pointing to encrypted JSON on /bytes.
+     * Get the current status of an upload tag.
+     * Returns chunk-level progress: split, seen, stored, sent, synced.
+     */
+    async getTagStatus(tagUid) {
+        const tag = await this.bee.retrieveTag(tagUid);
+        return {
+            uid: tag.uid,
+            split: tag.split,
+            seen: tag.seen,
+            stored: tag.stored,
+            sent: tag.sent,
+            synced: tag.synced,
+            done: tag.split > 0 && tag.synced >= tag.split,
+        };
+    }
+    /**
+     * Wait for an upload to be fully confirmed by the network.
      *
-     * @param topic Feed topic
-     * @param ownerAddress Feed owner (use normalizeAddress for cross-user reads)
-     * @param options.skipDecryption - Skip decryption when downloading referenced data
+     * Polls the tag until `synced >= split` (all chunks have valid receipts
+     * from the storage neighborhood). This is REAL network confirmation —
+     * not just "the Bee node accepted the data."
+     *
+     * @param tagUid - Tag UID from uploadData({ tracked: true })
+     * @param timeoutMs - Max time to wait (default 60s)
+     * @param intervalMs - Polling interval (default 2s)
+     * @param onProgress - Optional callback for progress updates
+     */
+    async waitForConfirmation(tagUid, timeoutMs = 60_000, intervalMs = 2_000, onProgress) {
+        const start = Date.now();
+        while (Date.now() - start < timeoutMs) {
+            const status = await this.getTagStatus(tagUid);
+            if (status.split > 0) {
+                const percent = Math.round((status.synced / status.split) * 100);
+                onProgress?.({ synced: status.synced, total: status.split, percent });
+                if (status.done) {
+                    return { synced: status.synced, total: status.split, durationMs: Date.now() - start };
+                }
+            }
+            await new Promise((r) => setTimeout(r, intervalMs));
+        }
+        const final = await this.getTagStatus(tagUid);
+        throw new Error(`Upload confirmation timed out after ${timeoutMs}ms. ` +
+            `Progress: ${final.synced}/${final.split} chunks synced.`);
+    }
+    // ═══════════════════════════════════════════════════════════════
+    // Rich Node Status
+    // ═══════════════════════════════════════════════════════════════
+    /**
+     * Get detailed node status snapshot.
+     * Much richer than isHealthy() — includes mode, peers, sync rate, reachability.
+     */
+    async getNodeStatus() {
+        const response = await fetch(`${this.bee.url}/status`);
+        if (!response.ok)
+            throw new Error(`Failed to get node status: ${response.status}`);
+        const data = (await response.json());
+        return {
+            overlay: data.overlay ?? "",
+            beeMode: data.beeMode ?? "unknown",
+            isReachable: data.isReachable ?? false,
+            connectedPeers: data.connectedPeers ?? 0,
+            neighborhoodSize: data.neighborhoodSize ?? 0,
+            reserveSize: data.reserveSize ?? 0,
+            pullsyncRate: data.pullsyncRate ?? 0,
+            storageRadius: data.storageRadius ?? 0,
+        };
+    }
+    // ═══════════════════════════════════════════════════════════════
+    // Content Availability (Stewardship)
+    // ═══════════════════════════════════════════════════════════════
+    /**
+     * Check if content is still retrievable from the Swarm network.
+     * Returns true if the content can be downloaded, false if chunks are missing.
+     */
+    async isContentAvailable(reference) {
+        try {
+            const response = await fetch(`${this.bee.url}/stewardship/${reference}`);
+            if (!response.ok)
+                return false;
+            const data = (await response.json());
+            return data.isRetrievable ?? false;
+        }
+        catch {
+            return false;
+        }
+    }
+    /**
+     * Re-upload content that may no longer be available in the network.
+     * Uses the current stamp to re-stamp the chunks.
+     */
+    async reuploadContent(reference) {
+        const response = await fetch(`${this.bee.url}/stewardship/${reference}`, {
+            method: "PUT",
+            headers: { "swarm-postage-batch-id": this.batchId },
+        });
+        if (!response.ok) {
+            const text = await response.text();
+            throw new Error(`Failed to re-upload content: ${text}`);
+        }
+    }
+    async detectFeedSupport() {
+        try {
+            const topic = Topic.fromString("ph:probe:" + Date.now());
+            const owner = this.getOwnerAddress();
+            const reader = this.bee.makeFeedReader(topic, owner);
+            await reader.downloadPayload();
+            return true;
+        }
+        catch (error) {
+            if (isNotImplementedError(error))
+                return false;
+            if (isNotFoundError(error))
+                return true;
+            return false;
+        }
+    }
+    // ═══════════════════════════════════════════════════════════════
+    // Manifest Index (bytes mode)
+    // ═══════════════════════════════════════════════════════════════
+    getManifestIndex() { return new Map(this.manifestIndex); }
+    setManifestIndex(index) { this.manifestIndex = new Map(index); }
+    /** Get feed index metadata from the last readFeedJson call.
+     *  Useful for knowing where you are in the feed sequence. */
+    getLastFeedIndex() {
+        return { feedIndex: this.lastFeedIndex, feedIndexNext: this.lastFeedIndexNext };
+    }
+    // ═══════════════════════════════════════════════════════════════
+    // Delegation: Stamp methods (backward compatibility)
+    // ═══════════════════════════════════════════════════════════════
+    async getStampStatus() { return this.stamps.getStampStatus(); }
+    async topUpStamp(amount) { return this.stamps.topUpStamp(amount); }
+    async expandStamp(newDepth) { return this.stamps.expandStamp(newDepth); }
+    async getStoragePrice() { return this.stamps.getStoragePrice(); }
+    async getBzzUsdPrice() { return getBzzUsdPrice(); }
+    async estimateStampCost(depth, days) { return this.stamps.estimateStampCost(depth, days); }
+    async getStampOptions() { return this.stamps.getStampOptions(); }
+    async getBucketUtilization() { return this.stamps.getBucketUtilization(); }
+    async createStamp(amount, depth, options) { return this.stamps.createStamp(amount, depth, options); }
+    // ═══════════════════════════════════════════════════════════════
+    // Delegation: Share/Profile methods (backward compatibility)
+    // ═══════════════════════════════════════════════════════════════
+    async publishPublicProfile(addr, profile) { return this.sharing.publishPublicProfile(addr, profile); }
+    async readPublicProfile(addr) { return this.sharing.readPublicProfile(addr); }
+    async uploadSharedData(data, sender, recipient) { return this.sharing.uploadSharedData(data, sender, recipient); }
+    async downloadSharedData(ref, sender, recipient) { return this.sharing.downloadSharedData(ref, sender, recipient); }
+    async writeShareManifest(sender, recipient, manifest) { return this.sharing.writeShareManifest(sender, recipient, manifest); }
+    async readShareManifest(sender, recipient) { return this.sharing.readShareManifest(sender, recipient); }
+    /** @deprecated Use getNodeWallet() instead */
+    async getNodeWalletAddress() { return (await this.getNodeWallet()).address; }
+    /** @deprecated Use getNodeWallet() instead */
+    async getNodeBalances() { const w = await this.getNodeWallet(); return { xBZZ: w.xBZZ, xDAI: w.xDAI }; }
+    // ═══════════════════════════════════════════════════════════════
+    // Topic Helpers (public — used by ShareManager)
+    // ═══════════════════════════════════════════════════════════════
+    documentTopic(documentId) {
+        return Topic.fromString(`${this.feedTopicPrefix}:doc:${documentId}`);
+    }
+    userTopic(address) {
+        return Topic.fromString(`${this.feedTopicPrefix}:user:${address.toLowerCase()}`);
+    }
+    profileTopic(address) {
+        return Topic.fromString(`${this.feedTopicPrefix}:profile:${address.toLowerCase()}`);
+    }
+    shareTopic(fromAddress, toAddress) {
+        return Topic.fromString(`${this.feedTopicPrefix}:share:${fromAddress.toLowerCase()}:${toAddress.toLowerCase()}`);
+    }
+    driveTopic(driveId) {
+        return Topic.fromString(`${this.feedTopicPrefix}:drive:${driveId}`);
+    }
+    // ═══════════════════════════════════════════════════════════════
+    // Feed Operations (public — used by ShareManager)
+    // ═══════════════════════════════════════════════════════════════
+    /**
+     * Read JSON from a feed. The feed stores a 64-char hex reference
+     * pointing to (optionally encrypted) JSON on /bytes.
      */
     /**
-     * Read JSON data from a feed. The feed stores a 64-char hex reference
-     * (written by writeFeedPayload) pointing to encrypted JSON on /bytes.
+     * Read JSON from a feed using the native reference format.
+     * Uses downloadReference (binary 32-byte ref) for efficiency.
+     *
+     * Also captures feed index metadata (feedIndex, feedIndexNext) which
+     * can be used for pre-calculating the next write index.
      */
     async readFeedJson(topic, ownerAddress, options) {
         const reader = this.bee.makeFeedReader(topic, ownerAddress);
-        const result = await reader.downloadPayload();
-        const ref = new TextDecoder().decode(result.payload.toUint8Array()).trim();
+        const result = await reader.downloadReference();
+        const ref = result.reference.toHex();
+        // Capture feed index metadata for callers that need it
+        this.lastFeedIndex = result.feedIndex;
+        this.lastFeedIndexNext = result.feedIndexNext;
         const data = options?.skipDecryption
             ? await this.downloadData(ref, { skipDecryption: true })
             : await this.downloadData(ref);
         return JSON.parse(new TextDecoder().decode(data));
     }
-    async readManifestFromFeed(documentId) {
-        const topic = this.documentTopic(documentId);
-        const owner = this.getOwnerAddress();
-        try {
-            return await this.readFeedJson(topic, owner);
-        }
-        catch {
-            return null;
-        }
-    }
     /**
-     * Write document manifest to feed using the reference pattern.
-     *
-     * Upload manifest JSON to /bytes (encrypted), write 32-byte native reference to feed.
-     * Follows the Swarm "regenerate and publish" pattern.
-     */
-    async updateManifestViaFeed(documentId, manifest) {
-        const topic = this.documentTopic(documentId);
-        // Upload manifest to /bytes first
-        const { reference } = await this.uploadData(JSON.stringify(manifest));
-        // Write only the reference to the feed (72-byte SOC)
-        await this.writeFeedPayload(topic, reference);
-    }
-    /**
-     * Write a string payload to a feed. Used to store /bytes references
-     * as 64-char hex text in the SOC.
-     *
-     * Per Swarm docs: each feed index is write-once. bee-js finds the next
-     * index automatically. The write lock ensures only one write per topic
-     * at a time, preventing SOC conflicts from concurrent writers.
+     * Write a /bytes reference to a feed using the native reference format.
+     * Uses uploadReference (32-byte binary) — 69% smaller SOC than the legacy
+     * uploadPayload approach (64-byte hex text).
+     * Serializes writes per topic to prevent SOC conflicts.
      */
     async writeFeedPayload(topic, payload) {
         const topicHex = topic.toHex();
-        // Serialize: wait for any in-flight write to the same topic to complete
         const pending = this.feedWriteLocks.get(topicHex);
-        if (pending) {
+        if (pending)
             await pending.catch(() => { });
-        }
         const promise = (async () => {
             const writer = this.bee.makeFeedWriter(topic);
-            const data = new TextEncoder().encode(payload);
-            // Let bee-js handle index discovery automatically.
-            // Retry on 400 with backoff (previous write may need propagation time).
             for (let attempt = 0; attempt < 3; attempt++) {
                 try {
-                    await writer.uploadPayload(this.batchId, data);
+                    // Write the 32-byte reference natively (not as 64-char hex text)
+                    await writer.uploadReference(this.batchId, payload);
                     return;
                 }
                 catch (err) {
@@ -761,14 +552,28 @@ export class SwarmClient {
         }
     }
     // ─── Bytes mode (dev / testing) ────────────────────────────────
+    async readManifestFromFeed(documentId) {
+        const topic = this.documentTopic(documentId);
+        const owner = this.getOwnerAddress();
+        try {
+            return await this.readFeedJson(topic, owner);
+        }
+        catch {
+            return null;
+        }
+    }
+    async updateManifestViaFeed(documentId, manifest) {
+        const topic = this.documentTopic(documentId);
+        const { reference } = await this.uploadData(JSON.stringify(manifest));
+        await this.writeFeedPayload(topic, reference);
+    }
     async readManifestFromBytes(documentId) {
         const reference = this.manifestIndex.get(documentId);
         if (!reference)
             return null;
         try {
             const data = await this.downloadData(reference);
-            const json = new TextDecoder().decode(data);
-            return JSON.parse(json);
+            return JSON.parse(new TextDecoder().decode(data));
         }
         catch {
             return null;
@@ -780,38 +585,19 @@ export class SwarmClient {
         this.manifestIndex.set(documentId, reference);
     }
 }
-/** Normalize an address: strip 0x prefix for bee-js, lowercase */
-function normalizeAddress(addr) {
-    return addr.replace(/^0x/i, "").toLowerCase();
-}
-/**
- * Derive a 32-byte hex key for share encryption from both parties' addresses.
- * SHA-256(sender_normalized + ":" + recipient_normalized) → 64-char hex string.
- * Both sender and recipient can independently derive the same key.
- */
-async function deriveShareKey(senderAddress, recipientAddress) {
-    const material = `${normalizeAddress(senderAddress)}:${normalizeAddress(recipientAddress)}`;
-    const encoded = new TextEncoder().encode(material);
-    const hash = await crypto.subtle.digest("SHA-256", encoded);
-    const bytes = new Uint8Array(hash);
-    return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
-}
+// ─── Module-level helpers ───────────────────────────────────────
 function isNotFoundError(error) {
     if (error && typeof error === "object") {
         const e = error;
-        // Check .status (bee-js BeeResponseError)
         if ("status" in e && (e.status === 404 || e.status === 500))
             return true;
-        // Check .statusCode (axios-style)
         if ("statusCode" in e && (e.statusCode === 404 || e.statusCode === 500))
             return true;
-        // Check nested .response.status
         if ("response" in e && e.response && typeof e.response === "object") {
             const resp = e.response;
             if (resp.status === 404 || resp.status === 500)
                 return true;
         }
-        // Check error message
         if ("message" in e && typeof e.message === "string") {
             if (e.message.includes("404") || e.message.includes("Not Found"))
                 return true;
@@ -826,17 +612,5 @@ function isNotImplementedError(error) {
         return error.status === 501;
     }
     return false;
-}
-function formatDuration(seconds) {
-    if (seconds <= 0)
-        return "expired";
-    const days = Math.floor(seconds / 86400);
-    const hours = Math.floor((seconds % 86400) / 3600);
-    if (days > 0)
-        return `${days} day${days !== 1 ? "s" : ""}`;
-    if (hours > 0)
-        return `${hours} hour${hours !== 1 ? "s" : ""}`;
-    const minutes = Math.floor(seconds / 60);
-    return `${minutes} minute${minutes !== 1 ? "s" : ""}`;
 }
 //# sourceMappingURL=swarm-client.js.map

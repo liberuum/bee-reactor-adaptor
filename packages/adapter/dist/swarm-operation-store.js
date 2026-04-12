@@ -1,3 +1,4 @@
+import { createEmptyManifest } from "./types.js";
 /**
  * Write-through IOperationStore that persists operations to both a local
  * SQL store (for fast reads) and Swarm /bytes (for decentralized persistence).
@@ -9,6 +10,8 @@ export class SwarmOperationStore {
     swarmClient;
     logger;
     pendingUploads = new Map();
+    /** Per-document lock — serializes read-modify-write on the Swarm manifest */
+    manifestLocks = new Map();
     localStore;
     constructor(swarmClient, localStore, logger = console) {
         this.swarmClient = swarmClient;
@@ -17,8 +20,7 @@ export class SwarmOperationStore {
     }
     /**
      * Replace the local store after construction.
-     * Used by patchReactorBuilder to inject the Kysely stores
-     * created by buildModule() at runtime.
+     * Used to inject the Kysely stores created by buildModule() at runtime.
      */
     setLocalStore(store) {
         this.localStore = store;
@@ -65,18 +67,37 @@ export class SwarmOperationStore {
     async flush() {
         await Promise.allSettled(this.pendingUploads.values());
     }
+    /**
+     * Upload ops to Swarm and update the document manifest.
+     * Serialized per document to prevent lost-update races: two concurrent
+     * uploads for the same document would both read the same manifest,
+     * both push their batch, and the second write would overwrite the first.
+     */
     async uploadToSwarm(documentId, documentType, scope, branch, revision) {
-        // Get the operations that were just written
+        // Wait for any in-flight manifest write for this document
+        const pending = this.manifestLocks.get(documentId);
+        if (pending) {
+            await pending.catch(() => { });
+        }
+        const promise = this.doUploadToSwarm(documentId, documentType, scope, branch, revision);
+        this.manifestLocks.set(documentId, promise);
+        try {
+            await promise;
+        }
+        finally {
+            if (this.manifestLocks.get(documentId) === promise) {
+                this.manifestLocks.delete(documentId);
+            }
+        }
+    }
+    async doUploadToSwarm(documentId, documentType, scope, branch, revision) {
         const ops = await this.localStore.getSince(documentId, scope, branch, revision - 1);
         if (ops.results.length === 0)
             return;
-        // Serialize and upload to /bytes
         const payload = JSON.stringify(ops.results);
         const { reference } = await this.swarmClient.uploadData(payload);
-        // Read current manifest or create new one
         const manifest = (await this.swarmClient.readManifest(documentId)) ??
             createEmptyManifest(documentId, documentType);
-        // Append batch entry
         const endIndex = revision + ops.results.length - 1;
         manifest.operationBatches.push({
             reference,
@@ -88,18 +109,7 @@ export class SwarmOperationStore {
         });
         manifest.latestRevision[scope] = endIndex;
         manifest.updatedAt = new Date().toISOString();
-        // Update feed
         await this.swarmClient.updateManifest(documentId, manifest);
     }
-}
-function createEmptyManifest(documentId, documentType) {
-    return {
-        documentId,
-        documentType,
-        latestRevision: {},
-        operationBatches: [],
-        keyframes: [],
-        updatedAt: new Date().toISOString(),
-    };
 }
 //# sourceMappingURL=swarm-operation-store.js.map

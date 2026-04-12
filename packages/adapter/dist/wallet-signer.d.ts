@@ -1,15 +1,13 @@
 /**
- * Derives a deterministic secp256k1 Swarm signer key from an Ethereum wallet
- * signature. The same wallet + same message always produces the same key,
- * enabling cross-device document access.
- *
- * Flow:
- * 1. User connects wallet (MetaMask, etc.)
- * 2. Signs a domain-specific message via personal_sign
- * 3. keccak256(signature) produces a 32-byte secp256k1 private key
- * 4. Key is cached in IndexedDB for seamless future sessions
- * 5. On browser data clear, key is re-derived on next login (same result)
+ * Minimal interface for an EIP-1193 Ethereum provider (MetaMask, etc.).
+ * Accept this instead of hard-wiring to window.ethereum for testability.
  */
+export interface EthereumProvider {
+    request(args: {
+        method: string;
+        params?: unknown[];
+    }): Promise<unknown>;
+}
 /**
  * The stored signer entry in IndexedDB.
  */
@@ -31,7 +29,7 @@ export declare function buildSignMessage(address: string, origin?: string): stri
  * @param signature - The raw hex signature from personal_sign
  * @returns 32-byte hex private key (with 0x prefix)
  */
-export declare function deriveSwarmKey(signature: string): Promise<string>;
+export declare function deriveSwarmKey(signature: string): string;
 /**
  * Request a wallet signature and derive the Swarm key.
  * This is the main entry point for browser environments with window.ethereum.
@@ -40,7 +38,9 @@ export declare function deriveSwarmKey(signature: string): Promise<string>;
  * @param origin - The app origin for domain separation
  * @returns The derived SwarmSignerEntry
  */
-export declare function requestSwarmKeyFromWallet(address: string, origin?: string): Promise<SwarmSignerEntry>;
+export declare function requestSwarmKeyFromWallet(address: string, origin?: string, 
+/** Injectable provider for testing. Defaults to window.ethereum. */
+provider?: EthereumProvider): Promise<SwarmSignerEntry>;
 /**
  * Load a cached Swarm signer from IndexedDB.
  * Returns null if not found or if the stored address doesn't match.

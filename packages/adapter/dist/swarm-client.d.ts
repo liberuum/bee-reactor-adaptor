@@ -1,5 +1,7 @@
-import { Topic } from "@ethersphere/bee-js";
+import { Bee, Topic } from "@ethersphere/bee-js";
 import type { SwarmDocumentManifest, SwarmDriveManifest, SwarmUserManifest, SwarmPublicProfile, ShareManifest, StampStatus } from "./types.js";
+import { StampManager } from "./stamp-manager.js";
+import { ShareManager } from "./share-manager.js";
 /**
  * Thin wrapper around the Bee SDK providing the specific operations
  * needed by the reactor storage adapter.
@@ -9,6 +11,9 @@ import type { SwarmDocumentManifest, SwarmDriveManifest, SwarmUserManifest, Swar
  *   Requires a full Bee node (not dev mode).
  * - **Bytes mode** (dev/testing): Stores manifests as /bytes and maintains
  *   a local in-memory index of document -> reference. Works with `bee dev`.
+ *
+ * Stamp management is delegated to StampManager.
+ * Sharing and profiles are delegated to ShareManager.
  */
 export declare class SwarmClient {
     private readonly bee;
@@ -26,6 +31,14 @@ export declare class SwarmClient {
     private manifestIndex;
     /** Per-topic write lock — serializes feed writes to prevent concurrent index conflicts */
     private feedWriteLocks;
+    /** Feed index from the last readFeedJson call (for debugging/optimization) */
+    private lastFeedIndex;
+    /** Next feed index from the last readFeedJson call */
+    private lastFeedIndexNext;
+    /** Stamp management (status, top-up, pricing, presets) */
+    readonly stamps: StampManager;
+    /** Document sharing and public profiles */
+    readonly sharing: ShareManager;
     constructor(config: {
         beeUrl: string;
         batchId: string;
@@ -36,32 +49,36 @@ export declare class SwarmClient {
         feedTopicPrefix?: string;
         /** Enable app-layer AES-256-GCM encryption. Default: true */
         useEncryption?: boolean;
+        /** Pre-built Bee instance (for testing / dependency injection). If provided, beeUrl and signerPrivateKey are still used for encryption key derivation. */
+        bee?: Bee;
     });
     /**
      * Upload data to Swarm /bytes.
      *
      * When encryption is enabled (default), data is encrypted with AES-256-GCM
      * using the wallet-derived key BEFORE upload. The Bee node never sees plaintext.
-     *
-     * @param data - Data to upload (will be encrypted if useEncryption is true)
-     * @param options - Optional: skip encryption, enable ACT, provide history
      */
     uploadData(data: string | Uint8Array, options?: {
         act?: boolean;
         actHistoryAddress?: string;
         skipEncryption?: boolean;
+        /** Track upload progress with a tag. Returns tagUid for polling via waitForConfirmation(). */
+        tracked?: boolean;
+        /** Use deferred upload (store locally first, push to network in background).
+         *  Faster upload — returns immediately. Use with tracked:true to get confirmation. */
+        deferred?: boolean;
+        /** Erasure coding redundancy level (1-4). Higher = more chunk loss protection.
+         *  Level 1: ~1%, Level 2: ~5%, Level 3: ~10%, Level 4: ~25% */
+        redundancyLevel?: 1 | 2 | 3 | 4;
     }): Promise<{
         reference: string;
         historyAddress?: string;
+        tagUid?: number;
     }>;
     /**
      * Download data from Swarm /bytes by reference.
      *
      * Automatically detects and decrypts AES-256-GCM encrypted data (SWE prefix).
-     * Handles mixed encrypted/unencrypted content for backward compatibility.
-     *
-     * @param reference - Content reference
-     * @param options - Optional: ACT parameters, skip decryption
      */
     downloadData(reference: string, options?: {
         actPublisher?: string;
@@ -70,288 +87,205 @@ export declare class SwarmClient {
         skipDecryption?: boolean;
     }): Promise<Uint8Array>;
     /**
-     * Grant access to encrypted content for specific Ethereum public keys.
+     * Upload raw bytes without SwarmClient encryption (for ShareManager).
+     * The caller handles its own encryption with the shared key.
      */
+    uploadRawData(data: Uint8Array): Promise<{
+        reference: string;
+    }>;
+    /**
+     * Download raw bytes without SwarmClient decryption (for ShareManager).
+     * The caller handles its own decryption with the shared key.
+     */
+    downloadRawData(reference: string): Promise<Uint8Array>;
     grantAccess(granteeRef: string, historyRef: string, publicKeys: string[]): Promise<{
         ref: string;
         historyRef: string;
     }>;
-    /**
-     * Revoke access to encrypted content from specific Ethereum public keys.
-     */
     revokeAccess(granteeRef: string, historyRef: string, publicKeys: string[]): Promise<{
         ref: string;
         historyRef: string;
     }>;
-    /**
-     * Create a new grantee list for ACT access control.
-     */
     createGrantees(publicKeys: string[]): Promise<{
         ref: string;
         historyRef: string;
     }>;
-    /**
-     * Get the current grantee list (publisher only).
-     */
     getGrantees(granteeRef: string): Promise<string[]>;
-    /**
-     * Read the document manifest.
-     * Uses feeds in production, or /bytes + local index in dev mode.
-     */
     readManifest(documentId: string): Promise<SwarmDocumentManifest | null>;
-    /**
-     * Update the document manifest.
-     * Uses feeds in production, or /bytes + local index in dev mode.
-     */
     updateManifest(documentId: string, manifest: SwarmDocumentManifest): Promise<void>;
     /**
-     * Get the Ethereum address derived from the signer private key.
+     * Compact a document's manifest by merging many small operation batches
+     * into fewer large ones. Keeps recovery fast (fewer downloads).
      */
+    compactManifest(documentId: string, maxBatches?: number): Promise<boolean>;
+    readUserManifest(address: string): Promise<SwarmUserManifest | null>;
+    updateUserManifest(address: string, manifest: SwarmUserManifest): Promise<void>;
+    readDriveManifest(driveId: string): Promise<SwarmDriveManifest | null>;
+    updateDriveManifest(driveId: string, manifest: SwarmDriveManifest): Promise<void>;
     getOwnerAddress(): string;
-    /**
-     * Get the Bee node's public key (for ACT sharing — this is what other
-     * users need to grant you access to their encrypted content).
-     */
     getBeeNodePublicKey(): Promise<string>;
-    /**
-     * Get the Bee node's Gnosis Chain wallet address and balances.
-     * The wallet endpoint returns everything we need for the settings UI.
-     */
     getNodeWallet(): Promise<{
         address: string;
         xBZZ: string;
         xDAI: string;
     }>;
-    /**
-     * @deprecated Use getNodeWallet() instead
-     */
-    getNodeWalletAddress(): Promise<string>;
-    /**
-     * @deprecated Use getNodeWallet() instead
-     */
-    getNodeBalances(): Promise<{
-        xBZZ: string;
-        xDAI: string;
-    }>;
-    /**
-     * Create a new postage stamp batch. The Bee node's wallet must be funded
-     * with xBZZ and xDAI first.
-     * @param amount Per-chunk xBZZ allocation (determines duration)
-     * @param depth Batch depth (determines capacity, minimum 17)
-     */
-    createStamp(amount: string, depth: number): Promise<string>;
-    /**
-     * Check if the Bee node is reachable.
-     */
     isHealthy(): Promise<boolean>;
     /**
-     * Auto-detect whether feeds are supported by the connected node.
-     * Updates the internal mode accordingly.
+     * Get the current status of an upload tag.
+     * Returns chunk-level progress: split, seen, stored, sent, synced.
      */
+    getTagStatus(tagUid: number): Promise<{
+        uid: number;
+        split: number;
+        seen: number;
+        stored: number;
+        sent: number;
+        synced: number;
+        done: boolean;
+    }>;
+    /**
+     * Wait for an upload to be fully confirmed by the network.
+     *
+     * Polls the tag until `synced >= split` (all chunks have valid receipts
+     * from the storage neighborhood). This is REAL network confirmation —
+     * not just "the Bee node accepted the data."
+     *
+     * @param tagUid - Tag UID from uploadData({ tracked: true })
+     * @param timeoutMs - Max time to wait (default 60s)
+     * @param intervalMs - Polling interval (default 2s)
+     * @param onProgress - Optional callback for progress updates
+     */
+    waitForConfirmation(tagUid: number, timeoutMs?: number, intervalMs?: number, onProgress?: (status: {
+        synced: number;
+        total: number;
+        percent: number;
+    }) => void): Promise<{
+        synced: number;
+        total: number;
+        durationMs: number;
+    }>;
+    /**
+     * Get detailed node status snapshot.
+     * Much richer than isHealthy() — includes mode, peers, sync rate, reachability.
+     */
+    getNodeStatus(): Promise<{
+        overlay: string;
+        beeMode: "light" | "full" | "dev" | "ultra-light" | "unknown";
+        isReachable: boolean;
+        connectedPeers: number;
+        neighborhoodSize: number;
+        reserveSize: number;
+        pullsyncRate: number;
+        storageRadius: number;
+    }>;
+    /**
+     * Check if content is still retrievable from the Swarm network.
+     * Returns true if the content can be downloaded, false if chunks are missing.
+     */
+    isContentAvailable(reference: string): Promise<boolean>;
+    /**
+     * Re-upload content that may no longer be available in the network.
+     * Uses the current stamp to re-stamp the chunks.
+     */
+    reuploadContent(reference: string): Promise<void>;
     detectFeedSupport(): Promise<boolean>;
-    /**
-     * Get the local manifest index (for bytes mode).
-     * Useful for persisting the index across restarts.
-     */
     getManifestIndex(): Map<string, string>;
-    /**
-     * Restore the local manifest index (for bytes mode).
-     */
     setManifestIndex(index: Map<string, string>): void;
-    /**
-     * Read the user manifest from Swarm for a given Ethereum address.
-     * Returns null if no manifest exists.
-     */
-    readUserManifest(address: string): Promise<SwarmUserManifest | null>;
-    /**
-     * Update the user manifest on Swarm.
-     */
-    updateUserManifest(address: string, manifest: SwarmUserManifest): Promise<void>;
-    /**
-     * Get the current status of the postage stamp.
-     */
+    /** Get feed index metadata from the last readFeedJson call.
+     *  Useful for knowing where you are in the feed sequence. */
+    getLastFeedIndex(): {
+        feedIndex: unknown;
+        feedIndexNext: unknown;
+    };
     getStampStatus(): Promise<StampStatus>;
-    /**
-     * Top up the postage stamp to extend its TTL.
-     */
-    topUpStamp(additionalAmount: bigint | string): Promise<void>;
-    /**
-     * Dilute the stamp to increase capacity (trades TTL for space).
-     */
+    topUpStamp(amount: bigint | string): Promise<void>;
     expandStamp(newDepth: number): Promise<void>;
-    /**
-     * Get current storage price from the Bee node's chain state.
-     * Returns pricePerBlock (PLUR per chunk per block) and blockTime (seconds).
-     */
     getStoragePrice(): Promise<{
         pricePerBlock: number;
         blockTime: number;
     }>;
-    /**
-     * Get xBZZ/USD market price from CoinGecko.
-     * Returns null if the API is unreachable.
-     */
     getBzzUsdPrice(): Promise<number | null>;
-    /**
-     * Estimate cost for a stamp operation.
-     *
-     * @param depth - Batch depth
-     * @param days - Duration in days
-     * @returns Cost estimate in xBZZ and USD (if price available)
-     */
     estimateStampCost(depth: number, days: number): Promise<{
         xBZZ: string;
         usd: string | null;
         amountPlur: string;
     }>;
-    /**
-     * Get stamp management options with human-readable presets.
-     * Fetches current price and computes costs for common operations.
-     */
     getStampOptions(): Promise<{
         currentDepth: number;
         currentTtlSeconds: number;
         pricePerBlock: number;
         blockTime: number;
-        /** Predefined storage size options (depth → human size) */
         sizeOptions: Array<{
             depth: number;
             label: string;
             effectiveBytes: number;
         }>;
-        /** Predefined duration options with computed PLUR amounts */
         durationOptions: Array<{
             days: number;
             label: string;
             amount: string;
         }>;
     }>;
-    /**
-     * Publish the user's public profile to an UNENCRYPTED feed.
-     * The profile is keyed by the signer address (= feed owner), so
-     * anyone who knows the signer address can discover the profile.
-     *
-     * @param signerAddress - The signer's address (from getOwnerAddress())
-     * @param profile - The profile data to publish
-     */
-    publishPublicProfile(signerAddress: string, profile: SwarmPublicProfile): Promise<void>;
-    /**
-     * Read a user's public profile by their Swarm signer address.
-     * Returns null if the user hasn't published a profile yet.
-     *
-     * The signer address IS the feed owner, so this works for cross-user reads.
-     * Note: this takes a signer address, NOT an ETH wallet address.
-     *
-     * @param signerAddress - The target user's signer address (NOT their ETH wallet address)
-     */
-    readPublicProfile(signerAddress: string): Promise<SwarmPublicProfile | null>;
-    /**
-     * Upload data for sharing — encrypted with a key derived from both parties' addresses.
-     * Both sender and recipient can derive the same key: SHA-256(sender:recipient).
-     * Third parties can't decrypt without knowing both signer addresses.
-     *
-     * @param data - The operation data to share
-     * @param senderAddress - Sender's signer address
-     * @param recipientAddress - Recipient's signer address
-     */
-    uploadSharedData(data: string | Uint8Array, senderAddress: string, recipientAddress: string): Promise<{
+    getBucketUtilization(): Promise<{
+        depth: number;
+        bucketDepth: number;
+        bucketUpperBound: number;
+        buckets: Array<{
+            index: number;
+            collisions: number;
+        }>;
+        hotBuckets: Array<{
+            index: number;
+            collisions: number;
+            percentFull: number;
+        }>;
+    }>;
+    createStamp(amount: string, depth: number, options?: {
+        immutable?: boolean;
+    }): Promise<string>;
+    publishPublicProfile(addr: string, profile: SwarmPublicProfile): Promise<void>;
+    readPublicProfile(addr: string): Promise<SwarmPublicProfile | null>;
+    uploadSharedData(data: string | Uint8Array, sender: string, recipient: string): Promise<{
         reference: string;
     }>;
-    /**
-     * Download shared data and decrypt with the shared key.
-     * The key is derived from both parties' addresses: SHA-256(sender:recipient).
-     *
-     * @param reference - Swarm reference
-     * @param senderAddress - Sender's signer address
-     * @param recipientAddress - Recipient's signer address (= our address when importing)
-     */
-    downloadSharedData(reference: string, senderAddress: string, recipientAddress: string): Promise<Uint8Array>;
-    /**
-     * Write a share manifest to the share feed between sender and recipient.
-     */
-    writeShareManifest(senderAddress: string, recipientAddress: string, manifest: ShareManifest): Promise<void>;
-    /**
-     * Read the share manifest from another user.
-     * Alice reads: shareTopic(bob, alice) with owner = bob's address.
-     *
-     * Note: The share manifest is encrypted with the sender's key.
-     * The recipient needs their own copy or the manifest should use
-     * a shared encryption scheme. For now, we store it unencrypted
-     * on the feed (the feed topic is obscure enough).
-     */
-    readShareManifest(senderAddress: string, recipientAddress: string): Promise<ShareManifest | null>;
-    /**
-     * Compact a document's manifest by merging many small operation batches
-     * into fewer large ones. This keeps recovery fast (fewer downloads).
-     *
-     * Called periodically or on startup. Old batches remain on Swarm but
-     * expire naturally when the stamp runs out.
-     *
-     * @param documentId - The document to compact
-     * @param maxBatches - Don't compact if batch count is at or below this (default: 20)
-     * @returns true if compaction was performed, false if not needed
-     */
-    compactManifest(documentId: string, maxBatches?: number): Promise<boolean>;
-    /**
-     * Derive a deterministic feed topic for a document.
-     */
+    downloadSharedData(ref: string, sender: string, recipient: string): Promise<Uint8Array<ArrayBufferLike>>;
+    writeShareManifest(sender: string, recipient: string, manifest: ShareManifest): Promise<void>;
+    readShareManifest(sender: string, recipient: string): Promise<ShareManifest | null>;
+    /** @deprecated Use getNodeWallet() instead */
+    getNodeWalletAddress(): Promise<string>;
+    /** @deprecated Use getNodeWallet() instead */
+    getNodeBalances(): Promise<{
+        xBZZ: string;
+        xDAI: string;
+    }>;
     documentTopic(documentId: string): Topic;
-    /**
-     * Derive a deterministic feed topic for a user's manifest.
-     */
     userTopic(address: string): Topic;
-    /**
-     * Derive a deterministic feed topic for a user's public profile.
-     */
     profileTopic(address: string): Topic;
-    /**
-     * Derive a deterministic feed topic for shares between two users.
-     */
     shareTopic(fromAddress: string, toAddress: string): Topic;
-    /**
-     * Derive a deterministic feed topic for a drive manifest.
-     */
     driveTopic(driveId: string): Topic;
     /**
-     * Read a drive manifest from its feed.
-     * Returns null if no manifest exists (new drive, or v1 user without drive feeds).
+     * Read JSON from a feed. The feed stores a 64-char hex reference
+     * pointing to (optionally encrypted) JSON on /bytes.
      */
-    readDriveManifest(driveId: string): Promise<SwarmDriveManifest | null>;
     /**
-     * Write a drive manifest to its feed.
-     * Uses the manifest-as-reference pattern (upload JSON to /bytes, write ref to feed).
-     */
-    updateDriveManifest(driveId: string, manifest: SwarmDriveManifest): Promise<void>;
-    /**
-     * Read JSON data from a feed. The feed stores a native 32-byte reference
-     * (written by uploadReference) pointing to encrypted JSON on /bytes.
+     * Read JSON from a feed using the native reference format.
+     * Uses downloadReference (binary 32-byte ref) for efficiency.
      *
-     * @param topic Feed topic
-     * @param ownerAddress Feed owner (use normalizeAddress for cross-user reads)
-     * @param options.skipDecryption - Skip decryption when downloading referenced data
+     * Also captures feed index metadata (feedIndex, feedIndexNext) which
+     * can be used for pre-calculating the next write index.
      */
+    readFeedJson<T>(topic: Topic, ownerAddress: string, options?: {
+        skipDecryption?: boolean;
+    }): Promise<T | null>;
     /**
-     * Read JSON data from a feed. The feed stores a 64-char hex reference
-     * (written by writeFeedPayload) pointing to encrypted JSON on /bytes.
+     * Write a /bytes reference to a feed using the native reference format.
+     * Uses uploadReference (32-byte binary) — 69% smaller SOC than the legacy
+     * uploadPayload approach (64-byte hex text).
+     * Serializes writes per topic to prevent SOC conflicts.
      */
-    private readFeedJson;
+    writeFeedPayload(topic: Topic, payload: string): Promise<void>;
     private readManifestFromFeed;
-    /**
-     * Write document manifest to feed using the reference pattern.
-     *
-     * Upload manifest JSON to /bytes (encrypted), write 32-byte native reference to feed.
-     * Follows the Swarm "regenerate and publish" pattern.
-     */
     private updateManifestViaFeed;
-    /**
-     * Write a string payload to a feed. Used to store /bytes references
-     * as 64-char hex text in the SOC.
-     *
-     * Per Swarm docs: each feed index is write-once. bee-js finds the next
-     * index automatically. The write lock ensures only one write per topic
-     * at a time, preventing SOC conflicts from concurrent writers.
-     */
-    private writeFeedPayload;
     private readManifestFromBytes;
     private updateManifestViaBytes;
 }

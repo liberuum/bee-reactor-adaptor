@@ -1,0 +1,245 @@
+export class StampManager {
+    bee;
+    batchId;
+    constructor(bee, batchId) {
+        this.bee = bee;
+        this.batchId = batchId;
+    }
+    /**
+     * Get the current status of the postage stamp.
+     */
+    async getStampStatus() {
+        const batch = await this.bee.getPostageBatch(this.batchId);
+        const ttlSeconds = batch.duration.toSeconds();
+        const effectiveCapacityBytes = batch.size.toBytes();
+        const remainingBytes = batch.remainingSize.toBytes();
+        const usedBytes = effectiveCapacityBytes - remainingBytes;
+        const utilization = Math.round(batch.usage * 100);
+        let health;
+        if (ttlSeconds <= 0)
+            health = "expired";
+        else if (ttlSeconds < 86400)
+            health = "critical";
+        else if (ttlSeconds < 604800)
+            health = "warning";
+        else
+            health = "healthy";
+        // Compute total cost: amount * 2^depth / 10^16 = xBZZ
+        const amount = BigInt(batch.amount.toString());
+        const totalPlur = amount * BigInt(2 ** batch.depth);
+        const totalBzz = Number(totalPlur) / 1e16;
+        const bzzUsdPrice = await getBzzUsdPrice();
+        const totalUsd = bzzUsdPrice != null ? (totalBzz * bzzUsdPrice).toFixed(4) : null;
+        const immutable = batch.immutableFlag;
+        const warnings = [];
+        if (immutable) {
+            warnings.push("Stamp is immutable — old feed data will never be garbage collected. Mutable stamps are recommended for Swarm Connect.");
+        }
+        return {
+            batchId: this.batchId,
+            usable: batch.usable,
+            ttlSeconds,
+            ttlHuman: formatDuration(ttlSeconds),
+            utilization,
+            capacityBytes: effectiveCapacityBytes,
+            usedBytes,
+            remainingBytes,
+            capacityHuman: batch.size.toFormattedString(),
+            remainingHuman: batch.remainingSize.toFormattedString(),
+            depth: batch.depth,
+            bucketDepth: batch.bucketDepth,
+            rawUtilization: batch.utilization,
+            maxUtilization: Math.pow(2, batch.depth - batch.bucketDepth),
+            totalCostBzz: totalBzz.toFixed(6),
+            totalCostUsd: totalUsd ? `$${totalUsd}` : null,
+            bzzUsdPrice,
+            expiresAt: new Date(Date.now() + ttlSeconds * 1000).toISOString(),
+            immutable,
+            health,
+            warnings,
+        };
+    }
+    /**
+     * Get per-bucket utilization for the stamp.
+     * Returns the fill level of each of the 65,536 buckets.
+     * Useful for detecting "hot buckets" that are close to overflowing.
+     *
+     * @returns Array of bucket depths (how full each bucket is)
+     */
+    async getBucketUtilization() {
+        const batch = await this.bee.getPostageBatch(this.batchId);
+        const batchBuckets = await this.bee.getPostageBatchBuckets(this.batchId);
+        const bucketUpperBound = Math.pow(2, batch.depth - batch.bucketDepth);
+        const buckets = [];
+        const hotBuckets = [];
+        for (let i = 0; i < batchBuckets.buckets.length; i++) {
+            const bucket = batchBuckets.buckets[i];
+            const collisions = bucket.collisions;
+            buckets.push({ index: i, collisions });
+            const percentFull = Math.round((collisions / bucketUpperBound) * 100);
+            if (percentFull >= 80) {
+                hotBuckets.push({ index: i, collisions, percentFull });
+            }
+        }
+        return {
+            depth: batch.depth,
+            bucketDepth: batch.bucketDepth,
+            bucketUpperBound,
+            buckets,
+            hotBuckets,
+        };
+    }
+    /**
+     * Top up the postage stamp to extend its TTL.
+     */
+    async topUpStamp(additionalAmount) {
+        await this.bee.topUpBatch(this.batchId, additionalAmount.toString());
+    }
+    /**
+     * Dilute the stamp to increase capacity (trades TTL for space).
+     */
+    async expandStamp(newDepth) {
+        await this.bee.diluteBatch(this.batchId, newDepth);
+    }
+    /**
+     * Get current storage price from the Bee node's chain state.
+     * Returns pricePerBlock (PLUR per chunk per block) and blockTime (seconds).
+     */
+    async getStoragePrice() {
+        const chainState = await this.bee.getChainState();
+        return {
+            pricePerBlock: chainState.currentPrice,
+            blockTime: 5, // Gnosis Chain default
+        };
+    }
+    /**
+     * Estimate cost for a stamp operation.
+     *
+     * @param depth - Batch depth
+     * @param days - Duration in days
+     * @returns Cost estimate in xBZZ and USD (if price available)
+     */
+    async estimateStampCost(depth, days) {
+        const { pricePerBlock, blockTime } = await this.getStoragePrice();
+        const blocksPerDay = Math.ceil(86400 / blockTime);
+        const amountPerChunk = BigInt(pricePerBlock) * BigInt(blocksPerDay) * BigInt(days);
+        const totalPlur = amountPerChunk * BigInt(2 ** depth);
+        const xBZZ = Number(totalPlur) / 1e16;
+        const bzzPrice = await getBzzUsdPrice();
+        const usd = bzzPrice != null ? (xBZZ * bzzPrice).toFixed(4) : null;
+        return {
+            xBZZ: xBZZ.toFixed(6),
+            usd: usd ? `$${usd}` : null,
+            amountPlur: amountPerChunk.toString(),
+        };
+    }
+    /**
+     * Get stamp management options with human-readable presets.
+     * Fetches current price and computes costs for common operations.
+     */
+    async getStampOptions() {
+        const batch = await this.bee.getPostageBatch(this.batchId);
+        const chainState = await this.bee.getChainState();
+        const pricePerBlock = chainState.currentPrice;
+        const blockTime = 5; // Gnosis Chain
+        const sizeTable = [
+            { depth: 19, label: "110 MB", effectiveBytes: 110 * 1_000_000 },
+            { depth: 20, label: "680 MB", effectiveBytes: 680 * 1_000_000 },
+            { depth: 21, label: "2.6 GB", effectiveBytes: 2_600_000_000 },
+            { depth: 22, label: "7.7 GB", effectiveBytes: 7_700_000_000 },
+            { depth: 23, label: "17 GB", effectiveBytes: 17_000_000_000 },
+            { depth: 24, label: "43 GB", effectiveBytes: 43_000_000_000 },
+            { depth: 25, label: "97 GB", effectiveBytes: 97_000_000_000 },
+        ];
+        const sizeOptions = sizeTable.filter((s) => s.depth >= batch.depth);
+        const durationPresets = [1, 2, 7, 15, 30, 90];
+        const durationOptions = durationPresets.map((days) => {
+            const seconds = days * 86400;
+            const blocks = Math.ceil(seconds / blockTime);
+            const amount = BigInt(blocks) * BigInt(pricePerBlock);
+            return {
+                days,
+                label: days === 1 ? "~1 day" : `~${days} days`,
+                amount: amount.toString(),
+            };
+        });
+        return {
+            currentDepth: batch.depth,
+            currentTtlSeconds: batch.duration.toSeconds(),
+            pricePerBlock,
+            blockTime,
+            sizeOptions,
+            durationOptions,
+        };
+    }
+    /**
+     * Create a new postage stamp batch. The Bee node's wallet must be funded
+     * with xBZZ and xDAI first.
+     *
+     * Defaults to MUTABLE stamps — recommended for Swarm Connect because:
+     * - Feed updates reuse stamp slots (old feed indices get garbage collected)
+     * - Prevents stamp exhaustion from frequent manifest writes
+     * - Only the latest feed data is protected; old data expires naturally
+     *
+     * @param amount Per-chunk xBZZ allocation (determines duration)
+     * @param depth Batch depth (determines capacity, minimum 17)
+     * @param options.immutable Set to true for immutable stamp (default: false = mutable)
+     */
+    async createStamp(amount, depth, options) {
+        const immutable = options?.immutable ?? false;
+        // Always send the header explicitly — some Bee versions default to immutable when absent
+        const headers = {
+            "Immutable": String(immutable),
+        };
+        const response = await fetch(`${this.bee.url}/stamps/${amount}/${depth}`, { method: "POST", headers });
+        if (!response.ok) {
+            const text = await response.text();
+            throw new Error(`Failed to create stamp: ${text}`);
+        }
+        const data = (await response.json());
+        return data.batchID;
+    }
+}
+// ─── Helpers ────────────────────────────────────────────────────
+/**
+ * Get xBZZ/USD market price from CoinGecko.
+ * Cached for 5 minutes to avoid rate limiting (CoinGecko free tier: 10-30 req/min).
+ */
+let cachedBzzPrice = null;
+const BZZ_PRICE_CACHE_MS = 5 * 60 * 1000; // 5 minutes
+export async function getBzzUsdPrice() {
+    if (cachedBzzPrice && Date.now() - cachedBzzPrice.fetchedAt < BZZ_PRICE_CACHE_MS) {
+        return cachedBzzPrice.value;
+    }
+    try {
+        const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=swarm-bzz&vs_currencies=usd", { signal: AbortSignal.timeout(5000) });
+        if (!res.ok) {
+            // Cache the failure too so we don't hammer a rate-limited endpoint
+            cachedBzzPrice = { value: cachedBzzPrice?.value ?? null, fetchedAt: Date.now() };
+            return cachedBzzPrice.value;
+        }
+        const data = (await res.json());
+        const price = data["swarm-bzz"]?.usd ?? null;
+        cachedBzzPrice = { value: price, fetchedAt: Date.now() };
+        return price;
+    }
+    catch {
+        // On failure, keep the old cached value if we have one
+        if (!cachedBzzPrice)
+            cachedBzzPrice = { value: null, fetchedAt: Date.now() };
+        return cachedBzzPrice.value;
+    }
+}
+function formatDuration(seconds) {
+    if (seconds <= 0)
+        return "expired";
+    const days = Math.floor(seconds / 86400);
+    const hours = Math.floor((seconds % 86400) / 3600);
+    if (days > 0)
+        return `${days} day${days !== 1 ? "s" : ""}`;
+    if (hours > 0)
+        return `${hours} hour${hours !== 1 ? "s" : ""}`;
+    const minutes = Math.floor(seconds / 60);
+    return `${minutes} minute${minutes !== 1 ? "s" : ""}`;
+}
+//# sourceMappingURL=stamp-manager.js.map

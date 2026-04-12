@@ -10,6 +10,8 @@
  * 4. Key is cached in IndexedDB for seamless future sessions
  * 5. On browser data clear, key is re-derived on next login (same result)
  */
+import { hexToBytes, bytesToHex } from "./bytes-utils.js";
+import { Bytes, PrivateKey } from "@ethersphere/bee-js";
 const SWARM_KEY_DB_NAME = "swarmKeyDB";
 const SWARM_KEY_STORE_NAME = "keys";
 const SWARM_KEY_ENTRY = "swarm-signer";
@@ -33,10 +35,9 @@ export function buildSignMessage(address, origin) {
  * @param signature - The raw hex signature from personal_sign
  * @returns 32-byte hex private key (with 0x prefix)
  */
-export async function deriveSwarmKey(signature) {
-    // keccak256 of the signature bytes
+export function deriveSwarmKey(signature) {
     const sigBytes = hexToBytes(signature);
-    const hash = await keccak256(sigBytes);
+    const hash = keccak256(sigBytes);
     return "0x" + bytesToHex(hash);
 }
 /**
@@ -47,8 +48,10 @@ export async function deriveSwarmKey(signature) {
  * @param origin - The app origin for domain separation
  * @returns The derived SwarmSignerEntry
  */
-export async function requestSwarmKeyFromWallet(address, origin) {
-    const ethereum = globalThis.window?.ethereum;
+export async function requestSwarmKeyFromWallet(address, origin, 
+/** Injectable provider for testing. Defaults to window.ethereum. */
+provider) {
+    const ethereum = provider ?? globalThis.window?.ethereum;
     if (!ethereum) {
         throw new Error("No Ethereum wallet found. Please install MetaMask or another Web3 wallet.");
     }
@@ -62,9 +65,7 @@ export async function requestSwarmKeyFromWallet(address, origin) {
             address,
         ],
     });
-    const swarmPrivateKey = await deriveSwarmKey(signature);
-    // Derive public key using bee-js PrivateKey
-    const { PrivateKey } = await import("@ethersphere/bee-js");
+    const swarmPrivateKey = deriveSwarmKey(signature);
     const pk = new PrivateKey(swarmPrivateKey);
     const swarmPublicKey = pk.publicKey().toCompressedHex();
     return {
@@ -180,7 +181,7 @@ export async function getOrDeriveSwarmKey(address, origin) {
     }
     return entry;
 }
-// ─── Helpers ─────────────────────────────────────────────────────
+// ─── IndexedDB helper ───────────────────────────────────────────
 function openSwarmKeyDB() {
     return new Promise((resolve, reject) => {
         const request = indexedDB.open(SWARM_KEY_DB_NAME, 1);
@@ -194,22 +195,7 @@ function openSwarmKeyDB() {
         request.onerror = () => reject(request.error);
     });
 }
-function hexToBytes(hex) {
-    const h = hex.startsWith("0x") ? hex.slice(2) : hex;
-    const bytes = new Uint8Array(h.length / 2);
-    for (let i = 0; i < bytes.length; i++) {
-        bytes[i] = parseInt(h.substring(i * 2, i * 2 + 2), 16);
-    }
-    return bytes;
-}
-function bytesToHex(bytes) {
-    return Array.from(bytes)
-        .map((b) => b.toString(16).padStart(2, "0"))
-        .join("");
-}
-async function keccak256(data) {
-    const { Bytes } = await import("@ethersphere/bee-js");
-    const hash = Bytes.keccak256(data);
-    return hash.toUint8Array();
+function keccak256(data) {
+    return Bytes.keccak256(data).toUint8Array();
 }
 //# sourceMappingURL=wallet-signer.js.map

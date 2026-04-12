@@ -1,18 +1,4 @@
 /**
- * App-layer encryption for Swarm data using AES-256-GCM.
- *
- * Uses the user's wallet-derived key (from personal_sign → keccak256)
- * as the symmetric encryption key. Encryption happens before upload,
- * decryption after download — the Bee node never sees plaintext.
- *
- * This approach works with:
- * - Any Bee node (doesn't need to hold user keys)
- * - Public gateways (data is already encrypted)
- * - Multiple users on the same Switchboard (each has their own key)
- * - Cross-device (same wallet = same key)
- * - Node loss recovery (wallet derives the same key)
- */
-/**
  * Encrypt data with AES-256-GCM using the wallet-derived key.
  *
  * Output format: [3-byte prefix "SWE"] [12-byte IV] [ciphertext + GCM tag]

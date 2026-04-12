@@ -1,12 +1,18 @@
-export { BeeReactorAdapter } from "./bee-reactor-adapter.js";
+// ─── Core ────────────────────────────────────────────────────
 export { SwarmClient } from "./swarm-client.js";
-export { SwarmOperationStore } from "./swarm-operation-store.js";
-export { SwarmKeyframeStore } from "./swarm-keyframe-store.js";
-export { SwarmHydrator } from "./swarm-hydrator.js";
-export { SwarmSyncReadModel } from "./swarm-sync-read-model.js";
+export { StampManager, getBzzUsdPrice } from "./stamp-manager.js";
+export { ShareManager, deriveShareKey } from "./share-manager.js";
 export { SwarmConnectPlugin } from "./connect-plugin.js";
+export { hexToBytes, bytesToHex, concatBytes } from "./bytes-utils.js";
+// ─── Crypto + Wallet ────────────────────────────────────────
 export { encrypt, decrypt, isEncrypted, encryptJSON, decryptJSON, } from "./swarm-crypto.js";
 export { getOrDeriveSwarmKey, requestSwarmKeyFromWallet, loadCachedSwarmKey, cacheSwarmKey, clearCachedSwarmKey, buildSignMessage, deriveSwarmKey, } from "./wallet-signer.js";
-export { patchReactorBuilder } from "./patch-reactor-builder.js";
-export { swarmPluginProcessorBuilder } from "./swarm-plugin.js";
+// ─── Plugin (init + events + sharing) ───────────────────────
+export { initSwarmPlugin } from "./plugin/init.js";
+export { onSwarmEvent, emitSwarmEvent } from "./plugin/events.js";
+// ─── SwarmChannel (native reactor sync) ─────────────────────
+export { CompositeChannelFactory, SwarmChannel, SwarmChannelFactory, registerSwarmChannel, createSwarmSyncBuilder, } from "./channel/index.js";
+export { createEmptyManifest } from "./types.js";
+// ─── Utilities ──────────────────────────────────────────────
+export { buildFolderTree } from "./folder-tree.js";
 //# sourceMappingURL=index.js.map

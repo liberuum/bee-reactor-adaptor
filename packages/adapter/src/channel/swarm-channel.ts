@@ -429,6 +429,72 @@ export class SwarmChannel implements IChannel {
       driveName,
       preferredEditor,
     );
+
+    // Sync the UI cache so Settings shows the update immediately
+    this.syncDriveToUiCache(driveId, driveName, preferredEditor, nodes);
+  }
+
+  /**
+   * Update window.ph.swarm.userManifest with drive + doc entries
+   * so the Settings UI reflects changes without a page refresh.
+   */
+  private syncDriveToUiCache(
+    driveId: string,
+    driveName: string,
+    preferredEditor: string | undefined,
+    nodes: Array<{ id: string; kind: string; name: string; documentType?: string; parentFolder?: string | null }>,
+  ): void {
+    const ph = (globalThis as any).window?.ph;
+    if (!ph?.swarm) return;
+
+    if (!ph.swarm.userManifest) {
+      ph.swarm.userManifest = { documents: {}, drives: {}, driveManifests: {} };
+    }
+    const um = ph.swarm.userManifest;
+    const now = new Date().toISOString();
+
+    // Add drive entry
+    um.drives = um.drives ?? {};
+    um.drives[driveId] = {
+      name: driveName,
+      documentIds: [],
+      preferredEditor,
+      lastUpdated: now,
+    };
+
+    // Add drive as a document entry (Settings UI reads this)
+    um.documents = um.documents ?? {};
+    um.documents[driveId] = {
+      documentType: "powerhouse/document-drive",
+      name: driveName,
+      driveId: "",
+      lastUpdated: now,
+    };
+
+    // Add child docs + folder structure
+    const folders: Record<string, { name: string; parentFolder?: string }> = {};
+    for (const node of nodes) {
+      if (node.kind === "file") {
+        um.documents[node.id] = {
+          documentType: node.documentType ?? "unknown",
+          name: node.name,
+          driveId,
+          parentFolder: node.parentFolder ?? undefined,
+          lastUpdated: now,
+        };
+      } else if (node.kind === "folder") {
+        folders[node.id] = {
+          name: node.name,
+          parentFolder: node.parentFolder ?? undefined,
+        };
+      }
+    }
+
+    // Store folder info for the Settings tree view
+    um.driveManifests = um.driveManifests ?? {};
+    if (Object.keys(folders).length > 0) {
+      um.driveManifests[driveId] = { folders };
+    }
   }
 
   // ─── Inbox Pull (Swarm → local) ──────────────────────────────

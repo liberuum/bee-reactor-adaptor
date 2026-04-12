@@ -1,6 +1,6 @@
 {
   "name": "@liberuum-org/bee-reactor-adapter",
-  "version": "0.20.0",
+  "version": "0.21.0",
   "description": "Swarm Bee storage adapter for the Powerhouse Reactor",
   "type": "module",
   "main": "dist/index.js",

@@ -1,32 +1,94 @@
 import type { SwarmClient } from "./swarm-client.js";
 /**
- * Minimal type definitions matching the reactor's IOperationStore interface.
- * These are defined locally to avoid a hard dependency on the reactor package.
- * When integrating, the actual reactor types should be used.
+ * Minimal type definitions mirroring the Powerhouse reactor's storage interfaces.
+ * Defined locally to avoid a hard dependency on the reactor package.
+ *
+ * Source of truth: @powerhousedao/shared/document-model (actions.ts, operations.ts)
+ * and @powerhousedao/reactor (src/storage/interfaces.ts)
  */
-export interface AtomicTxn {
-    addOperations(...operations: Operation[]): void;
-}
-export interface Operation {
+/**
+ * Mirrors Action from @powerhousedao/shared/document-model/actions.ts.
+ * Every document operation wraps an Action that describes a state change.
+ */
+export interface Action {
+    /** Action ID (distinct from the operation ID) */
     id: string;
-    index: number;
-    skip: number;
+    /** Action type name (e.g. "SET_MODEL_NAME", "ADD_FILE") */
+    type: string;
+    /** Timestamp of when the action was created */
     timestampUtcMs: string;
-    hash: string;
-    error?: string;
-    resultingState?: string;
-    action: unknown;
+    /** Action payload — shape depends on the document model */
+    input: unknown;
+    /** Scope of the action (e.g. "global", "local") */
+    scope: string;
+    /** Attachments included in the action */
+    attachments?: Array<{
+        data: string;
+        mimeType: string;
+        hash: string;
+        extension?: string | null;
+        fileName?: string | null;
+    }>;
+    /** Signing context — prevOpIndex, prevOpHash, nonce, signer */
+    context?: {
+        prevOpIndex?: number;
+        prevOpHash?: string;
+        nonce?: string;
+        signer?: {
+            user: {
+                address: string;
+                networkId: string;
+            };
+            app: {
+                name: string;
+                key: string;
+            };
+        };
+    };
 }
+/**
+ * Mirrors Operation from @powerhousedao/shared/document-model/operations.ts.
+ * An immutable record of a state change, stored sequentially per document/scope/branch.
+ */
+export interface Operation {
+    /** Stable ID derived from document and action properties */
+    id: string;
+    /** Position in the operation history (reactor-local) */
+    index: number;
+    /** Number of operations skipped (for sync reshuffling) */
+    skip: number;
+    /** Timestamp of when the operation was added */
+    timestampUtcMs: string;
+    /** Hash of the resulting document state after this operation */
+    hash: string;
+    /** Error message if the action failed */
+    error?: string;
+    /** Serialized resulting state after the operation */
+    resultingState?: string;
+    /** The action that produced this operation */
+    action: Action;
+}
+/**
+ * Mirrors OperationContext from @powerhousedao/shared/document-model/operations.ts.
+ */
+export interface OperationContext {
+    documentId: string;
+    documentType: string;
+    scope: string;
+    branch: string;
+    resultingState?: string;
+    /** Global ordinal — monotonically increasing across all documents and scopes */
+    ordinal: number;
+}
+/**
+ * Mirrors OperationWithContext from @powerhousedao/shared/document-model/operations.ts.
+ */
 export interface OperationWithContext {
     operation: Operation;
-    context: {
-        documentId: string;
-        documentType: string;
-        scope: string;
-        branch: string;
-        resultingState?: string;
-        ordinal: number;
-    };
+    context: OperationContext;
+}
+export interface AtomicTxn {
+    addOperations(...operations: Operation[]): void;
 }
 export interface OperationFilter {
     actionTypes?: string[];
@@ -65,14 +127,15 @@ export declare class SwarmOperationStore implements IOperationStore {
     private readonly swarmClient;
     private readonly logger;
     private pendingUploads;
+    /** Per-document lock — serializes read-modify-write on the Swarm manifest */
+    private manifestLocks;
     private localStore;
     constructor(swarmClient: SwarmClient, localStore: IOperationStore, logger?: {
         warn: (...args: unknown[]) => void;
     });
     /**
      * Replace the local store after construction.
-     * Used by patchReactorBuilder to inject the Kysely stores
-     * created by buildModule() at runtime.
+     * Used to inject the Kysely stores created by buildModule() at runtime.
      */
     setLocalStore(store: IOperationStore): void;
     /**
@@ -90,6 +153,13 @@ export declare class SwarmOperationStore implements IOperationStore {
      * Useful for graceful shutdown.
      */
     flush(): Promise<void>;
+    /**
+     * Upload ops to Swarm and update the document manifest.
+     * Serialized per document to prevent lost-update races: two concurrent
+     * uploads for the same document would both read the same manifest,
+     * both push their batch, and the second write would overwrite the first.
+     */
     private uploadToSwarm;
+    private doUploadToSwarm;
 }
 //# sourceMappingURL=swarm-operation-store.d.ts.map

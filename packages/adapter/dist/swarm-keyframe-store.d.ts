@@ -31,8 +31,7 @@ export declare class SwarmKeyframeStore implements IKeyframeStore {
     });
     /**
      * Replace the local store after construction.
-     * Used by patchReactorBuilder to inject the Kysely stores
-     * created by buildModule() at runtime.
+     * Used to inject the Kysely stores created by buildModule() at runtime.
      */
     setLocalStore(store: IKeyframeStore): void;
     /**

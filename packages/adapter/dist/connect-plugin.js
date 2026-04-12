@@ -15,14 +15,6 @@ import { getOrDeriveSwarmKey, clearCachedSwarmKey, } from "./wallet-signer.js";
  * On logout or browser data clear:
  * - Key cache is cleared, next login re-derives from wallet
  * - Swarm data is NOT lost (same wallet = same key = same access)
- *
- * Usage:
- *   const plugin = new SwarmConnectPlugin({
- *     beeUrl: "http://localhost:1633",
- *     batchId: "your-stamp-id",
- *     useFeedMode: false,
- *   });
- *   await plugin.start(); // Call after window.ph is initialized
  */
 export class SwarmConnectPlugin {
     config;
@@ -35,17 +27,21 @@ export class SwarmConnectPlugin {
     constructor(config) {
         this.config = config;
     }
+    // ─── Access to window.ph ──────────────────────────────────────
+    /** Single accessor for the Connect app's global context */
+    get ph() {
+        return globalThis.window?.ph;
+    }
     /**
      * Start the plugin. Call after `window.ph` is initialized.
      */
     async start() {
-        const ph = globalThis.window?.ph;
-        if (!ph) {
+        if (!this.ph) {
             console.warn("[SwarmPlugin] window.ph not available yet");
             return;
         }
         // Expose swarm state on window.ph
-        ph.swarm = {
+        this.ph.swarm = {
             plugin: this,
             client: null,
             signerEntry: null,
@@ -60,7 +56,7 @@ export class SwarmConnectPlugin {
             this.initializeWithKey(this.config.signerPrivateKey);
         }
         // Check if user is already logged in
-        const renown = ph.renown;
+        const renown = this.ph.renown;
         if (renown?.user?.address) {
             await this.onUserLogin(renown.user.address);
         }
@@ -80,7 +76,7 @@ export class SwarmConnectPlugin {
         }
     }
     /**
-     * Stop the plugin and clean up.
+     * Stop the plugin and clean up all state.
      */
     stop() {
         if (this.unsubscribe) {
@@ -91,10 +87,12 @@ export class SwarmConnectPlugin {
             clearInterval(this.stampCheckInterval);
             this.stampCheckInterval = null;
         }
+        this.swarmClient = null;
+        this.signerEntry = null;
+        this.userManifest = null;
+        this.stampStatus = null;
+        this.updateWindowState();
     }
-    /**
-     * Whether the Swarm client is initialized and ready.
-     */
     isReady() {
         return this.swarmClient !== null;
     }
@@ -120,10 +118,9 @@ export class SwarmConnectPlugin {
         this.userManifest = null;
         this.updateWindowState();
     }
-    // ─── Private ───────────────────────────────────────────────────
+    // ─── Private ──────────────────────────────────────────────────
     async onUserLogin(address) {
         console.log(`[SwarmPlugin] User login: ${address.slice(0, 10)}...`);
-        // If no static key, derive from wallet (checks IndexedDB cache first)
         if (!this.config.signerPrivateKey) {
             try {
                 const origin = typeof window !== "undefined" ? window.location.origin : undefined;
@@ -138,7 +135,6 @@ export class SwarmConnectPlugin {
                 return;
             }
         }
-        // Fetch user manifest from Swarm
         if (this.swarmClient) {
             this.userManifest = await this.swarmClient.readUserManifest(address);
             if (this.userManifest) {
@@ -206,30 +202,25 @@ export class SwarmConnectPlugin {
         this.stampCheckInterval = setInterval(check, intervalMs);
     }
     updateWindowState() {
-        const ph = globalThis.window?.ph;
-        if (ph?.swarm) {
-            ph.swarm.client = this.swarmClient;
-            ph.swarm.signerEntry = this.signerEntry;
-            ph.swarm.userManifest = this.userManifest;
-            ph.swarm.stampStatus = this.stampStatus;
-            ph.swarm.ready = this.swarmClient !== null;
-        }
+        const swarm = this.ph?.swarm;
+        if (!swarm)
+            return;
+        swarm.client = this.swarmClient;
+        swarm.signerEntry = this.signerEntry;
+        swarm.userManifest = this.userManifest;
+        swarm.stampStatus = this.stampStatus;
+        swarm.ready = this.swarmClient !== null;
     }
-    /**
-     * Fetch and cache the Bee node's Gnosis wallet address and balances.
-     * Called after the Swarm client initializes so the settings UI can
-     * show funding information.
-     */
     async fetchNodeWalletInfo() {
         if (!this.swarmClient)
             return;
-        const ph = globalThis.window?.ph;
-        if (!ph?.swarm)
+        const swarm = this.ph?.swarm;
+        if (!swarm)
             return;
         try {
             const wallet = await this.swarmClient.getNodeWallet();
-            ph.swarm.nodeWallet = wallet.address;
-            ph.swarm.nodeBalances = { xBZZ: wallet.xBZZ, xDAI: wallet.xDAI };
+            swarm.nodeWallet = wallet.address;
+            swarm.nodeBalances = { xBZZ: wallet.xBZZ, xDAI: wallet.xDAI };
         }
         catch {
             // Bee node may not expose wallet endpoint (e.g. bee dev mode)

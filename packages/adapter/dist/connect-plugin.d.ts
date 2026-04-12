@@ -16,14 +16,6 @@ import type { SwarmUserManifest, StampStatus } from "./types.js";
  * On logout or browser data clear:
  * - Key cache is cleared, next login re-derives from wallet
  * - Swarm data is NOT lost (same wallet = same key = same access)
- *
- * Usage:
- *   const plugin = new SwarmConnectPlugin({
- *     beeUrl: "http://localhost:1633",
- *     batchId: "your-stamp-id",
- *     useFeedMode: false,
- *   });
- *   await plugin.start(); // Call after window.ph is initialized
  */
 export declare class SwarmConnectPlugin {
     private config;
@@ -55,17 +47,16 @@ export declare class SwarmConnectPlugin {
         /** Callback when Swarm client is ready (after key derivation) */
         onReady?: (client: SwarmClient, entry: SwarmSignerEntry) => void;
     });
+    /** Single accessor for the Connect app's global context */
+    private get ph();
     /**
      * Start the plugin. Call after `window.ph` is initialized.
      */
     start(): Promise<void>;
     /**
-     * Stop the plugin and clean up.
+     * Stop the plugin and clean up all state.
      */
     stop(): void;
-    /**
-     * Whether the Swarm client is initialized and ready.
-     */
     isReady(): boolean;
     getSwarmClient(): SwarmClient | null;
     getSignerEntry(): SwarmSignerEntry | null;
@@ -80,11 +71,6 @@ export declare class SwarmConnectPlugin {
     private initializeWithKey;
     private startStampMonitoring;
     private updateWindowState;
-    /**
-     * Fetch and cache the Bee node's Gnosis wallet address and balances.
-     * Called after the Swarm client initializes so the settings UI can
-     * show funding information.
-     */
     private fetchNodeWalletInfo;
 }
 //# sourceMappingURL=connect-plugin.d.ts.map
