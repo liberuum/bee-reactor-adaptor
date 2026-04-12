@@ -256,6 +256,10 @@ export class SwarmChannel implements IChannel {
         await this.pushSyncOperation(syncOp);
         syncOp.executed();
 
+        // Remove from outbox so ackOrdinal advances and cursor is persisted.
+        // Without this, items accumulate and the cursor stays at 0 on reload.
+        this.outbox.remove(syncOp);
+
         this.pushFailureCount = 0;
         this.pushBlocked = false;
         this.lastSuccessUtcMs = Date.now();
