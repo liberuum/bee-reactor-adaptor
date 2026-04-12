@@ -59,9 +59,10 @@ export async function createBrowserReactor(
   // Remove persisted Swarm remotes from sync_remotes before startup.
   // The GQL channelFactory doesn't know "swarm" type and would crash
   // SyncManager.startup(). We re-register them dynamically after build.
+  // KEEP sync_cursors — cursor positions must survive page reload so the
+  // outbox doesn't re-push all ops from the beginning.
   try {
     await pg.exec(`DELETE FROM reactor.sync_remotes WHERE channel_type = 'swarm'`);
-    await pg.exec(`DELETE FROM reactor.sync_cursors WHERE remote_name LIKE 'swarm:%'`);
   } catch {
     // Table may not exist yet on first run — that's fine
   }
