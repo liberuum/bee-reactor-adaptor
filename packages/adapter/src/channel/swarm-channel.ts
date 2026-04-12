@@ -98,6 +98,12 @@ export class SwarmChannel implements IChannel {
   private lastPersistedInboxOrdinal = 0;
   private lastPersistedOutboxOrdinal = 0;
 
+  // Recovery mode — skip all outbox pushes while inbox pull is in progress.
+  // After pullFromSwarm() adds ops to the inbox, the SyncManager processes
+  // them asynchronously and may trigger updateOutbox() for OTHER remotes
+  // (cross-remote ops). Those outbox items should be skipped, not re-pushed.
+  private recoveryInProgress = false;
+
   // SwarmClient — set during init() after wallet key derivation
   private swarmClient: SwarmClient | null = null;
 
@@ -273,7 +279,10 @@ export class SwarmChannel implements IChannel {
         const maxOrdinal = Math.max(
           ...syncOp.operations.map((op) => op.context?.ordinal ?? 0),
         );
-        if (maxOrdinal > 0 && maxOrdinal <= this.lastPersistedOutboxOrdinal) {
+        if (
+          (maxOrdinal > 0 && maxOrdinal <= this.lastPersistedOutboxOrdinal) ||
+          this.recoveryInProgress
+        ) {
           syncOp.started();
           syncOp.executed();
           if (maxOrdinal > this.outbox.ackOrdinal) {
@@ -281,7 +290,7 @@ export class SwarmChannel implements IChannel {
           }
           this.outbox.remove(syncOp);
           this.logger.info(
-            `[SwarmChannel] Skipped already-synced ops for ${syncOp.documentId.slice(0, 8)} (ordinal ${maxOrdinal} ≤ cursor ${this.lastPersistedOutboxOrdinal})`,
+            `[SwarmChannel] Skipped ${this.recoveryInProgress ? "recovery" : "already-synced"} ops for ${syncOp.documentId.slice(0, 8)} (ordinal ${maxOrdinal}, cursor ${this.lastPersistedOutboxOrdinal})`,
           );
           continue;
         }
@@ -549,6 +558,8 @@ export class SwarmChannel implements IChannel {
   async pullFromSwarm(): Promise<boolean> {
     if (this.isShutdown || !this.swarmClient) return false;
 
+    this.recoveryInProgress = true;
+
     const client = this.swarmClient;
     const ownerAddress = this.config.ownerAddress;
 
@@ -741,10 +752,26 @@ export class SwarmChannel implements IChannel {
       this.logger.info(`[SwarmChannel] Pulled ${newOpsCount} new ops from Swarm`);
     }
 
+    // Keep recoveryInProgress=true for a short window to catch outbox items
+    // triggered by the SyncManager processing our inbox ops asynchronously.
+    // After 5s, clear the flag and persist the outbox cursor at whatever
+    // ordinal the mailbox has reached — future reloads will skip up to there.
     // Update UI recovery flag on window.ph.swarm
     const phSwarm = (globalThis as any).window?.ph?.swarm;
-    if (phSwarm) {
-      phSwarm.recovering = newOpsCount > 0;
+
+    if (newOpsCount > 0) {
+      if (phSwarm) phSwarm.recovering = true;
+      setTimeout(() => {
+        this.recoveryInProgress = false;
+        if (phSwarm) phSwarm.recovering = false;
+        this.persistOutboxCursor().catch(() => {});
+        this.logger.info(
+          `[SwarmChannel] Recovery complete — outbox cursor persisted at ${this.outbox.ackOrdinal}`,
+        );
+      }, 5000);
+    } else {
+      this.recoveryInProgress = false;
+      if (phSwarm) phSwarm.recovering = false;
     }
 
     return newOpsCount > 0;

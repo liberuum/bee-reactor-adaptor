@@ -77,15 +77,31 @@ export async function clearSwarmStorage(
     }
   }
 
-  // Write empty user manifest (keep identity, clear data)
-  await swarmClient.updateUserManifest(ownerAddress, {
+  // Write empty user manifest with tracked upload so we can wait for propagation.
+  const emptyManifest = {
     address: currentManifest?.address ?? ownerAddress,
     beeNodePublicKey: currentManifest?.beeNodePublicKey,
     documents: {},
     drives: {},
     stamps: currentManifest?.stamps ?? {},
     updatedAt: new Date().toISOString(),
-  });
+  };
+  const payload = JSON.stringify(emptyManifest);
+  const { tagUid } = await swarmClient.uploadData(payload, { tracked: true });
+  // Write the feed pointer to the new (empty) manifest reference
+  await swarmClient.updateUserManifest(ownerAddress, emptyManifest as any);
+
+  // Wait for the empty manifest to propagate to the network.
+  // Without this, reconnect reads the OLD feed and triggers recovery.
+  if (tagUid) {
+    try {
+      console.log("[SwarmPlugin] Waiting for empty manifest to propagate...");
+      await swarmClient.waitForConfirmation(tagUid, 30_000, 1_000);
+      console.log("[SwarmPlugin] Empty manifest confirmed on network");
+    } catch {
+      console.warn("[SwarmPlugin] Manifest propagation timed out — reconnect may see stale data");
+    }
+  }
 
   // Clear UI cache
   const ph = (globalThis as any).window?.ph;
