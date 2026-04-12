@@ -355,7 +355,7 @@ export class SwarmChannel implements IChannel {
     await client.updateManifest(docId, manifest);
 
     this.logger.info(
-      `[SwarmChannel] Pushed ${ops.length} ops for ${docId.slice(0, 8)} (indices ${startIndex}-${endIndex})`,
+      `[SwarmChannel] Pushed ${ops.length} ops for ${docId.slice(0, 8)} (indices ${startIndex}-${endIndex}, outbox cursor: ${this.outbox.ackOrdinal}→${this.outbox.latestOrdinal})`,
     );
 
     // Update drive + user manifests for drive documents.
