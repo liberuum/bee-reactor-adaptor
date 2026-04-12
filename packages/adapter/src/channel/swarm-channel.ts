@@ -89,6 +89,7 @@ export class SwarmChannel implements IChannel {
 
   // Lifecycle
   private isShutdown = false;
+  private initComplete = false;
   private readonly abortController = new AbortController();
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private healthTimer: ReturnType<typeof setInterval> | null = null;
@@ -182,6 +183,11 @@ export class SwarmChannel implements IChannel {
     // Normal operation is outbox-only (push local changes to Swarm).
     // Recovery (inbox pull) is triggered explicitly by the registration
     // code in reactor.ts when drives are found on Swarm but not locally.
+
+    this.initComplete = true;
+    this.logger.info(
+      `[SwarmChannel] Init complete for "${this.remoteName}" — outbox ack: ${this.outbox.ackOrdinal}`,
+    );
   }
 
   async shutdown(): Promise<void> {
@@ -242,6 +248,13 @@ export class SwarmChannel implements IChannel {
 
   private async handleOutboxAdded(syncOps: SyncOperation[]): Promise<void> {
     if (this.isShutdown || this.connectionState !== "connected") return;
+    // Don't push until init() has loaded the cursor from storage.
+    // The SyncManager wires callbacks BEFORE init(), so outbox items
+    // may arrive with stale cursor position. Wait for init to complete.
+    if (!this.initComplete) {
+      this.logger.info(`[SwarmChannel] Outbox items deferred — init not complete yet (${syncOps.length} ops)`);
+      return;
+    }
     if (!this.swarmClient) {
       this.resolveSwarmClient();
       if (!this.swarmClient) {
@@ -256,8 +269,14 @@ export class SwarmChannel implements IChannel {
         await this.pushSyncOperation(syncOp);
         syncOp.executed();
 
-        // Remove from outbox so ackOrdinal advances and cursor is persisted.
-        // Without this, items accumulate and the cursor stays at 0 on reload.
+        // Advance the outbox cursor to the max ordinal in this batch.
+        const ordinals = syncOp.operations.map((op) => op.context?.ordinal ?? 0);
+        const maxOrdinal = ordinals.length > 0 ? Math.max(...ordinals) : 0;
+        console.log(`[SwarmChannel:${syncOp.documentId.slice(0, 8)}] ordinals in batch:`, ordinals, `max=${maxOrdinal} current ack=${this.outbox.ackOrdinal}`);
+        if (maxOrdinal > this.outbox.ackOrdinal) {
+          this.outbox.advanceOrdinal(maxOrdinal);
+          console.log(`[SwarmChannel:${syncOp.documentId.slice(0, 8)}] Advanced outbox ordinal to ${maxOrdinal}`);
+        }
         this.outbox.remove(syncOp);
 
         this.pushFailureCount = 0;
@@ -757,6 +776,7 @@ export class SwarmChannel implements IChannel {
 
   private async persistOutboxCursor(): Promise<void> {
     const current = this.outbox.ackOrdinal;
+    console.log(`[SwarmChannel:${this.remoteName.slice(6, 14)}] persistOutboxCursor: ack=${current} lastPersisted=${this.lastPersistedOutboxOrdinal} items=${this.outbox.items.length}`);
     if (current <= this.lastPersistedOutboxOrdinal) return;
     try {
       await this.cursorStorage.upsert({
@@ -766,6 +786,9 @@ export class SwarmChannel implements IChannel {
         lastSyncedAtUtcMs: Date.now(),
       });
       this.lastPersistedOutboxOrdinal = current;
-    } catch { /* best effort */ }
+      console.log(`[SwarmChannel:${this.remoteName.slice(6, 14)}] Cursor persisted: ${current}`);
+    } catch (err) {
+      console.warn(`[SwarmChannel:${this.remoteName.slice(6, 14)}] Cursor persist FAILED:`, err);
+    }
   }
 }
