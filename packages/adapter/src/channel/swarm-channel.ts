@@ -178,15 +178,11 @@ export class SwarmChannel implements IChannel {
       }).catch(() => {});
     }, HEALTH_CHECK_INTERVAL_MS);
 
-    // Inbox poll timer — pulls new operations from Swarm feeds.
-    // On a fresh device, this recovers drives + docs via reactor.load().
-    this.pollTimer = setInterval(() => {
-      if (this.connectionState === "connected") {
-        this.pollInbox().catch((err) => {
-          this.logger.warn("[SwarmChannel] Poll error:", err instanceof Error ? err.message : err);
-        });
-      }
-    }, this.config.pollIntervalMs);
+    // Inbox poll timer — only activates for recovery (fresh PGlite).
+    // Once recovery pulls ops, the poll stops. Normal sync is outbox-only.
+    // This prevents the feedback loop where the inbox re-downloads ops
+    // that the outbox just pushed.
+    this.startRecoveryPollIfNeeded();
   }
 
   async shutdown(): Promise<void> {
@@ -499,11 +495,48 @@ export class SwarmChannel implements IChannel {
 
   // ─── Inbox Pull (Swarm → local) ──────────────────────────────
 
+  /**
+   * Start inbox poll ONLY if there are no local drives (recovery scenario).
+   * Once recovery completes, the poll stops. Normal sync is outbox-only.
+   */
+  private async startRecoveryPollIfNeeded(): Promise<void> {
+    // Check if local reactor has drives
+    const ph = (globalThis as any).window?.ph;
+    const rc = ph?.reactorClient;
+    if (rc) {
+      try {
+        const drives = await rc.getDrives();
+        if (drives && drives.length > 0) {
+          this.logger.info("[SwarmChannel] Local drives exist — inbox poll skipped (outbox-only mode)");
+          return;
+        }
+      } catch { /* no drives API — proceed with poll */ }
+    }
+
+    // No local drives — start recovery poll
+    this.logger.info("[SwarmChannel] No local drives — starting inbox recovery poll");
+    this.pollTimer = setInterval(() => {
+      if (this.connectionState === "connected") {
+        this.pollInbox().then((pulled) => {
+          // Stop polling once recovery is complete (no new ops found)
+          if (!pulled && this.pollTimer) {
+            clearInterval(this.pollTimer);
+            this.pollTimer = null;
+            this.logger.info("[SwarmChannel] Recovery complete — inbox poll stopped");
+          }
+        }).catch((err) => {
+          this.logger.warn("[SwarmChannel] Poll error:", err instanceof Error ? err.message : err);
+        });
+      }
+    }, this.config.pollIntervalMs);
+  }
+
   /** Track which batch references we've already processed (per doc) */
   private processedBatches = new Set<string>();
 
   /**
    * Poll Swarm feeds for new operations not yet in the local reactor.
+   * Returns true if new ops were pulled (recovery in progress).
    *
    * Reads the user manifest → iterates document manifests → downloads
    * new operation batches → wraps as SyncOperation → adds to inbox.
@@ -512,8 +545,8 @@ export class SwarmChannel implements IChannel {
    * Batch deduplication: tracks processed batch references to avoid
    * re-downloading and re-applying the same operations.
    */
-  private async pollInbox(): Promise<void> {
-    if (this.isShutdown || !this.swarmClient) return;
+  private async pollInbox(): Promise<boolean> {
+    if (this.isShutdown || !this.swarmClient) return false;
 
     const client = this.swarmClient;
     const ownerAddress = this.config.ownerAddress;
@@ -524,9 +557,9 @@ export class SwarmChannel implements IChannel {
       userManifest = await client.readUserManifest(ownerAddress);
     } catch {
       // User manifest not found — nothing to pull
-      return;
+      return false;
     }
-    if (!userManifest) return;
+    if (!userManifest) return false;
 
     // Discover docs from user manifest + drive manifests
     const docIds = new Set<string>();
@@ -559,7 +592,7 @@ export class SwarmChannel implements IChannel {
       } catch { /* drive manifest not available */ }
     }
 
-    if (docIds.size === 0) return;
+    if (docIds.size === 0) return false;
 
     // Filter out documents that already exist in the local reactor.
     // The outbox handles pushing local ops to Swarm — the inbox should
@@ -590,7 +623,7 @@ export class SwarmChannel implements IChannel {
       }
     }
 
-    if (docIds.size === 0) return;
+    if (docIds.size === 0) return false;
 
     // Process drives first (they must exist before child docs can reference them).
     // Drives are document-drive type; all others are child documents.
@@ -712,6 +745,8 @@ export class SwarmChannel implements IChannel {
     if (phSwarm) {
       phSwarm.recovering = newOpsCount > 0;
     }
+
+    return newOpsCount > 0;
   }
 
   // ─── Helpers ──────────────────────────────────────────────────
