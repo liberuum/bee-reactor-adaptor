@@ -205,6 +205,31 @@ export async function createReactor(localPackage?: DocumentModelLib) {
     refreshReactorDataClient(reactorClientModule.client).catch((e) =>
       logger.error("@error", e),
     );
+
+    // Auto-register Swarm remotes for newly created drives.
+    // This ensures drives created AFTER the initial registration window
+    // still get synced to Swarm via SwarmChannel.
+    if ((event as any).type === "created") {
+      const sm = reactorClientModule.reactorModule?.syncModule?.syncManager;
+      const swarmState = (window.ph as any)?.swarm;
+      if (sm && swarmState?.client && swarmState?.beeUrl) {
+        for (const doc of docs) {
+          const driveId = doc?.header?.id;
+          if (!driveId) continue;
+          import("../../../adapter/src/channel/add-swarm-remote.js").then(
+            ({ addSwarmRemoteForDrive }) => {
+              addSwarmRemoteForDrive(sm, driveId, {
+                beeUrl: swarmState.beeUrl,
+                batchId: swarmState.client?.stamps?.batchId ?? "",
+                ownerAddress: (window.ph as any)?.renown?.user?.address ?? "",
+              }).catch((err: any) =>
+                console.warn(`[SwarmChannel] Auto-register drive ${driveId.slice(0, 8)} failed:`, err),
+              );
+            },
+          );
+        }
+      }
+    }
   });
 
   // Redirect when a currently-viewed document or drive is deleted remotely
@@ -339,7 +364,7 @@ export async function createReactor(localPackage?: DocumentModelLib) {
         console.log("[SwarmChannel] No syncManager — skipping drive registration");
         return;
       }
-      if (!swarmState?.ready || !swarmState?.beeUrl) {
+      if (!swarmState?.client || !swarmState?.beeUrl) {
         console.log("[SwarmChannel] Swarm not ready — will retry");
         return;
       }
