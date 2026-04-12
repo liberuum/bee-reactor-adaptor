@@ -269,13 +269,15 @@ export class SwarmChannel implements IChannel {
         await this.pushSyncOperation(syncOp);
         syncOp.executed();
 
-        // Advance the outbox cursor to the max ordinal in this batch.
-        const ordinals = syncOp.operations.map((op) => op.context?.ordinal ?? 0);
-        const maxOrdinal = ordinals.length > 0 ? Math.max(...ordinals) : 0;
-        console.log(`[SwarmChannel:${syncOp.documentId.slice(0, 8)}] ordinals in batch:`, ordinals, `max=${maxOrdinal} current ack=${this.outbox.ackOrdinal}`);
+        // Advance the outbox cursor and remove the op.
+        // Note: the SyncManager may re-push ops on reload because we delete
+        // sync_remotes (treating remotes as new). This is a performance issue,
+        // not a correctness issue — Swarm deduplicates content-addressed data.
+        const maxOrdinal = Math.max(
+          ...syncOp.operations.map((op) => op.context?.ordinal ?? 0),
+        );
         if (maxOrdinal > this.outbox.ackOrdinal) {
           this.outbox.advanceOrdinal(maxOrdinal);
-          console.log(`[SwarmChannel:${syncOp.documentId.slice(0, 8)}] Advanced outbox ordinal to ${maxOrdinal}`);
         }
         this.outbox.remove(syncOp);
 
@@ -776,7 +778,6 @@ export class SwarmChannel implements IChannel {
 
   private async persistOutboxCursor(): Promise<void> {
     const current = this.outbox.ackOrdinal;
-    console.log(`[SwarmChannel:${this.remoteName.slice(6, 14)}] persistOutboxCursor: ack=${current} lastPersisted=${this.lastPersistedOutboxOrdinal} items=${this.outbox.items.length}`);
     if (current <= this.lastPersistedOutboxOrdinal) return;
     try {
       await this.cursorStorage.upsert({
@@ -786,9 +787,6 @@ export class SwarmChannel implements IChannel {
         lastSyncedAtUtcMs: Date.now(),
       });
       this.lastPersistedOutboxOrdinal = current;
-      console.log(`[SwarmChannel:${this.remoteName.slice(6, 14)}] Cursor persisted: ${current}`);
-    } catch (err) {
-      console.warn(`[SwarmChannel:${this.remoteName.slice(6, 14)}] Cursor persist FAILED:`, err);
-    }
+    } catch { /* best effort */ }
   }
 }
