@@ -265,17 +265,32 @@ export class SwarmChannel implements IChannel {
 
     for (const syncOp of syncOps) {
       try {
+        // Skip ops that have already been synced to Swarm.
+        // On page reload, sync_remotes are deleted and re-added dynamically.
+        // syncManager.add() calls updateOutbox(remote, 0) which starts from
+        // ordinal 0 (ignoring the channel cursor), unlike startup() which
+        // respects outbox.ackOrdinal. We use our persisted cursor to filter.
+        const maxOrdinal = Math.max(
+          ...syncOp.operations.map((op) => op.context?.ordinal ?? 0),
+        );
+        if (maxOrdinal > 0 && maxOrdinal <= this.lastPersistedOutboxOrdinal) {
+          syncOp.started();
+          syncOp.executed();
+          if (maxOrdinal > this.outbox.ackOrdinal) {
+            this.outbox.advanceOrdinal(maxOrdinal);
+          }
+          this.outbox.remove(syncOp);
+          this.logger.info(
+            `[SwarmChannel] Skipped already-synced ops for ${syncOp.documentId.slice(0, 8)} (ordinal ${maxOrdinal} ≤ cursor ${this.lastPersistedOutboxOrdinal})`,
+          );
+          continue;
+        }
+
         syncOp.started();
         await this.pushSyncOperation(syncOp);
         syncOp.executed();
 
         // Advance the outbox cursor and remove the op.
-        // Note: the SyncManager may re-push ops on reload because we delete
-        // sync_remotes (treating remotes as new). This is a performance issue,
-        // not a correctness issue — Swarm deduplicates content-addressed data.
-        const maxOrdinal = Math.max(
-          ...syncOp.operations.map((op) => op.context?.ordinal ?? 0),
-        );
         if (maxOrdinal > this.outbox.ackOrdinal) {
           this.outbox.advanceOrdinal(maxOrdinal);
         }
