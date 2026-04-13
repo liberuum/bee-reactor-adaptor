@@ -101,8 +101,23 @@ export async function updateDriveManifest(
   driveName: string,
   preferredEditor?: string,
 ): Promise<void> {
-  const documents: Record<string, DriveDocumentEntry> = {};
-  const folders: Record<string, DriveFolderEntry> = {};
+  // Read existing drive manifest from Swarm and MERGE new entries.
+  // Never remove existing entries — the reactor's drive state may not
+  // have all ADD_FILE ops processed yet, so a snapshot could be partial.
+  // This ensures recovery always discovers all documents.
+  let existing: SwarmDriveManifest | null = null;
+  try {
+    existing = await client.readDriveManifest(driveId);
+  } catch { /* no existing manifest */ }
+
+  const documents: Record<string, DriveDocumentEntry> = {
+    ...(existing?.documents ?? {}),
+  };
+  const folders: Record<string, DriveFolderEntry> = {
+    ...(existing?.folders ?? {}),
+  };
+
+  const now = new Date().toISOString();
 
   for (const node of nodes) {
     if (node.kind === "folder") {
@@ -115,23 +130,23 @@ export async function updateDriveManifest(
         documentType: node.documentType ?? "unknown",
         name: node.name,
         parentFolder: node.parentFolder ?? undefined,
-        lastUpdated: new Date().toISOString(),
+        lastUpdated: now,
       };
     }
   }
 
   const manifest: SwarmDriveManifest = {
     driveId,
-    name: driveName,
-    preferredEditor,
+    name: driveName || existing?.name || driveId,
+    preferredEditor: preferredEditor ?? existing?.preferredEditor,
     documents,
     folders: Object.keys(folders).length > 0 ? folders : undefined,
-    updatedAt: new Date().toISOString(),
+    updatedAt: now,
   };
 
   await client.updateDriveManifest(driveId, manifest);
   console.log(
-    `[ManifestManager] Drive manifest updated: "${driveName}" (${driveId.slice(0, 8)}) — ${Object.keys(documents).length} docs, ${Object.keys(folders).length} folders`,
+    `[ManifestManager] Drive manifest updated: "${manifest.name}" (${driveId.slice(0, 8)}) — ${Object.keys(documents).length} docs, ${Object.keys(folders).length} folders`,
   );
 }
 
