@@ -316,12 +316,12 @@ export class SwarmClient {
   // User Manifest
   // ═══════════════════════════════════════════════════════════════
 
-  async readUserManifest(address: string): Promise<SwarmUserManifest | null> {
+  async readUserManifest(address: string, options?: { noCache?: boolean }): Promise<SwarmUserManifest | null> {
     if (this.useFeedMode) {
       const topic = this.userTopic(address);
       const owner = this.getOwnerAddress();
       try {
-        return await this.readFeedJson<SwarmUserManifest>(topic, owner);
+        return await this.readFeedJson<SwarmUserManifest>(topic, owner, { noCache: options?.noCache });
       } catch { return null; }
     }
     const key = `user:${address.toLowerCase()}`;
@@ -640,16 +640,29 @@ export class SwarmClient {
   async readFeedJson<T>(
     topic: Topic,
     ownerAddress: string,
-    options?: { skipDecryption?: boolean },
+    options?: { skipDecryption?: boolean; noCache?: boolean },
   ): Promise<T | null> {
-    const reader = this.bee.makeFeedReader(topic, ownerAddress);
+    let ref: string;
 
-    const result = await reader.downloadReference();
-    const ref = result.reference.toHex();
+    if (options?.noCache) {
+      // Bypass bee-js cache by hitting the REST API directly with no-cache header.
+      // This forces the Bee node to re-resolve the feed's latest SOC entry.
+      const topicHex = topic.toHex();
+      const res = await fetch(
+        `${this.bee.url}/feeds/${ownerAddress}/${topicHex}`,
+        { headers: { "Cache-Control": "no-cache", "Swarm-Only-Root-Chunk": "true" } },
+      );
+      if (!res.ok) throw new Error(`Feed read failed: ${res.status}`);
+      const data = (await res.json()) as { reference: string };
+      ref = data.reference;
+    } else {
+      const reader = this.bee.makeFeedReader(topic, ownerAddress);
+      const result = await reader.downloadReference();
+      ref = result.reference.toHex();
 
-    // Capture feed index metadata for callers that need it
-    this.lastFeedIndex = result.feedIndex;
-    this.lastFeedIndexNext = result.feedIndexNext;
+      this.lastFeedIndex = result.feedIndex;
+      this.lastFeedIndexNext = result.feedIndexNext;
+    }
 
     const data = options?.skipDecryption
       ? await this.downloadData(ref, { skipDecryption: true })

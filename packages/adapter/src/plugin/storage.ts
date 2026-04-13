@@ -127,7 +127,7 @@ export async function clearSwarmStorage(
   const verifyStart = Date.now();
   while (Date.now() - verifyStart < 60_000) {
     try {
-      const check = await swarmClient.readUserManifest(ownerAddress);
+      const check = await swarmClient.readUserManifest(ownerAddress, { noCache: true });
       const driveCount = Object.keys(check?.drives ?? {}).length;
       if (!check || driveCount === 0) {
         console.log("[SwarmPlugin] Empty manifest confirmed on feed");
