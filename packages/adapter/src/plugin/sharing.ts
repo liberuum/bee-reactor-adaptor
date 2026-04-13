@@ -336,7 +336,16 @@ export async function importFromUser(
 
         const userOps = opsArray
           .filter((op: any) => (op.action?.scope ?? op.scope ?? "global") === "global")
-          .map((op: any) => op.action ?? op);
+          .map((op: any) => {
+            const action = op.action ?? op;
+            // Normalize timestampUtcMs: the reactor expects a numeric epoch ms,
+            // but shared operations may have ISO strings from the original push.
+            if (action.timestampUtcMs && typeof action.timestampUtcMs === "string") {
+              const parsed = new Date(action.timestampUtcMs).getTime();
+              if (!isNaN(parsed)) action.timestampUtcMs = parsed;
+            }
+            return action;
+          });
 
         console.log(`[SwarmPlugin] Importing "${docName}" (${userOps.length} actions)`);
 
