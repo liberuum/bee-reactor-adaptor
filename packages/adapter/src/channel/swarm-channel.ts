@@ -112,6 +112,27 @@ export class SwarmChannel implements IChannel {
   private recoveryInProgress = false;
   private recoveryMaxOrdinal = 0;
 
+  // Serialize manifest writes per document to prevent read-modify-write races.
+  // Without this, concurrent pushSyncOperation calls for the same doc read
+  // the same manifest, each appends their batch, and the last write wins —
+  // losing batches from earlier concurrent writes.
+  private manifestLocks = new Map<string, Promise<void>>();
+
+  /** Serialize async work per document ID to prevent read-modify-write races. */
+  private async withManifestLock(docId: string, fn: () => Promise<void>): Promise<void> {
+    const prev = this.manifestLocks.get(docId) ?? Promise.resolve();
+    const next = prev.then(fn, fn); // run fn after previous completes (even if it failed)
+    this.manifestLocks.set(docId, next);
+    try {
+      await next;
+    } finally {
+      // Clean up if this is still the latest lock
+      if (this.manifestLocks.get(docId) === next) {
+        this.manifestLocks.delete(docId);
+      }
+    }
+  }
+
   // SwarmClient — set during init() after wallet key derivation
   private swarmClient: SwarmClient | null = null;
 
@@ -362,53 +383,56 @@ export class SwarmChannel implements IChannel {
     const docId = syncOp.documentId;
     const payload = JSON.stringify(ops);
 
-    // Upload encrypted operation batch to /bytes
+    // Upload encrypted operation batch to /bytes (can be concurrent)
     const { reference } = await client.uploadData(payload, {
       tracked: false,
       deferred: true,
     });
 
-    // Read current manifest, append batch, write back
-    let manifest = await client.readManifest(docId);
-    if (!manifest) {
-      const docType = ops[0]?.context?.documentType ?? "unknown";
-      manifest = {
-        documentId: docId,
-        documentType: docType,
-        operationBatches: [],
-        latestRevision: {},
-        keyframes: [],
-        updatedAt: new Date().toISOString(),
-      };
-    }
-
     const startIndex = ops[0]?.operation?.index ?? 0;
     const endIndex = ops[ops.length - 1]?.operation?.index ?? 0;
-
     const scope = ops[0]?.context?.scope ?? "global";
     const branch = ops[0]?.context?.branch ?? "main";
 
-    manifest.operationBatches.push({
-      reference,
-      scope,
-      branch,
-      startIndex,
-      endIndex,
-      timestamp: new Date().toISOString(),
-    });
-
-    // Update latest revision tracking
-    for (const op of ops) {
-      const scope = op.context?.scope ?? "global";
-      const idx = op.operation?.index ?? 0;
-      const current = manifest.latestRevision[scope];
-      if (current === undefined || idx > current) {
-        manifest.latestRevision[scope] = idx;
+    // Serialize manifest read-modify-write per document.
+    // Without this, concurrent pushes for the same doc race:
+    // both read manifest with N batches, both append → write N+1,
+    // second write overwrites the first → batch lost.
+    await this.withManifestLock(docId, async () => {
+      let manifest = await client.readManifest(docId);
+      if (!manifest) {
+        const docType = ops[0]?.context?.documentType ?? "unknown";
+        manifest = {
+          documentId: docId,
+          documentType: docType,
+          operationBatches: [],
+          latestRevision: {},
+          keyframes: [],
+          updatedAt: new Date().toISOString(),
+        };
       }
-    }
-    manifest.updatedAt = new Date().toISOString();
 
-    await client.updateManifest(docId, manifest);
+      manifest.operationBatches.push({
+        reference,
+        scope,
+        branch,
+        startIndex,
+        endIndex,
+        timestamp: new Date().toISOString(),
+      });
+
+      for (const op of ops) {
+        const s = op.context?.scope ?? "global";
+        const idx = op.operation?.index ?? 0;
+        const current = manifest.latestRevision[s];
+        if (current === undefined || idx > current) {
+          manifest.latestRevision[s] = idx;
+        }
+      }
+      manifest.updatedAt = new Date().toISOString();
+
+      await client.updateManifest(docId, manifest);
+    });
 
     this.logger.info(
       `[SwarmChannel] Pushed ${ops.length} ops for ${docId.slice(0, 8)} (indices ${startIndex}-${endIndex}, outbox cursor: ${this.outbox.ackOrdinal}→${this.outbox.latestOrdinal})`,
