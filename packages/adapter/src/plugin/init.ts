@@ -234,6 +234,66 @@ export async function initSwarmPlugin(): Promise<void> {
   if (!usableStamp) {
     console.log("[SwarmPlugin] No usable stamp on Bee node");
     setSwarmStatus("no-stamp", "No usable postage stamp found. Buy a stamp to start syncing to Swarm.");
+
+    // Provide a minimal client so the "Buy Stamp" UI can call createStamp()
+    // and getStampOptions() even though the full SwarmConnectPlugin hasn't initialized.
+    if (ph.swarm) {
+      ph.swarm.client = {
+        createStamp: async (amount: string, depth: number, options?: { immutable?: boolean }) => {
+          const headers: Record<string, string> = {
+            "Immutable": String(options?.immutable ?? false),
+          };
+          const response = await fetch(`${state.beeUrl}/stamps/${amount}/${depth}`, {
+            method: "POST",
+            headers,
+          });
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error(`Failed to create stamp: ${text}`);
+          }
+          const data = (await response.json()) as { batchID: string };
+          return data.batchID;
+        },
+        getStampOptions: async () => {
+          const res = await fetch(`${state.beeUrl}/chainstate`);
+          if (!res.ok) throw new Error("Failed to get chainstate");
+          const chain = (await res.json()) as { currentPrice: number; block: number };
+          const pricePerBlock = chain.currentPrice;
+          const blockTime = 5;
+          const sizeOptions = [
+            { depth: 19, label: "110 MB", effectiveBytes: 110_000_000 },
+            { depth: 20, label: "680 MB", effectiveBytes: 680_000_000 },
+            { depth: 21, label: "2.6 GB", effectiveBytes: 2_600_000_000 },
+            { depth: 22, label: "7.7 GB", effectiveBytes: 7_700_000_000 },
+            { depth: 23, label: "20 GB", effectiveBytes: 20_000_000_000 },
+            { depth: 24, label: "47 GB", effectiveBytes: 47_000_000_000 },
+            { depth: 25, label: "105 GB", effectiveBytes: 105_000_000_000 },
+          ];
+          const durationPresets = [1, 2, 7, 15, 30, 90, 180, 365];
+          // Multiply by 2 to ensure the amount exceeds the Bee node's 24h minimum
+          // validation. The currentPrice is the per-block drain rate, but the node
+          // requires a safety margin above the bare minimum (price * blocks).
+          const safetyMultiplier = 2n;
+          const durationOptions = durationPresets.map((days) => {
+            const blocks = Math.ceil((days * 86400) / blockTime);
+            const amount = BigInt(blocks) * BigInt(pricePerBlock) * safetyMultiplier;
+            return {
+              days,
+              label: days === 1 ? "~1 day" : days === 365 ? "~1 year" : `~${days} days`,
+              amount: amount.toString(),
+            };
+          });
+          return {
+            currentDepth: 17,
+            currentTtlSeconds: 0,
+            pricePerBlock,
+            blockTime,
+            sizeOptions,
+            durationOptions,
+          };
+        },
+      };
+    }
     return;
   }
 

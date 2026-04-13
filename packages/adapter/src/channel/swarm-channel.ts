@@ -402,17 +402,35 @@ export class SwarmChannel implements IChannel {
       `[SwarmChannel] Pushed ${ops.length} ops for ${docId.slice(0, 8)} (indices ${startIndex}-${endIndex}, outbox cursor: ${this.outbox.ackOrdinal}→${this.outbox.latestOrdinal})`,
     );
 
-    // Update drive + user manifests for drive documents.
-    // Drive ops contain ADD_FILE, ADD_FOLDER, MOVE_NODE etc. that define
-    // the folder structure. We extract this and write to the drive manifest.
+    // Update drive + user manifests after every push.
+    // Drive ops (ADD_FILE, SET_DRIVE_NAME) update the drive's own manifest.
+    // Child doc ops (edits to files within a drive) also need to trigger a
+    // drive manifest update so recovery can discover all child documents.
     const docType = ops[0]?.context?.documentType ?? "";
-    if (docType === "powerhouse/document-drive") {
-      try {
-        await this.updateDriveAndUserManifests(docId, ops);
-      } catch (err) {
-        this.logger.warn(
-          `[SwarmChannel] Manifest update failed for drive ${docId.slice(0, 8)}: ${err instanceof Error ? err.message : err}`,
-        );
+    const driveId = docType === "powerhouse/document-drive"
+      ? docId
+      : this.findParentDriveId(docId);
+
+    if (driveId) {
+      // Retry manifest update up to 2 times — manifest must be updated for
+      // recovery to discover documents. Without it, ops are on Swarm but
+      // unreachable during recovery.
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          await this.updateDriveAndUserManifests(driveId, ops);
+          break;
+        } catch (err) {
+          if (attempt < 2) {
+            this.logger.warn(
+              `[SwarmChannel] Manifest update retry ${attempt + 1}/3 for drive ${driveId.slice(0, 8)}: ${err instanceof Error ? err.message : err}`,
+            );
+            await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+          } else {
+            this.logger.error(
+              `[SwarmChannel] Manifest update FAILED for drive ${driveId.slice(0, 8)} after 3 attempts — recovery may miss documents: ${err instanceof Error ? err.message : err}`,
+            );
+          }
+        }
       }
     }
   }
@@ -609,9 +627,19 @@ export class SwarmChannel implements IChannel {
     // Filter out documents that already exist in the local reactor.
     // The outbox handles pushing local ops to Swarm — the inbox should
     // only pull ops for documents that need recovery (don't exist locally).
+    //
+    // Only filter docs that were present BEFORE this recovery session.
+    // During recovery, another SwarmChannel may be concurrently loading
+    // docs via its inbox — those partially-loaded docs should not be
+    // filtered out. We use processedBatches as a proxy: if we already
+    // pulled a batch for this doc, skip it (prevents duplicate pulls
+    // from the same channel).
     const ph = (globalThis as any).window?.ph;
     const reactorClient = ph?.reactorClient;
-    if (reactorClient) {
+    if (reactorClient && !this.recoveryInProgress) {
+      // Only apply filter when NOT in a recovery session (normal operation).
+      // During recovery, let all docs through — duplicates are handled by
+      // processedBatches set and reactor.load() idempotency.
       const localDocIds = new Set<string>();
       try {
         const drives = await reactorClient.getDrives();
@@ -627,7 +655,6 @@ export class SwarmChannel implements IChannel {
         }
       } catch { /* no drives */ }
 
-      // Remove locally-existing docs from the pull list
       if (localDocIds.size > 0) {
         for (const localId of localDocIds) {
           docIds.delete(localId);
@@ -778,6 +805,29 @@ export class SwarmChannel implements IChannel {
   }
 
   // ─── Helpers ──────────────────────────────────────────────────
+
+  /**
+   * Find the parent drive ID for a child document.
+   * Uses the plugin's docToDrive mapping (populated by hydration.ts),
+   * or falls back to querying the reactor for the drive that contains this doc.
+   */
+  private findParentDriveId(docId: string): string | null {
+    const ph = (globalThis as any).window?.ph;
+
+    // Fast path: plugin state has the mapping
+    const docToDrive = ph?.swarm?.docToDrive;
+    if (docToDrive instanceof Map && docToDrive.has(docId)) {
+      return docToDrive.get(docId) ?? null;
+    }
+
+    // Fallback: extract from the remote name (format: "swarm:{driveId}")
+    // The collectionId is "drive.main.{driveId}" — we can extract the driveId
+    const collectionId = this.config.collectionId;
+    const match = collectionId.match(/^drive\.main\.(.+)$/);
+    if (match) return match[1];
+
+    return null;
+  }
 
   private resolveSwarmClient(): void {
     const ph = (globalThis as any).window?.ph;

@@ -209,25 +209,27 @@ export async function createReactor(localPackage?: DocumentModelLib) {
     // Auto-register Swarm remotes for newly created drives.
     // This ensures drives created AFTER the initial registration window
     // still get synced to Swarm via SwarmChannel.
+    // Awaited to prevent race: ops must not arrive before remote is registered.
     if ((event as any).type === "created") {
       const sm = reactorClientModule.reactorModule?.syncModule?.syncManager;
       const swarmState = (window.ph as any)?.swarm;
       if (sm && swarmState?.client && swarmState?.beeUrl) {
-        for (const doc of docs) {
-          const driveId = doc?.header?.id;
-          if (!driveId) continue;
-          import("../../../adapter/src/channel/add-swarm-remote.js").then(
-            ({ addSwarmRemoteForDrive }) => {
-              addSwarmRemoteForDrive(sm, driveId, {
+        (async () => {
+          const { addSwarmRemoteForDrive } = await import("../../../adapter/src/channel/add-swarm-remote.js");
+          for (const doc of docs) {
+            const driveId = doc?.header?.id;
+            if (!driveId) continue;
+            try {
+              await addSwarmRemoteForDrive(sm, driveId, {
                 beeUrl: swarmState.beeUrl,
                 batchId: swarmState.client?.stamps?.batchId ?? "",
                 ownerAddress: (window.ph as any)?.renown?.user?.address ?? "",
-              }).catch((err: any) =>
-                console.warn(`[SwarmChannel] Auto-register drive ${driveId.slice(0, 8)} failed:`, err),
-              );
-            },
-          );
-        }
+              });
+            } catch (err: any) {
+              console.warn(`[SwarmChannel] Auto-register drive ${driveId.slice(0, 8)} failed:`, err);
+            }
+          }
+        })();
       }
     }
   });
