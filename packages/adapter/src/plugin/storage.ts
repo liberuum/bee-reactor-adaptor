@@ -64,7 +64,7 @@ export async function clearSwarmStorage(
   // Stop all SwarmChannel instances to prevent them from pushing ops
   // that overwrite the empty manifest we're about to write.
   const phRef = (globalThis as any).window?.ph;
-  const sm = phRef?.reactorClient?.reactorModule?.syncModule?.syncManager;
+  const sm = phRef?.reactorClientModule?.reactorModule?.syncModule?.syncManager;
   if (sm) {
     try {
       const remotes = sm.list();
@@ -123,16 +123,25 @@ export async function clearSwarmStorage(
   // Feed SOC writes need a short delay before the Bee node serves the new entry.
   console.log("[SwarmPlugin] Waiting for feed SOC to settle...");
   await new Promise((r) => setTimeout(r, 3_000));
+  let feedConfirmed = false;
   const verifyStart = Date.now();
-  while (Date.now() - verifyStart < 15_000) {
+  while (Date.now() - verifyStart < 20_000) {
     try {
       const check = await swarmClient.readUserManifest(ownerAddress);
-      if (!check || Object.keys(check.drives ?? {}).length === 0) {
+      const driveCount = Object.keys(check?.drives ?? {}).length;
+      if (!check || driveCount === 0) {
         console.log("[SwarmPlugin] Empty manifest confirmed on feed");
+        feedConfirmed = true;
         break;
       }
-    } catch { /* read may fail during propagation */ }
+      console.log(`[SwarmPlugin] Feed still shows ${driveCount} drive(s), retrying...`);
+    } catch {
+      console.log("[SwarmPlugin] Feed read failed, retrying...");
+    }
     await new Promise((r) => setTimeout(r, 2_000));
+  }
+  if (!feedConfirmed) {
+    console.warn("[SwarmPlugin] Feed verification timed out — empty manifest may not have propagated");
   }
 
   // Clear UI cache
