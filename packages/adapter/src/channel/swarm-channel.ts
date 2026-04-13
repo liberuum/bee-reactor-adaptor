@@ -103,6 +103,7 @@ export class SwarmChannel implements IChannel {
   // them asynchronously and may trigger updateOutbox() for OTHER remotes
   // (cross-remote ops). Those outbox items should be skipped, not re-pushed.
   private recoveryInProgress = false;
+  private recoveryMaxOrdinal = 0;
 
   // SwarmClient — set during init() after wallet key derivation
   private swarmClient: SwarmClient | null = null;
@@ -287,6 +288,9 @@ export class SwarmChannel implements IChannel {
           syncOp.executed();
           if (maxOrdinal > this.outbox.ackOrdinal) {
             this.outbox.advanceOrdinal(maxOrdinal);
+          }
+          if (this.recoveryInProgress && maxOrdinal > this.recoveryMaxOrdinal) {
+            this.recoveryMaxOrdinal = maxOrdinal;
           }
           this.outbox.remove(syncOp);
           this.logger.info(
@@ -664,6 +668,10 @@ export class SwarmChannel implements IChannel {
 
     if (docIds.size === 0) return false;
 
+    this.logger.info(
+      `[SwarmChannel] Recovery: ${docIds.size} docs to pull: ${[...docIds].map(id => id.slice(0, 8)).join(", ")}`,
+    );
+
     // Process drives first (they must exist before child docs can reference them).
     // Drives are document-drive type; all others are child documents.
     const driveIds: string[] = [];
@@ -680,10 +688,19 @@ export class SwarmChannel implements IChannel {
 
     let newOpsCount = 0;
 
-    for (const docId of orderedDocIds) {
+    for (let di = 0; di < orderedDocIds.length; di++) {
+      const docId = orderedDocIds[di];
+      // Wait between documents to let reactor.load() finish processing
+      if (di > 0) {
+        await new Promise((r) => setTimeout(r, 200));
+      }
       try {
         const manifest = await client.readManifest(docId);
-        if (!manifest || manifest.operationBatches.length === 0) continue;
+        if (!manifest || manifest.operationBatches.length === 0) {
+          this.logger.info(`[SwarmChannel] Recovery: no manifest/batches for ${docId.slice(0, 8)} (${docMeta.get(docId)?.documentType ?? "?"})`);
+          continue;
+        }
+        this.logger.info(`[SwarmChannel] Recovery: ${docId.slice(0, 8)} has ${manifest.operationBatches.length} batches`);
 
         for (const batch of manifest.operationBatches) {
           // Skip batches we've already processed
@@ -737,13 +754,21 @@ export class SwarmChannel implements IChannel {
               byScope.get(scope)!.push(op);
             }
 
-            // Process "document" scope first (creates the document), then others
+            // Process "document" scope first (creates the document), then others.
+            // Add a small delay between scopes to let reactor.load() finish
+            // processing the previous scope before the next one arrives.
             const scopeOrder = ["document", ...Array.from(byScope.keys()).filter(s => s !== "document")];
             const branch = ops[0]?.context?.branch ?? "main";
 
-            for (const scope of scopeOrder) {
+            for (let si = 0; si < scopeOrder.length; si++) {
+              const scope = scopeOrder[si];
               const scopeOps = byScope.get(scope);
               if (!scopeOps || scopeOps.length === 0) continue;
+
+              // Wait for reactor to process previous scope before adding next
+              if (si > 0) {
+                await new Promise((r) => setTimeout(r, 100));
+              }
 
               const syncOp = new SyncOperation(
                 crypto.randomUUID(),
@@ -794,13 +819,17 @@ export class SwarmChannel implements IChannel {
 
         // After recovery, advance the outbox cursor to the highest ordinal
         // seen during the recovery window. This prevents re-pushes on reload.
-        // The skip logic may have advanced ackOrdinal, or latestOrdinal may
-        // be ahead if SyncManager added items that were skipped.
-        const maxSeen = Math.max(this.outbox.ackOrdinal, this.outbox.latestOrdinal);
+        // recoveryMaxOrdinal tracks the highest ordinal from skipped outbox ops.
+        const maxSeen = Math.max(
+          this.outbox.ackOrdinal,
+          this.outbox.latestOrdinal,
+          this.recoveryMaxOrdinal,
+        );
         if (maxSeen > 0 && maxSeen > this.lastPersistedOutboxOrdinal) {
           this.outbox.advanceOrdinal(maxSeen);
           this.lastPersistedOutboxOrdinal = maxSeen;
         }
+        this.recoveryMaxOrdinal = 0;
         this.persistOutboxCursor().catch(() => {});
         this.logger.info(
           `[SwarmChannel] Recovery complete — outbox cursor persisted at ${this.outbox.ackOrdinal}`,

@@ -333,15 +333,23 @@ export class SwarmClient {
     } catch { return null; }
   }
 
-  async updateUserManifest(address: string, manifest: SwarmUserManifest): Promise<void> {
+  async updateUserManifest(
+    address: string,
+    manifest: SwarmUserManifest,
+    options?: { tracked?: boolean },
+  ): Promise<{ tagUid?: number }> {
     const payload = JSON.stringify(manifest);
     if (this.useFeedMode) {
       const topic = this.userTopic(address);
-      const { reference } = await this.uploadData(payload);
+      const { reference, tagUid } = await this.uploadData(payload, {
+        tracked: options?.tracked,
+      });
       await this.writeFeedPayload(topic, reference);
+      return { tagUid };
     } else {
       const { reference } = await this.uploadData(payload);
       this.manifestIndex.set(`user:${address.toLowerCase()}`, reference);
+      return {};
     }
   }
 

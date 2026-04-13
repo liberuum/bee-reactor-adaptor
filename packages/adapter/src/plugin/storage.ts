@@ -77,7 +77,7 @@ export async function clearSwarmStorage(
     }
   }
 
-  // Write empty user manifest with tracked upload so we can wait for propagation.
+  // Write empty user manifest with tracked upload for deterministic confirmation.
   const emptyManifest = {
     address: currentManifest?.address ?? ownerAddress,
     beeNodePublicKey: currentManifest?.beeNodePublicKey,
@@ -86,21 +86,37 @@ export async function clearSwarmStorage(
     stamps: currentManifest?.stamps ?? {},
     updatedAt: new Date().toISOString(),
   };
-  const payload = JSON.stringify(emptyManifest);
-  const { tagUid } = await swarmClient.uploadData(payload, { tracked: true });
-  // Write the feed pointer to the new (empty) manifest reference
-  await swarmClient.updateUserManifest(ownerAddress, emptyManifest as any);
+  const { tagUid } = await swarmClient.updateUserManifest(
+    ownerAddress,
+    emptyManifest as any,
+    { tracked: true },
+  );
 
-  // Wait for the empty manifest to propagate to the network.
-  // Without this, reconnect reads the OLD feed and triggers recovery.
+  // Wait for the upload to be confirmed on the network via tag API,
+  // then verify the feed reads back the empty manifest.
   if (tagUid) {
+    console.log("[SwarmPlugin] Waiting for empty manifest data to propagate...");
     try {
-      console.log("[SwarmPlugin] Waiting for empty manifest to propagate...");
       await swarmClient.waitForConfirmation(tagUid, 30_000, 1_000);
-      console.log("[SwarmPlugin] Empty manifest confirmed on network");
+      console.log("[SwarmPlugin] Data confirmed — verifying feed pointer...");
     } catch {
-      console.warn("[SwarmPlugin] Manifest propagation timed out — reconnect may see stale data");
+      console.warn("[SwarmPlugin] Data propagation timed out");
     }
+  }
+  // Verify the feed resolves to empty drives.
+  // Feed SOC writes need a short delay before the Bee node serves the new entry.
+  console.log("[SwarmPlugin] Waiting for feed SOC to settle...");
+  await new Promise((r) => setTimeout(r, 3_000));
+  const verifyStart = Date.now();
+  while (Date.now() - verifyStart < 15_000) {
+    try {
+      const check = await swarmClient.readUserManifest(ownerAddress);
+      if (!check || Object.keys(check.drives ?? {}).length === 0) {
+        console.log("[SwarmPlugin] Empty manifest confirmed on feed");
+        break;
+      }
+    } catch { /* read may fail during propagation */ }
+    await new Promise((r) => setTimeout(r, 2_000));
   }
 
   // Clear UI cache

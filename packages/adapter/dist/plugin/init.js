@@ -296,19 +296,37 @@ function applySwarmExtensions(ph, isDevMode) {
             return null;
         }
     };
-    // isContentAvailable: stewardship check — is content still retrievable?
-    ph.swarm.isContentAvailable = async (reference) => {
+    // isContentAvailable: check if a document's operation batches are retrievable.
+    // The UI passes a docId — we read its manifest to get Swarm references,
+    // then check stewardship on the actual content hashes.
+    ph.swarm.isContentAvailable = async (docId) => {
         const client = ph.swarm?.client;
         if (!client)
             return false;
-        return client.isContentAvailable(reference);
+        try {
+            const manifest = await client.readManifest(docId);
+            if (!manifest || manifest.operationBatches.length === 0)
+                return false;
+            // Check the latest batch reference
+            const latestBatch = manifest.operationBatches[manifest.operationBatches.length - 1];
+            return client.isContentAvailable(latestBatch.reference);
+        }
+        catch {
+            return false;
+        }
     };
-    // reuploadContent: re-stamp chunks for content aging out of the network
-    ph.swarm.reuploadContent = async (reference) => {
+    // reuploadContent: re-upload all operation batches for a document.
+    // The UI passes a docId — we read its manifest and re-upload each batch.
+    ph.swarm.reuploadContent = async (docId) => {
         const client = ph.swarm?.client;
         if (!client)
             throw new Error("Swarm client not connected");
-        return client.reuploadContent(reference);
+        const manifest = await client.readManifest(docId);
+        if (!manifest)
+            throw new Error("No manifest found for document");
+        for (const batch of manifest.operationBatches) {
+            await client.reuploadContent(batch.reference);
+        }
     };
     // getBucketUtilization: per-bucket fill levels and hot bucket detection
     ph.swarm.getBucketUtilization = async () => {

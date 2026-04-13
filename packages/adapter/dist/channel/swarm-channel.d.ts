@@ -45,11 +45,13 @@ export declare class SwarmChannel implements IChannel {
     private pushFailureCount;
     private pushBlocked;
     private isShutdown;
+    private initComplete;
     private readonly abortController;
     private pollTimer;
     private healthTimer;
     private lastPersistedInboxOrdinal;
     private lastPersistedOutboxOrdinal;
+    private recoveryInProgress;
     private swarmClient;
     constructor(logger: ILogger, channelId: string, remoteName: string, cursorStorage: ISyncCursorStorage, config: SwarmChannelConfig, operationIndex: IOperationIndex);
     init(): Promise<void>;
@@ -72,19 +74,23 @@ export declare class SwarmChannel implements IChannel {
      * from operations if reactor isn't accessible.
      */
     private updateDriveAndUserManifests;
+    /**
+     * Update window.ph.swarm.userManifest with drive + doc entries
+     * so the Settings UI reflects changes without a page refresh.
+     */
+    private syncDriveToUiCache;
     /** Track which batch references we've already processed (per doc) */
     private processedBatches;
     /**
-     * Poll Swarm feeds for new operations not yet in the local reactor.
-     *
-     * Reads the user manifest → iterates document manifests → downloads
-     * new operation batches → wraps as SyncOperation → adds to inbox.
+     * Pull operations from Swarm feeds for documents not in the local reactor.
+     * Called explicitly for recovery (fresh PGlite). NOT called during normal operation.
+     * Returns true if new ops were pulled.
      * The SyncManager then applies them via reactor.load().
      *
      * Batch deduplication: tracks processed batch references to avoid
      * re-downloading and re-applying the same operations.
      */
-    private pollInbox;
+    pullFromSwarm(): Promise<boolean>;
     private resolveSwarmClient;
     private checkBeeHealth;
     private persistInboxCursor;

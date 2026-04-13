@@ -26,12 +26,18 @@ export class SwarmChannel {
     pushBlocked = false;
     // Lifecycle
     isShutdown = false;
+    initComplete = false;
     abortController = new AbortController();
     pollTimer = null;
     healthTimer = null;
     // Cursor persistence tracking
     lastPersistedInboxOrdinal = 0;
     lastPersistedOutboxOrdinal = 0;
+    // Recovery mode — skip all outbox pushes while inbox pull is in progress.
+    // After pullFromSwarm() adds ops to the inbox, the SyncManager processes
+    // them asynchronously and may trigger updateOutbox() for OTHER remotes
+    // (cross-remote ops). Those outbox items should be skipped, not re-pushed.
+    recoveryInProgress = false;
     // SwarmClient — set during init() after wallet key derivation
     swarmClient = null;
     constructor(logger, channelId, remoteName, cursorStorage, config, operationIndex) {
@@ -92,15 +98,12 @@ export class SwarmChannel {
                 }
             }).catch(() => { });
         }, HEALTH_CHECK_INTERVAL_MS);
-        // Inbox poll timer — pulls new operations from Swarm feeds.
-        // On a fresh device, this recovers drives + docs via reactor.load().
-        this.pollTimer = setInterval(() => {
-            if (this.connectionState === "connected") {
-                this.pollInbox().catch((err) => {
-                    this.logger.warn("[SwarmChannel] Poll error:", err instanceof Error ? err.message : err);
-                });
-            }
-        }, this.config.pollIntervalMs);
+        // Inbox poll is NOT started automatically.
+        // Normal operation is outbox-only (push local changes to Swarm).
+        // Recovery (inbox pull) is triggered explicitly by the registration
+        // code in reactor.ts when drives are found on Swarm but not locally.
+        this.initComplete = true;
+        this.logger.info(`[SwarmChannel] Init complete for "${this.remoteName}" — outbox ack: ${this.outbox.ackOrdinal}`);
     }
     async shutdown() {
         this.isShutdown = true;
@@ -152,6 +155,13 @@ export class SwarmChannel {
     async handleOutboxAdded(syncOps) {
         if (this.isShutdown || this.connectionState !== "connected")
             return;
+        // Don't push until init() has loaded the cursor from storage.
+        // The SyncManager wires callbacks BEFORE init(), so outbox items
+        // may arrive with stale cursor position. Wait for init to complete.
+        if (!this.initComplete) {
+            this.logger.info(`[SwarmChannel] Outbox items deferred — init not complete yet (${syncOps.length} ops)`);
+            return;
+        }
         if (!this.swarmClient) {
             this.resolveSwarmClient();
             if (!this.swarmClient) {
@@ -161,9 +171,31 @@ export class SwarmChannel {
         }
         for (const syncOp of syncOps) {
             try {
+                // Skip ops that have already been synced to Swarm.
+                // On page reload, sync_remotes are deleted and re-added dynamically.
+                // syncManager.add() calls updateOutbox(remote, 0) which starts from
+                // ordinal 0 (ignoring the channel cursor), unlike startup() which
+                // respects outbox.ackOrdinal. We use our persisted cursor to filter.
+                const maxOrdinal = Math.max(...syncOp.operations.map((op) => op.context?.ordinal ?? 0));
+                if ((maxOrdinal > 0 && maxOrdinal <= this.lastPersistedOutboxOrdinal) ||
+                    this.recoveryInProgress) {
+                    syncOp.started();
+                    syncOp.executed();
+                    if (maxOrdinal > this.outbox.ackOrdinal) {
+                        this.outbox.advanceOrdinal(maxOrdinal);
+                    }
+                    this.outbox.remove(syncOp);
+                    this.logger.info(`[SwarmChannel] Skipped ${this.recoveryInProgress ? "recovery" : "already-synced"} ops for ${syncOp.documentId.slice(0, 8)} (ordinal ${maxOrdinal}, cursor ${this.lastPersistedOutboxOrdinal})`);
+                    continue;
+                }
                 syncOp.started();
                 await this.pushSyncOperation(syncOp);
                 syncOp.executed();
+                // Advance the outbox cursor and remove the op.
+                if (maxOrdinal > this.outbox.ackOrdinal) {
+                    this.outbox.advanceOrdinal(maxOrdinal);
+                }
+                this.outbox.remove(syncOp);
                 this.pushFailureCount = 0;
                 this.pushBlocked = false;
                 this.lastSuccessUtcMs = Date.now();
@@ -241,7 +273,7 @@ export class SwarmChannel {
         }
         manifest.updatedAt = new Date().toISOString();
         await client.updateManifest(docId, manifest);
-        this.logger.info(`[SwarmChannel] Pushed ${ops.length} ops for ${docId.slice(0, 8)} (indices ${startIndex}-${endIndex})`);
+        this.logger.info(`[SwarmChannel] Pushed ${ops.length} ops for ${docId.slice(0, 8)} (indices ${startIndex}-${endIndex}, outbox cursor: ${this.outbox.ackOrdinal}→${this.outbox.latestOrdinal})`);
         // Update drive + user manifests for drive documents.
         // Drive ops contain ADD_FILE, ADD_FOLDER, MOVE_NODE etc. that define
         // the folder structure. We extract this and write to the drive manifest.
@@ -297,23 +329,79 @@ export class SwarmChannel {
         await updateDriveManifest(client, driveId, nodes, driveName, preferredEditor);
         // Update user manifest (drive list)
         await ensureDriveInUserManifest(client, this.config.ownerAddress, driveId, driveName, preferredEditor);
+        // Sync the UI cache so Settings shows the update immediately
+        this.syncDriveToUiCache(driveId, driveName, preferredEditor, nodes);
+    }
+    /**
+     * Update window.ph.swarm.userManifest with drive + doc entries
+     * so the Settings UI reflects changes without a page refresh.
+     */
+    syncDriveToUiCache(driveId, driveName, preferredEditor, nodes) {
+        const ph = globalThis.window?.ph;
+        if (!ph?.swarm)
+            return;
+        if (!ph.swarm.userManifest) {
+            ph.swarm.userManifest = { documents: {}, drives: {}, driveManifests: {} };
+        }
+        const um = ph.swarm.userManifest;
+        const now = new Date().toISOString();
+        // Add drive entry
+        um.drives = um.drives ?? {};
+        um.drives[driveId] = {
+            name: driveName,
+            documentIds: [],
+            preferredEditor,
+            lastUpdated: now,
+        };
+        // Add drive as a document entry (Settings UI reads this)
+        um.documents = um.documents ?? {};
+        um.documents[driveId] = {
+            documentType: "powerhouse/document-drive",
+            name: driveName,
+            driveId: "",
+            lastUpdated: now,
+        };
+        // Add child docs + folder structure
+        const folders = {};
+        for (const node of nodes) {
+            if (node.kind === "file") {
+                um.documents[node.id] = {
+                    documentType: node.documentType ?? "unknown",
+                    name: node.name,
+                    driveId,
+                    parentFolder: node.parentFolder ?? undefined,
+                    lastUpdated: now,
+                };
+            }
+            else if (node.kind === "folder") {
+                folders[node.id] = {
+                    name: node.name,
+                    parentFolder: node.parentFolder ?? undefined,
+                };
+            }
+        }
+        // Store folder info for the Settings tree view
+        um.driveManifests = um.driveManifests ?? {};
+        if (Object.keys(folders).length > 0) {
+            um.driveManifests[driveId] = { folders };
+        }
     }
     // ─── Inbox Pull (Swarm → local) ──────────────────────────────
     /** Track which batch references we've already processed (per doc) */
     processedBatches = new Set();
     /**
-     * Poll Swarm feeds for new operations not yet in the local reactor.
-     *
-     * Reads the user manifest → iterates document manifests → downloads
-     * new operation batches → wraps as SyncOperation → adds to inbox.
+     * Pull operations from Swarm feeds for documents not in the local reactor.
+     * Called explicitly for recovery (fresh PGlite). NOT called during normal operation.
+     * Returns true if new ops were pulled.
      * The SyncManager then applies them via reactor.load().
      *
      * Batch deduplication: tracks processed batch references to avoid
      * re-downloading and re-applying the same operations.
      */
-    async pollInbox() {
+    async pullFromSwarm() {
         if (this.isShutdown || !this.swarmClient)
-            return;
+            return false;
+        this.recoveryInProgress = true;
         const client = this.swarmClient;
         const ownerAddress = this.config.ownerAddress;
         // Read user manifest to discover documents
@@ -323,10 +411,10 @@ export class SwarmChannel {
         }
         catch {
             // User manifest not found — nothing to pull
-            return;
+            return false;
         }
         if (!userManifest)
-            return;
+            return false;
         // Discover docs from user manifest + drive manifests
         const docIds = new Set();
         const docMeta = new Map();
@@ -357,7 +445,40 @@ export class SwarmChannel {
             catch { /* drive manifest not available */ }
         }
         if (docIds.size === 0)
-            return;
+            return false;
+        // Filter out documents that already exist in the local reactor.
+        // The outbox handles pushing local ops to Swarm — the inbox should
+        // only pull ops for documents that need recovery (don't exist locally).
+        const ph = globalThis.window?.ph;
+        const reactorClient = ph?.reactorClient;
+        if (reactorClient) {
+            const localDocIds = new Set();
+            try {
+                const drives = await reactorClient.getDrives();
+                for (const drive of drives ?? []) {
+                    const did = drive?.id ?? drive?.header?.id ?? drive;
+                    if (did)
+                        localDocIds.add(String(did));
+                    try {
+                        const driveDoc = await reactorClient.get(String(did));
+                        for (const node of driveDoc?.state?.global?.nodes ?? []) {
+                            if (node?.id)
+                                localDocIds.add(node.id);
+                        }
+                    }
+                    catch { /* drive not accessible */ }
+                }
+            }
+            catch { /* no drives */ }
+            // Remove locally-existing docs from the pull list
+            if (localDocIds.size > 0) {
+                for (const localId of localDocIds) {
+                    docIds.delete(localId);
+                }
+            }
+        }
+        if (docIds.size === 0)
+            return false;
         // Process drives first (they must exist before child docs can reference them).
         // Drives are document-drive type; all others are child documents.
         const driveIds = [];
@@ -457,11 +578,29 @@ export class SwarmChannel {
         if (newOpsCount > 0) {
             this.logger.info(`[SwarmChannel] Pulled ${newOpsCount} new ops from Swarm`);
         }
+        // Keep recoveryInProgress=true for a short window to catch outbox items
+        // triggered by the SyncManager processing our inbox ops asynchronously.
+        // After 5s, clear the flag and persist the outbox cursor at whatever
+        // ordinal the mailbox has reached — future reloads will skip up to there.
         // Update UI recovery flag on window.ph.swarm
         const phSwarm = globalThis.window?.ph?.swarm;
-        if (phSwarm) {
-            phSwarm.recovering = newOpsCount > 0;
+        if (newOpsCount > 0) {
+            if (phSwarm)
+                phSwarm.recovering = true;
+            setTimeout(() => {
+                this.recoveryInProgress = false;
+                if (phSwarm)
+                    phSwarm.recovering = false;
+                this.persistOutboxCursor().catch(() => { });
+                this.logger.info(`[SwarmChannel] Recovery complete — outbox cursor persisted at ${this.outbox.ackOrdinal}`);
+            }, 5000);
         }
+        else {
+            this.recoveryInProgress = false;
+            if (phSwarm)
+                phSwarm.recovering = false;
+        }
+        return newOpsCount > 0;
     }
     // ─── Helpers ──────────────────────────────────────────────────
     resolveSwarmClient() {
