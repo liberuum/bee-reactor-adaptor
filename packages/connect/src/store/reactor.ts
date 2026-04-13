@@ -314,51 +314,8 @@ export async function createReactor(localPackage?: DocumentModelLib) {
     }
     clearInterval(pollSwarmEvents);
 
-    on("sync:confirmed", (e: Record<string, unknown>) => {
-      const chunks = e.chunksTotal ? ` (${e.chunksSynced}/${e.chunksTotal} chunks)` : "";
-      toast(`"${e.docName}" synced to Swarm${chunks} in ${e.durationMs}ms`, { type: "connect-success" });
-    });
-    on("sync:error", (e: Record<string, unknown>) => {
-      toast(`Sync failed: ${e.error}`, { type: "connect-warning" });
-    });
-    on("sync:all-synced", () => {
-      toast("All documents synced to Swarm", { type: "connect-success" });
-    });
-    on("plugin:ready", (e: Record<string, unknown>) => {
-      toast("Connected to Swarm", { type: "connect-success" });
-
-      // Register Swarm sync remotes for all drives in the reactor.
-      // This enables the SyncManager to push operations to Swarm via SwarmChannel.
-      const sm = reactorClientModule.reactorModule?.syncModule?.syncManager;
-      const swarm = (window.ph as any)?.swarm;
-      if (sm && swarm?.beeUrl) {
-        addSwarmRemotesForAllDrives(sm, reactorClient, {
-          beeUrl: swarm.beeUrl,
-          batchId: swarm.client?.stamps?.batchId ?? "",
-          ownerAddress: String(e.ownerAddress ?? ""),
-        }).catch((err) =>
-          logger.warn("[SwarmChannel] Auto-register drives failed:", err),
-        );
-      }
-    });
-    // Show a one-time notification on first retry — auto-closes after 30s
-    let retryToastShown = false;
-    on("plugin:retrying", () => {
-      if (retryToastShown) return;
-      retryToastShown = true;
-      toast(
-        "Bee node not reachable. Go to Settings \u2192 Swarm Storage to configure your node URL.",
-        { type: "connect-warning", autoClose: 30000 } as any,
-      );
-    });
-    on("storage:cleared", () => {
-      toast("Swarm storage cleared", { type: "connect-success" });
-    });
-
-    logger.info("[SwarmPlugin] Toast notifications active");
-
-    // Register Swarm remotes for drives — retry until drives exist.
-    // Drives may not exist yet if hydration is still running.
+    // Define registerSwarmRemotes before event handlers that reference it.
+    // Register Swarm remotes for drives — includes Swarm discovery + recovery.
     const registerSwarmRemotes = async () => {
       const swarmState = (window.ph as any)?.swarm;
       const sm = reactorClientModule.reactorModule?.syncModule?.syncManager;
@@ -382,7 +339,6 @@ export async function createReactor(localPackage?: DocumentModelLib) {
       }).filter(Boolean);
 
       // If no local drives, check Swarm user manifest for recovery.
-      // This is the "new device" case — PGlite is empty, drives are on Swarm.
       let driveIds = localDriveIds;
       if (driveIds.length === 0 && swarmState.client) {
         try {
@@ -423,7 +379,6 @@ export async function createReactor(localPackage?: DocumentModelLib) {
         console.log(`[SwarmChannel] Registered ${registered} Swarm remote(s)`);
 
         // If this was a recovery (drives from Swarm, not local), trigger one pull.
-        // Skip if clearSwarmStorage set skipRecovery (empty manifest hasn't propagated yet).
         const phAny = window.ph as any;
         if (localDriveIds.length === 0 && !phAny?._skipSwarmRecovery) {
           console.log("[SwarmChannel] Recovery mode — triggering inbox pull");
@@ -440,6 +395,42 @@ export async function createReactor(localPackage?: DocumentModelLib) {
       }
       return registered > 0;
     };
+
+    on("sync:confirmed", (e: Record<string, unknown>) => {
+      const chunks = e.chunksTotal ? ` (${e.chunksSynced}/${e.chunksTotal} chunks)` : "";
+      toast(`"${e.docName}" synced to Swarm${chunks} in ${e.durationMs}ms`, { type: "connect-success" });
+    });
+    on("sync:error", (e: Record<string, unknown>) => {
+      toast(`Sync failed: ${e.error}`, { type: "connect-warning" });
+    });
+    on("sync:all-synced", () => {
+      toast("All documents synced to Swarm", { type: "connect-success" });
+    });
+    on("plugin:ready", () => {
+      toast("Connected to Swarm", { type: "connect-success" });
+
+      // Run the full registration flow (including Swarm discovery + recovery).
+      // This is critical when the plugin takes longer to initialize than the
+      // 30s retry window (e.g., wallet signature prompt delays).
+      registerSwarmRemotes().catch((err) =>
+        logger.warn("[SwarmChannel] Plugin-ready registration failed:", err),
+      );
+    });
+    // Show a one-time notification on first retry — auto-closes after 30s
+    let retryToastShown = false;
+    on("plugin:retrying", () => {
+      if (retryToastShown) return;
+      retryToastShown = true;
+      toast(
+        "Bee node not reachable. Go to Settings \u2192 Swarm Storage to configure your node URL.",
+        { type: "connect-warning", autoClose: 30000 } as any,
+      );
+    });
+    on("storage:cleared", () => {
+      toast("Swarm storage cleared", { type: "connect-success" });
+    });
+
+    logger.info("[SwarmPlugin] Toast notifications active");
 
     // Try immediately, then retry every 3s up to 30s (drives may be hydrating)
     let attempts = 0;

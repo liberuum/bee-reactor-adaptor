@@ -10,7 +10,16 @@ import { restoreFolderStructure } from "./hydration.js";
 
 /** Read Bee URL from window.ph.swarm (set by plugin init) */
 function getBeeUrl(): string {
-  return (globalThis as any).window?.ph?.swarm?.beeUrl ?? "http://localhost:1633";
+  const ph = (globalThis as any).window?.ph;
+  // Check ph.swarm.beeUrl first (set by applySwarmExtensions), then localStorage
+  // (persisted across page loads), then fallback to localhost.
+  try {
+    return ph?.swarm?.beeUrl
+      ?? localStorage.getItem("swarm:beeUrl")
+      ?? "http://localhost:1633";
+  } catch {
+    return "http://localhost:1633";
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════

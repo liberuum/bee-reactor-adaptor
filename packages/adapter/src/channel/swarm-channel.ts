@@ -791,6 +791,16 @@ export class SwarmChannel implements IChannel {
       setTimeout(() => {
         this.recoveryInProgress = false;
         if (phSwarm) phSwarm.recovering = false;
+
+        // After recovery, advance the outbox cursor to the highest ordinal
+        // seen during the recovery window. This prevents re-pushes on reload.
+        // The skip logic may have advanced ackOrdinal, or latestOrdinal may
+        // be ahead if SyncManager added items that were skipped.
+        const maxSeen = Math.max(this.outbox.ackOrdinal, this.outbox.latestOrdinal);
+        if (maxSeen > 0 && maxSeen > this.lastPersistedOutboxOrdinal) {
+          this.outbox.advanceOrdinal(maxSeen);
+          this.lastPersistedOutboxOrdinal = maxSeen;
+        }
         this.persistOutboxCursor().catch(() => {});
         this.logger.info(
           `[SwarmChannel] Recovery complete — outbox cursor persisted at ${this.outbox.ackOrdinal}`,
