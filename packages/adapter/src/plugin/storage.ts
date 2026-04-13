@@ -122,10 +122,10 @@ export async function clearSwarmStorage(
   // Verify the feed resolves to empty drives.
   // Feed SOC writes need a short delay before the Bee node serves the new entry.
   console.log("[SwarmPlugin] Waiting for feed SOC to settle...");
-  await new Promise((r) => setTimeout(r, 3_000));
+  await new Promise((r) => setTimeout(r, 5_000));
   let feedConfirmed = false;
   const verifyStart = Date.now();
-  while (Date.now() - verifyStart < 20_000) {
+  while (Date.now() - verifyStart < 60_000) {
     try {
       const check = await swarmClient.readUserManifest(ownerAddress);
       const driveCount = Object.keys(check?.drives ?? {}).length;
@@ -151,14 +151,16 @@ export async function clearSwarmStorage(
     ph.swarm.syncStatus = {};
   }
 
-  console.log("[SwarmPlugin] Swarm storage cleared — reconnecting...");
-
-  // Auto-reconnect so SwarmChannel re-registers drives
-  if (ph?.swarm?.reconnect) {
-    try {
-      await ph.swarm.reconnect();
-    } catch (err) {
-      console.warn("[SwarmPlugin] Auto-reconnect after clear failed:", err);
+  if (feedConfirmed) {
+    console.log("[SwarmPlugin] Swarm storage cleared — reconnecting...");
+    if (ph?.swarm?.reconnect) {
+      try {
+        await ph.swarm.reconnect();
+      } catch (err) {
+        console.warn("[SwarmPlugin] Auto-reconnect after clear failed:", err);
+      }
     }
+  } else {
+    console.log("[SwarmPlugin] Swarm storage cleared — feed not yet propagated. Refresh the page to verify.");
   }
 }
