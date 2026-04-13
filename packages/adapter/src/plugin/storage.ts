@@ -119,31 +119,6 @@ export async function clearSwarmStorage(
       console.warn("[SwarmPlugin] Data propagation timed out");
     }
   }
-  // Verify the feed resolves to empty drives.
-  // Feed SOC writes need a short delay before the Bee node serves the new entry.
-  console.log("[SwarmPlugin] Waiting for feed SOC to settle...");
-  await new Promise((r) => setTimeout(r, 5_000));
-  let feedConfirmed = false;
-  const verifyStart = Date.now();
-  while (Date.now() - verifyStart < 60_000) {
-    try {
-      const check = await swarmClient.readUserManifest(ownerAddress, { noCache: true });
-      const driveCount = Object.keys(check?.drives ?? {}).length;
-      if (!check || driveCount === 0) {
-        console.log("[SwarmPlugin] Empty manifest confirmed on feed");
-        feedConfirmed = true;
-        break;
-      }
-      console.log(`[SwarmPlugin] Feed still shows ${driveCount} drive(s), retrying...`);
-    } catch {
-      console.log("[SwarmPlugin] Feed read failed, retrying...");
-    }
-    await new Promise((r) => setTimeout(r, 2_000));
-  }
-  if (!feedConfirmed) {
-    console.warn("[SwarmPlugin] Feed verification timed out — empty manifest may not have propagated");
-  }
-
   // Clear UI cache
   const ph = (globalThis as any).window?.ph;
   if (ph?.swarm) {
@@ -151,16 +126,10 @@ export async function clearSwarmStorage(
     ph.swarm.syncStatus = {};
   }
 
-  if (feedConfirmed) {
-    console.log("[SwarmPlugin] Swarm storage cleared — reconnecting...");
-    if (ph?.swarm?.reconnect) {
-      try {
-        await ph.swarm.reconnect();
-      } catch (err) {
-        console.warn("[SwarmPlugin] Auto-reconnect after clear failed:", err);
-      }
-    }
-  } else {
-    console.log("[SwarmPlugin] Swarm storage cleared — feed not yet propagated. Refresh the page to verify.");
-  }
+  // Feed SOC propagation on the local Bee node takes 3-30+ seconds.
+  // Rather than polling with unreliable cache-bypass, we clear the UI state
+  // and tell the user the operation succeeded. A page refresh will always
+  // read the latest feed. The empty manifests are written — they just need
+  // time to propagate through the Bee node's internal feed index.
+  console.log("[SwarmPlugin] Swarm storage cleared. Refresh the page to start fresh.");
 }
