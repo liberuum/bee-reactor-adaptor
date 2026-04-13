@@ -349,11 +349,10 @@ export async function importFromUser(
             // - Plain: op itself
             const action = op.operation?.action ?? op.action ?? op;
 
-            // Normalize timestampUtcMs: the reactor expects a numeric epoch ms,
-            // but shared operations may have ISO strings from the original push.
-            if (action.timestampUtcMs && typeof action.timestampUtcMs === "string") {
-              const parsed = new Date(action.timestampUtcMs).getTime();
-              if (!isNaN(parsed)) action.timestampUtcMs = parsed;
+            // Normalize timestampUtcMs: the reactor expects an ISO string,
+            // but shared operations may have numeric epoch ms from the push.
+            if (action.timestampUtcMs && typeof action.timestampUtcMs === "number") {
+              action.timestampUtcMs = new Date(action.timestampUtcMs).toISOString();
             }
             // Also normalize nested context.timestampUtcMs if present
             if (action.context?.signer) {
