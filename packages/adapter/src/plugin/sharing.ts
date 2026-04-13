@@ -335,14 +335,30 @@ export async function importFromUser(
         const opsArray = Array.isArray(rawOps) ? rawOps : [rawOps];
 
         const userOps = opsArray
-          .filter((op: any) => (op.action?.scope ?? op.scope ?? "global") === "global")
+          .filter((op: any) => {
+            // Support both formats:
+            // - OperationWithContext: { operation: { action: { scope } }, context: { scope } }
+            // - Plain action: { scope, type, input }
+            const scope = op.operation?.action?.scope ?? op.context?.scope ?? op.action?.scope ?? op.scope ?? "global";
+            return scope === "global";
+          })
           .map((op: any) => {
-            const action = op.action ?? op;
+            // Extract the plain action from whichever format we have:
+            // - OperationWithContext: op.operation.action
+            // - Wrapped: op.action
+            // - Plain: op itself
+            const action = op.operation?.action ?? op.action ?? op;
+
             // Normalize timestampUtcMs: the reactor expects a numeric epoch ms,
             // but shared operations may have ISO strings from the original push.
             if (action.timestampUtcMs && typeof action.timestampUtcMs === "string") {
               const parsed = new Date(action.timestampUtcMs).getTime();
               if (!isNaN(parsed)) action.timestampUtcMs = parsed;
+            }
+            // Also normalize nested context.timestampUtcMs if present
+            if (action.context?.signer) {
+              // Strip the outer context wrapper — execute() doesn't need it
+              delete action.context;
             }
             return action;
           });
