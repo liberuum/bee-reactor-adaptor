@@ -61,6 +61,22 @@ export async function clearSwarmStorage(
   swarmClient: SwarmClient,
   ownerAddress: string,
 ): Promise<void> {
+  // Stop all SwarmChannel instances to prevent them from pushing ops
+  // that overwrite the empty manifest we're about to write.
+  const phRef = (globalThis as any).window?.ph;
+  const sm = phRef?.reactorClient?.reactorModule?.syncModule?.syncManager;
+  if (sm) {
+    try {
+      const remotes = sm.list();
+      for (const remote of remotes) {
+        if ((remote.channel as any)?.shutdown) {
+          await (remote.channel as any).shutdown();
+        }
+      }
+      console.log("[SwarmPlugin] Stopped SwarmChannel instances before clearing");
+    } catch { /* best effort */ }
+  }
+
   const currentManifest = await swarmClient.readUserManifest(ownerAddress);
 
   // Clear each drive manifest feed

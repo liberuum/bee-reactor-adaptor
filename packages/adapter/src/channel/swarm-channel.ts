@@ -98,6 +98,13 @@ export class SwarmChannel implements IChannel {
   private lastPersistedInboxOrdinal = 0;
   private lastPersistedOutboxOrdinal = 0;
 
+  // Frozen cursor from init() — used ONLY for the skip logic in handleOutboxAdded.
+  // This value never changes after init, so it correctly represents what was
+  // pushed in previous sessions. Using lastPersistedOutboxOrdinal for skipping
+  // is wrong because it gets updated during the session when child doc ops push
+  // (advancing the cursor), then drive ops at lower ordinals get incorrectly skipped.
+  private initOutboxCursor = 0;
+
   // Recovery mode — skip all outbox pushes while inbox pull is in progress.
   // After pullFromSwarm() adds ops to the inbox, the SyncManager processes
   // them asynchronously and may trigger updateOutbox() for OTHER remotes
@@ -159,6 +166,7 @@ export class SwarmChannel implements IChannel {
     this.outbox.init(outboxCursor?.cursorOrdinal ?? 0);
     this.lastPersistedInboxOrdinal = inboxCursor?.cursorOrdinal ?? 0;
     this.lastPersistedOutboxOrdinal = outboxCursor?.cursorOrdinal ?? 0;
+    this.initOutboxCursor = outboxCursor?.cursorOrdinal ?? 0;
 
     this.logger.info(
       `[SwarmChannel] Cursors loaded — inbox: ${this.inbox.ackOrdinal}, outbox: ${this.outbox.ackOrdinal}`,
@@ -281,7 +289,7 @@ export class SwarmChannel implements IChannel {
           ...syncOp.operations.map((op) => op.context?.ordinal ?? 0),
         );
         if (
-          (maxOrdinal > 0 && maxOrdinal <= this.lastPersistedOutboxOrdinal) ||
+          (maxOrdinal > 0 && maxOrdinal <= this.initOutboxCursor) ||
           this.recoveryInProgress
         ) {
           syncOp.started();
@@ -294,7 +302,7 @@ export class SwarmChannel implements IChannel {
           }
           this.outbox.remove(syncOp);
           this.logger.info(
-            `[SwarmChannel] Skipped ${this.recoveryInProgress ? "recovery" : "already-synced"} ops for ${syncOp.documentId.slice(0, 8)} (ordinal ${maxOrdinal}, cursor ${this.lastPersistedOutboxOrdinal})`,
+            `[SwarmChannel] Skipped ${this.recoveryInProgress ? "recovery" : "already-synced"} ops for ${syncOp.documentId.slice(0, 8)} (ordinal ${maxOrdinal}, cursor ${this.initOutboxCursor})`,
           );
           continue;
         }
@@ -688,22 +696,18 @@ export class SwarmChannel implements IChannel {
 
     let newOpsCount = 0;
 
-    for (let di = 0; di < orderedDocIds.length; di++) {
-      const docId = orderedDocIds[di];
-      // Wait between documents to let reactor.load() finish processing
-      if (di > 0) {
-        await new Promise((r) => setTimeout(r, 200));
-      }
+    for (const docId of orderedDocIds) {
       try {
         const manifest = await client.readManifest(docId);
-        if (!manifest || manifest.operationBatches.length === 0) {
-          this.logger.info(`[SwarmChannel] Recovery: no manifest/batches for ${docId.slice(0, 8)} (${docMeta.get(docId)?.documentType ?? "?"})`);
-          continue;
-        }
-        this.logger.info(`[SwarmChannel] Recovery: ${docId.slice(0, 8)} has ${manifest.operationBatches.length} batches`);
+        if (!manifest || manifest.operationBatches.length === 0) continue;
+
+        // Collect ALL ops from ALL batches for this document first,
+        // then sort by scope (document first) and index. This ensures
+        // CREATE_DOCUMENT runs before any global ops, regardless of
+        // the order batches were pushed to Swarm.
+        const allOps: any[] = [];
 
         for (const batch of manifest.operationBatches) {
-          // Skip batches we've already processed
           const batchKey = `${docId}:${batch.reference}`;
           if (this.processedBatches.has(batchKey)) continue;
 
@@ -716,73 +720,29 @@ export class SwarmChannel implements IChannel {
               continue;
             }
 
-            // Normalize: ensure OperationWithContext format.
-            // Push cycle writes OperationWithContext[], old plugin writes { index, action }.
-            const ops = rawOps.map((op: any) => {
+            for (const op of rawOps) {
               if (op.operation && op.context) {
-                // Already OperationWithContext format
-                return op;
+                allOps.push(op);
+              } else {
+                const action = op.action ?? op;
+                allOps.push({
+                  operation: {
+                    id: action.id ?? op.id ?? crypto.randomUUID(),
+                    index: op.index ?? 0,
+                    skip: 0,
+                    timestampUtcMs: action.timestampUtcMs ?? op.timestampUtcMs ?? new Date().toISOString(),
+                    hash: op.hash ?? "",
+                    action,
+                  },
+                  context: {
+                    documentId: docId,
+                    documentType: docMeta.get(docId)?.documentType ?? "unknown",
+                    scope: action.scope ?? batch.scope ?? "global",
+                    branch: batch.branch ?? "main",
+                    ordinal: 0,
+                  },
+                });
               }
-              // Old plugin format: { index, action: { type, input, scope, ... } }
-              const action = op.action ?? op;
-              return {
-                operation: {
-                  id: action.id ?? op.id ?? crypto.randomUUID(),
-                  index: op.index ?? 0,
-                  skip: 0,
-                  timestampUtcMs: action.timestampUtcMs ?? op.timestampUtcMs ?? new Date().toISOString(),
-                  hash: op.hash ?? "",
-                  action,
-                },
-                context: {
-                  documentId: docId,
-                  documentType: docMeta.get(docId)?.documentType ?? "unknown",
-                  scope: action.scope ?? batch.scope ?? "global",
-                  branch: batch.branch ?? "main",
-                  ordinal: 0,
-                },
-              };
-            });
-
-            // Group operations by scope — reactor.load() processes one scope at a time.
-            // "document" scope ops (CREATE_DOCUMENT, UPGRADE_DOCUMENT) must be
-            // loaded before "global" scope ops (ADD_FILE, SET_DRIVE_NAME, etc.).
-            const byScope = new Map<string, any[]>();
-            for (const op of ops) {
-              const scope = op.context?.scope ?? "global";
-              if (!byScope.has(scope)) byScope.set(scope, []);
-              byScope.get(scope)!.push(op);
-            }
-
-            // Process "document" scope first (creates the document), then others.
-            // Add a small delay between scopes to let reactor.load() finish
-            // processing the previous scope before the next one arrives.
-            const scopeOrder = ["document", ...Array.from(byScope.keys()).filter(s => s !== "document")];
-            const branch = ops[0]?.context?.branch ?? "main";
-
-            for (let si = 0; si < scopeOrder.length; si++) {
-              const scope = scopeOrder[si];
-              const scopeOps = byScope.get(scope);
-              if (!scopeOps || scopeOps.length === 0) continue;
-
-              // Wait for reactor to process previous scope before adding next
-              if (si > 0) {
-                await new Promise((r) => setTimeout(r, 100));
-              }
-
-              const syncOp = new SyncOperation(
-                crypto.randomUUID(),
-                "",       // jobId — empty for non-keyed (processed individually)
-                [],       // jobDependencies
-                this.remoteName,
-                docId,
-                [scope],
-                branch,
-                scopeOps,
-              );
-
-              this.inbox.add(syncOp);
-              newOpsCount += scopeOps.length;
             }
 
             this.processedBatches.add(batchKey);
@@ -792,8 +752,43 @@ export class SwarmChannel implements IChannel {
             );
           }
         }
+
+        if (allOps.length === 0) continue;
+
+        // Group by scope and sort ops within each scope by index
+        const byScope = new Map<string, any[]>();
+        for (const op of allOps) {
+          const scope = op.context?.scope ?? "global";
+          if (!byScope.has(scope)) byScope.set(scope, []);
+          byScope.get(scope)!.push(op);
+        }
+        for (const [, ops] of byScope) {
+          ops.sort((a: any, b: any) => (a.operation?.index ?? 0) - (b.operation?.index ?? 0));
+        }
+
+        // Process "document" scope first (creates the document), then others
+        const scopeOrder = ["document", ...Array.from(byScope.keys()).filter(s => s !== "document")];
+        const branch = allOps[0]?.context?.branch ?? "main";
+
+        for (const scope of scopeOrder) {
+          const scopeOps = byScope.get(scope);
+          if (!scopeOps || scopeOps.length === 0) continue;
+
+          const syncOp = new SyncOperation(
+            crypto.randomUUID(),
+            "",
+            [],
+            this.remoteName,
+            docId,
+            [scope],
+            branch,
+            scopeOps,
+          );
+
+          this.inbox.add(syncOp);
+          newOpsCount += scopeOps.length;
+        }
       } catch (err) {
-        // Only log unexpected errors — missing manifests are normal for new docs
         if (err instanceof Error && !err.message.includes("404")) {
           this.logger.warn(`[SwarmChannel] Manifest read failed for ${docId.slice(0, 8)}: ${err.message}`);
         }
