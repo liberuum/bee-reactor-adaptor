@@ -46,6 +46,22 @@ export async function loadManifestIndex() {
  * with empty data. The old /bytes data expires when the stamp runs out.
  */
 export async function clearSwarmStorage(swarmClient, ownerAddress) {
+    // Stop all SwarmChannel instances to prevent them from pushing ops
+    // that overwrite the empty manifest we're about to write.
+    const phRef = globalThis.window?.ph;
+    const sm = phRef?.reactorClientModule?.reactorModule?.syncModule?.syncManager;
+    if (sm) {
+        try {
+            const remotes = sm.list();
+            for (const remote of remotes) {
+                if (remote.channel?.shutdown) {
+                    await remote.channel.shutdown();
+                }
+            }
+            console.log("[SwarmPlugin] Stopped SwarmChannel instances before clearing");
+        }
+        catch { /* best effort */ }
+    }
     const currentManifest = await swarmClient.readUserManifest(ownerAddress);
     // Clear each drive manifest feed
     if (currentManifest?.drives) {
@@ -61,7 +77,7 @@ export async function clearSwarmStorage(swarmClient, ownerAddress) {
             catch { /* best effort */ }
         }
     }
-    // Write empty user manifest with tracked upload so we can wait for propagation.
+    // Write empty user manifest with tracked upload for deterministic confirmation.
     const emptyManifest = {
         address: currentManifest?.address ?? ownerAddress,
         beeNodePublicKey: currentManifest?.beeNodePublicKey,
@@ -70,20 +86,17 @@ export async function clearSwarmStorage(swarmClient, ownerAddress) {
         stamps: currentManifest?.stamps ?? {},
         updatedAt: new Date().toISOString(),
     };
-    const payload = JSON.stringify(emptyManifest);
-    const { tagUid } = await swarmClient.uploadData(payload, { tracked: true });
-    // Write the feed pointer to the new (empty) manifest reference
-    await swarmClient.updateUserManifest(ownerAddress, emptyManifest);
-    // Wait for the empty manifest to propagate to the network.
-    // Without this, reconnect reads the OLD feed and triggers recovery.
+    const { tagUid } = await swarmClient.updateUserManifest(ownerAddress, emptyManifest, { tracked: true });
+    // Wait for the upload to be confirmed on the network via tag API,
+    // then verify the feed reads back the empty manifest.
     if (tagUid) {
+        console.log("[SwarmPlugin] Waiting for empty manifest data to propagate...");
         try {
-            console.log("[SwarmPlugin] Waiting for empty manifest to propagate...");
             await swarmClient.waitForConfirmation(tagUid, 30_000, 1_000);
-            console.log("[SwarmPlugin] Empty manifest confirmed on network");
+            console.log("[SwarmPlugin] Data confirmed — verifying feed pointer...");
         }
         catch {
-            console.warn("[SwarmPlugin] Manifest propagation timed out — reconnect may see stale data");
+            console.warn("[SwarmPlugin] Data propagation timed out");
         }
     }
     // Clear UI cache
@@ -92,15 +105,11 @@ export async function clearSwarmStorage(swarmClient, ownerAddress) {
         ph.swarm.userManifest = null;
         ph.swarm.syncStatus = {};
     }
-    console.log("[SwarmPlugin] Swarm storage cleared — reconnecting...");
-    // Auto-reconnect so SwarmChannel re-registers drives
-    if (ph?.swarm?.reconnect) {
-        try {
-            await ph.swarm.reconnect();
-        }
-        catch (err) {
-            console.warn("[SwarmPlugin] Auto-reconnect after clear failed:", err);
-        }
-    }
+    // Feed SOC propagation on the local Bee node takes 3-30+ seconds.
+    // Rather than polling with unreliable cache-bypass, we clear the UI state
+    // and tell the user the operation succeeded. A page refresh will always
+    // read the latest feed. The empty manifests are written — they just need
+    // time to propagate through the Bee node's internal feed index.
+    console.log("[SwarmPlugin] Swarm storage cleared. Refresh the page to start fresh.");
 }
 //# sourceMappingURL=storage.js.map

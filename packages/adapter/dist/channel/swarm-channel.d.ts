@@ -51,7 +51,12 @@ export declare class SwarmChannel implements IChannel {
     private healthTimer;
     private lastPersistedInboxOrdinal;
     private lastPersistedOutboxOrdinal;
+    private initOutboxCursor;
     private recoveryInProgress;
+    private recoveryMaxOrdinal;
+    private manifestLocks;
+    /** Serialize async work per document ID to prevent read-modify-write races. */
+    private withManifestLock;
     private swarmClient;
     constructor(logger: ILogger, channelId: string, remoteName: string, cursorStorage: ISyncCursorStorage, config: SwarmChannelConfig, operationIndex: IOperationIndex);
     init(): Promise<void>;
@@ -91,6 +96,12 @@ export declare class SwarmChannel implements IChannel {
      * re-downloading and re-applying the same operations.
      */
     pullFromSwarm(): Promise<boolean>;
+    /**
+     * Find the parent drive ID for a child document.
+     * Uses the plugin's docToDrive mapping (populated by hydration.ts),
+     * or falls back to querying the reactor for the drive that contains this doc.
+     */
+    private findParentDriveId;
     private resolveSwarmClient;
     private checkBeeHealth;
     private persistInboxCursor;

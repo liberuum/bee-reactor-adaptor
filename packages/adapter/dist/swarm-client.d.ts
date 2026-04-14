@@ -119,7 +119,11 @@ export declare class SwarmClient {
      */
     compactManifest(documentId: string, maxBatches?: number): Promise<boolean>;
     readUserManifest(address: string): Promise<SwarmUserManifest | null>;
-    updateUserManifest(address: string, manifest: SwarmUserManifest): Promise<void>;
+    updateUserManifest(address: string, manifest: SwarmUserManifest, options?: {
+        tracked?: boolean;
+    }): Promise<{
+        tagUid?: number;
+    }>;
     readDriveManifest(driveId: string): Promise<SwarmDriveManifest | null>;
     updateDriveManifest(driveId: string, manifest: SwarmDriveManifest): Promise<void>;
     getOwnerAddress(): string;

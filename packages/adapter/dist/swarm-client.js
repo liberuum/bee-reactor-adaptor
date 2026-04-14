@@ -246,16 +246,20 @@ export class SwarmClient {
             return null;
         }
     }
-    async updateUserManifest(address, manifest) {
+    async updateUserManifest(address, manifest, options) {
         const payload = JSON.stringify(manifest);
         if (this.useFeedMode) {
             const topic = this.userTopic(address);
-            const { reference } = await this.uploadData(payload);
+            const { reference, tagUid } = await this.uploadData(payload, {
+                tracked: options?.tracked,
+            });
             await this.writeFeedPayload(topic, reference);
+            return { tagUid };
         }
         else {
             const { reference } = await this.uploadData(payload);
             this.manifestIndex.set(`user:${address.toLowerCase()}`, reference);
+            return {};
         }
     }
     // ═══════════════════════════════════════════════════════════════
@@ -503,7 +507,6 @@ export class SwarmClient {
         const reader = this.bee.makeFeedReader(topic, ownerAddress);
         const result = await reader.downloadReference();
         const ref = result.reference.toHex();
-        // Capture feed index metadata for callers that need it
         this.lastFeedIndex = result.feedIndex;
         this.lastFeedIndexNext = result.feedIndexNext;
         const data = options?.skipDecryption

@@ -122,7 +122,7 @@ export class StampManager {
     async estimateStampCost(depth, days) {
         const { pricePerBlock, blockTime } = await this.getStoragePrice();
         const blocksPerDay = Math.ceil(86400 / blockTime);
-        const amountPerChunk = BigInt(pricePerBlock) * BigInt(blocksPerDay) * BigInt(days);
+        const amountPerChunk = BigInt(pricePerBlock) * BigInt(blocksPerDay) * BigInt(days) * 2n;
         const totalPlur = amountPerChunk * BigInt(2 ** depth);
         const xBZZ = Number(totalPlur) / 1e16;
         const bzzPrice = await getBzzUsdPrice();
@@ -153,10 +153,14 @@ export class StampManager {
         ];
         const sizeOptions = sizeTable.filter((s) => s.depth >= batch.depth);
         const durationPresets = [1, 2, 7, 15, 30, 90];
+        // Multiply by 2 to ensure the amount exceeds the Bee node's 24h minimum
+        // validation. The currentPrice is the per-block drain rate, but the node
+        // requires a safety margin above the bare minimum (price * blocks).
+        const safetyMultiplier = 2n;
         const durationOptions = durationPresets.map((days) => {
             const seconds = days * 86400;
             const blocks = Math.ceil(seconds / blockTime);
-            const amount = BigInt(blocks) * BigInt(pricePerBlock);
+            const amount = BigInt(blocks) * BigInt(pricePerBlock) * safetyMultiplier;
             return {
                 days,
                 label: days === 1 ? "~1 day" : `~${days} days`,

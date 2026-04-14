@@ -53,8 +53,22 @@ export async function ensureDriveInUserManifest(client, ownerAddress, driveId, d
  * @param preferredEditor - The drive's preferred editor type
  */
 export async function updateDriveManifest(client, driveId, nodes, driveName, preferredEditor) {
-    const documents = {};
-    const folders = {};
+    // Read existing drive manifest from Swarm and MERGE new entries.
+    // Never remove existing entries — the reactor's drive state may not
+    // have all ADD_FILE ops processed yet, so a snapshot could be partial.
+    // This ensures recovery always discovers all documents.
+    let existing = null;
+    try {
+        existing = await client.readDriveManifest(driveId);
+    }
+    catch { /* no existing manifest */ }
+    const documents = {
+        ...(existing?.documents ?? {}),
+    };
+    const folders = {
+        ...(existing?.folders ?? {}),
+    };
+    const now = new Date().toISOString();
     for (const node of nodes) {
         if (node.kind === "folder") {
             folders[node.id] = {
@@ -67,20 +81,20 @@ export async function updateDriveManifest(client, driveId, nodes, driveName, pre
                 documentType: node.documentType ?? "unknown",
                 name: node.name,
                 parentFolder: node.parentFolder ?? undefined,
-                lastUpdated: new Date().toISOString(),
+                lastUpdated: now,
             };
         }
     }
     const manifest = {
         driveId,
-        name: driveName,
-        preferredEditor,
+        name: driveName || existing?.name || driveId,
+        preferredEditor: preferredEditor ?? existing?.preferredEditor,
         documents,
         folders: Object.keys(folders).length > 0 ? folders : undefined,
-        updatedAt: new Date().toISOString(),
+        updatedAt: now,
     };
     await client.updateDriveManifest(driveId, manifest);
-    console.log(`[ManifestManager] Drive manifest updated: "${driveName}" (${driveId.slice(0, 8)}) — ${Object.keys(documents).length} docs, ${Object.keys(folders).length} folders`);
+    console.log(`[ManifestManager] Drive manifest updated: "${manifest.name}" (${driveId.slice(0, 8)}) — ${Object.keys(documents).length} docs, ${Object.keys(folders).length} folders`);
 }
 // ═══════════════════════════════════════════════════════════════
 // Extract Drive State from Operations

@@ -1,7 +1,17 @@
 import { restoreFolderStructure } from "./hydration.js";
 /** Read Bee URL from window.ph.swarm (set by plugin init) */
 function getBeeUrl() {
-    return globalThis.window?.ph?.swarm?.beeUrl ?? "http://localhost:1633";
+    const ph = globalThis.window?.ph;
+    // Check ph.swarm.beeUrl first (set by applySwarmExtensions), then localStorage
+    // (persisted across page loads), then fallback to localhost.
+    try {
+        return ph?.swarm?.beeUrl
+            ?? localStorage.getItem("swarm:beeUrl")
+            ?? "http://localhost:1633";
+    }
+    catch {
+        return "http://localhost:1633";
+    }
 }
 // ═══════════════════════════════════════════════════════════════
 // Public Profile
@@ -274,8 +284,31 @@ export async function importFromUser(client, senderSignerAddress) {
                 const { documentId: origDocId, documentType, name: docName, operations: rawOps } = docBundle;
                 const opsArray = Array.isArray(rawOps) ? rawOps : [rawOps];
                 const userOps = opsArray
-                    .filter((op) => (op.action?.scope ?? op.scope ?? "global") === "global")
-                    .map((op) => op.action ?? op);
+                    .filter((op) => {
+                    // Support both formats:
+                    // - OperationWithContext: { operation: { action: { scope } }, context: { scope } }
+                    // - Plain action: { scope, type, input }
+                    const scope = op.operation?.action?.scope ?? op.context?.scope ?? op.action?.scope ?? op.scope ?? "global";
+                    return scope === "global";
+                })
+                    .map((op) => {
+                    // Extract the plain action from whichever format we have:
+                    // - OperationWithContext: op.operation.action
+                    // - Wrapped: op.action
+                    // - Plain: op itself
+                    const action = op.operation?.action ?? op.action ?? op;
+                    // Normalize timestampUtcMs: the reactor expects an ISO string,
+                    // but shared operations may have numeric epoch ms from the push.
+                    if (action.timestampUtcMs && typeof action.timestampUtcMs === "number") {
+                        action.timestampUtcMs = new Date(action.timestampUtcMs).toISOString();
+                    }
+                    // Also normalize nested context.timestampUtcMs if present
+                    if (action.context?.signer) {
+                        // Strip the outer context wrapper — execute() doesn't need it
+                        delete action.context;
+                    }
+                    return action;
+                });
                 console.log(`[SwarmPlugin] Importing "${docName}" (${userOps.length} actions)`);
                 try {
                     const docModelModule = await reactorClient.getDocumentModelModule(documentType);
