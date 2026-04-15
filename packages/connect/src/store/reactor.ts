@@ -10,7 +10,6 @@ import {
   addRemoteDrive,
   DocumentCache,
   DocumentChangeType,
-  dropAllReactorStorage,
   extractDriveSlugFromPath,
   extractNodeSlugFromPath,
   getDrives,
@@ -36,7 +35,11 @@ import {
   RenownBuilder,
   RenownCryptoBuilder,
 } from "@renown/sdk";
-import { logger, type DocumentModelLib } from "document-model";
+import {
+  logger,
+  type DocumentModelLib,
+  type UpgradeManifest,
+} from "document-model";
 import { initFeatureFlags } from "../feature-flags.js";
 // Monorepo relative import — for npm deployment use:
 // import { initSwarmPlugin } from "@liberuum-org/bee-reactor-adapter";
@@ -48,14 +51,26 @@ import { loadPackagesConfig } from "../packages.config.js";
 import { createProcessorHostModule } from "./processor-host-module.js";
 
 export async function clearReactorStorage() {
-  const pg = window.ph?.reactorClientModule?.pg;
-  if (!pg) {
-    throw new Error("PGlite not found");
-  }
+  await window.ph?.reactorClientModule?.pg?.close();
 
-  await dropAllReactorStorage(pg);
+  // Dropping tables inside an existing PGlite instance is unreliable with
+  // `relaxedDurability: true` followed by an immediate page reload — pending
+  // IDB writes can be lost. Deleting the underlying database outright sidesteps
+  // flush-timing; the next startup re-creates and re-migrates from scratch.
+  const dbs = await indexedDB.databases();
+  const targets = dbs
+    .map((d) => d.name)
+    .filter((n): n is string => !!n && /pglite|reactor/i.test(n));
 
-  await pg.close();
+  await Promise.all(
+    targets.map(
+      (name) =>
+        new Promise<void>((resolve) => {
+          const req = indexedDB.deleteDatabase(name);
+          req.onsuccess = req.onerror = req.onblocked = () => resolve();
+        }),
+    ),
+  );
 }
 
 export async function createReactor(localPackage?: DocumentModelLib) {
@@ -127,7 +142,14 @@ export async function createReactor(localPackage?: DocumentModelLib) {
   // get upgrade manifests from packages
   const upgradeManifests = packageManager.packages
     .flatMap((pkg) => pkg.upgradeManifests)
-    .filter((u) => u !== undefined);
+    .filter(
+      (manifest, index, manifests) =>
+        // deduplicate by documentType and version
+        manifest !== undefined &&
+        manifests.findIndex(
+          (m) => m && m.documentType === manifest.documentType,
+        ) === index,
+    ) as UpgradeManifest<readonly number[]>[];
 
   // initialize package discovery service for auto-installing unknown document types
   const discoveryService =

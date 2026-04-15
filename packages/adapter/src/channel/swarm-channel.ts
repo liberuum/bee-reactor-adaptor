@@ -257,6 +257,7 @@ export class SwarmChannel implements IChannel {
       lastFailureUtcMs: this.lastFailureUtcMs,
       pushBlocked: this.pushBlocked,
       pushFailureCount: this.pushFailureCount,
+      receivingPages: false,
     };
   }
 

@@ -159,6 +159,7 @@ export class SwarmChannel {
             lastFailureUtcMs: this.lastFailureUtcMs,
             pushBlocked: this.pushBlocked,
             pushFailureCount: this.pushFailureCount,
+            receivingPages: false,
         };
     }
     onConnectionStateChange(callback) {
