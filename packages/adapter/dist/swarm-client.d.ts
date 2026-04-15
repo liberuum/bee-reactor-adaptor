@@ -98,6 +98,32 @@ export declare class SwarmClient {
      * The caller handles its own decryption with the shared key.
      */
     downloadRawData(reference: string): Promise<Uint8Array>;
+    /**
+     * Upload data as a file via /bzz endpoint.
+     *
+     * Unlike uploadData (/bytes), /bzz supports ACT decryption on download.
+     * Use this for any ACT-protected content (sharing, chat history).
+     */
+    uploadFile(data: string | Uint8Array, options?: {
+        act?: boolean;
+        actHistoryAddress?: string;
+        skipEncryption?: boolean;
+    }): Promise<{
+        reference: string;
+        historyAddress?: string;
+    }>;
+    /**
+     * Download a file via /bzz endpoint.
+     *
+     * Unlike downloadData (/bytes), /bzz handles ACT manifest resolution
+     * and ECDH decryption transparently. Required for cross-node ACT.
+     */
+    downloadFile(reference: string, options?: {
+        actPublisher?: string;
+        actHistoryAddress?: string;
+        actTimestamp?: number;
+        skipDecryption?: boolean;
+    }): Promise<Uint8Array>;
     grantAccess(granteeRef: string, historyRef: string, publicKeys: string[]): Promise<{
         ref: string;
         historyRef: string;
@@ -256,6 +282,7 @@ export declare class SwarmClient {
         actGranteeRef: string;
     }>;
     downloadSharedData(ref: string, publisherBeeNodePubKey: string, actHistoryAddress: string): Promise<Uint8Array<ArrayBufferLike>>;
+    /** @deprecated Legacy v1 download for migration — uses insecure deriveShareKey */
     /** @deprecated Legacy v1 download for migration — uses insecure deriveShareKey */
     legacyDownloadSharedData(ref: string, sender: string, recipient: string): Promise<Uint8Array<ArrayBufferLike>>;
     writeShareManifest(sender: string, recipient: string, manifest: ShareManifest): Promise<void>;

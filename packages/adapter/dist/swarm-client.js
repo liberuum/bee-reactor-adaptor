@@ -121,6 +121,50 @@ export class SwarmClient {
         return raw.toUint8Array();
     }
     // ═══════════════════════════════════════════════════════════════
+    // File Upload/Download (via /bzz — required for ACT)
+    // ═══════════════════════════════════════════════════════════════
+    /**
+     * Upload data as a file via /bzz endpoint.
+     *
+     * Unlike uploadData (/bytes), /bzz supports ACT decryption on download.
+     * Use this for any ACT-protected content (sharing, chat history).
+     */
+    async uploadFile(data, options) {
+        let payload = data;
+        if (this.useEncryption && !options?.skipEncryption) {
+            payload = await encrypt(data, this.encryptionKey);
+        }
+        const result = await this.bee.uploadFile(this.batchId, payload, "data.bin", {
+            act: options?.act,
+            actHistoryAddress: options?.actHistoryAddress,
+        });
+        const historyRef = result.historyAddress?.value ?? result.historyAddress;
+        return {
+            reference: result.reference.toHex(),
+            historyAddress: historyRef && typeof historyRef === "object" && "toHex" in historyRef
+                ? historyRef.toHex()
+                : typeof historyRef === "string" ? historyRef : undefined,
+        };
+    }
+    /**
+     * Download a file via /bzz endpoint.
+     *
+     * Unlike downloadData (/bytes), /bzz handles ACT manifest resolution
+     * and ECDH decryption transparently. Required for cross-node ACT.
+     */
+    async downloadFile(reference, options) {
+        const result = await this.bee.downloadFile(reference, "", {
+            actPublisher: options?.actPublisher,
+            actHistoryAddress: options?.actHistoryAddress,
+            actTimestamp: options?.actTimestamp,
+        });
+        const data = result.data.toUint8Array();
+        if (!options?.skipDecryption && isEncrypted(data)) {
+            return decrypt(data, this.encryptionKey);
+        }
+        return data;
+    }
+    // ═══════════════════════════════════════════════════════════════
     // ACT Access Control
     // ═══════════════════════════════════════════════════════════════
     async grantAccess(granteeRef, historyRef, publicKeys) {
@@ -469,6 +513,7 @@ export class SwarmClient {
     async readPublicProfile(addr) { return this.sharing.readPublicProfile(addr); }
     async uploadSharedData(data, recipientBeeNodePubKey) { return this.sharing.uploadSharedData(data, recipientBeeNodePubKey); }
     async downloadSharedData(ref, publisherBeeNodePubKey, actHistoryAddress) { return this.sharing.downloadSharedData(ref, publisherBeeNodePubKey, actHistoryAddress); }
+    /** @deprecated Legacy v1 download for migration — uses insecure deriveShareKey */
     /** @deprecated Legacy v1 download for migration — uses insecure deriveShareKey */
     async legacyDownloadSharedData(ref, sender, recipient) { return this.sharing.legacyDownloadSharedData(ref, sender, recipient); }
     async writeShareManifest(sender, recipient, manifest) { return this.sharing.writeShareManifest(sender, recipient, manifest); }

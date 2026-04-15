@@ -39,19 +39,20 @@ export class ShareManager {
      * @returns ACT metadata needed by recipient to download
      */
     async uploadSharedData(data, recipientBeeNodePubKey) {
-        // Upload with ACT — Bee node encrypts using its own keypair
-        const { reference, historyAddress } = await this.client.uploadData(data, {
+        // Step 1: Create grantee list FIRST — this generates the ACT history
+        // that the upload will chain into. Order matters: grantees before upload.
+        const { ref: granteeRef, historyRef: granteeHistoryRef } = await this.client.createGrantees([recipientBeeNodePubKey]);
+        // Step 2: Upload with ACT, chaining the grantee's history.
+        // This links the upload's ACT to the grantee list so the recipient
+        // can decrypt via ECDH on their Bee node.
+        const { reference, historyAddress } = await this.client.uploadFile(data, {
             act: true,
+            actHistoryAddress: granteeHistoryRef,
             skipEncryption: true, // No wallet-key AES — ACT handles encryption
         });
-        if (!historyAddress) {
-            throw new Error("ACT upload did not return historyAddress — is the Bee node running in full mode?");
-        }
-        // Grant access to recipient's Bee node
-        const { ref: granteeRef } = await this.client.createGrantees([recipientBeeNodePubKey]);
         return {
             reference,
-            actHistoryAddress: historyAddress,
+            actHistoryAddress: historyAddress ?? granteeHistoryRef,
             actGranteeRef: granteeRef,
         };
     }
@@ -66,8 +67,9 @@ export class ShareManager {
      * @returns Decrypted data
      */
     async downloadSharedData(reference, publisherBeeNodePubKey, actHistoryAddress) {
-        // Bee node handles ECDH decryption transparently
-        return this.client.downloadData(reference, {
+        // Download via /bzz — required for ACT manifest resolution + ECDH decryption.
+        // The /bytes endpoint does NOT handle ACT; /bzz does.
+        return this.client.downloadFile(reference, {
             actPublisher: publisherBeeNodePubKey,
             actHistoryAddress,
             skipDecryption: true, // No wallet-key AES — ACT handles decryption
