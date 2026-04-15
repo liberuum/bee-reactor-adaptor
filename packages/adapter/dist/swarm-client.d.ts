@@ -124,19 +124,35 @@ export declare class SwarmClient {
         actTimestamp?: number;
         skipDecryption?: boolean;
     }): Promise<Uint8Array>;
-    grantAccess(granteeRef: string, historyRef: string, publicKeys: string[]): Promise<{
-        ref: string;
-        historyRef: string;
-    }>;
-    revokeAccess(granteeRef: string, historyRef: string, publicKeys: string[]): Promise<{
-        ref: string;
-        historyRef: string;
-    }>;
+    /**
+     * Create a new grantee list with the given public keys.
+     * Returns the encrypted grantee reference (128 hex) and history ref (64 hex).
+     */
     createGrantees(publicKeys: string[]): Promise<{
         ref: string;
         historyRef: string;
     }>;
+    /**
+     * Get the list of grantee public keys for a grantee reference.
+     * Only the publisher can decrypt this list.
+     */
     getGrantees(granteeRef: string): Promise<string[]>;
+    /**
+     * Add grantees to an existing ACT.
+     * Uses the full 128-char encrypted grantee ref (bee-js truncates this).
+     */
+    grantAccess(granteeRef: string, historyRef: string, publicKeys: string[]): Promise<{
+        ref: string;
+        historyRef: string;
+    }>;
+    /**
+     * Revoke grantees from an existing ACT.
+     * Uses the full 128-char encrypted grantee ref (bee-js truncates this).
+     */
+    revokeAccess(granteeRef: string, historyRef: string, publicKeys: string[]): Promise<{
+        ref: string;
+        historyRef: string;
+    }>;
     readManifest(documentId: string): Promise<SwarmDocumentManifest | null>;
     updateManifest(documentId: string, manifest: SwarmDocumentManifest): Promise<void>;
     /**

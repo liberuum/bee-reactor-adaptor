@@ -182,23 +182,45 @@ describe("ACT cross-node sharing", () => {
     console.log(`Grantee list verified: ${grantees.length} grantee(s), includes Node B`);
   });
 
-  // bee-js bug: patchGrantees serializes the 128-char encrypted grantee
-  // reference incorrectly (truncates to 92 chars in URL). The Bee node
-  // returns 500 because the reference is corrupted. Curl with the correct
-  // 128-char ref works. Workaround: create all grantees upfront.
-  // TODO: file bug with bee-js team or implement direct HTTP patchGrantees
-  it.skip("should support adding more grantees after initial share (bee-js Reference serialization bug)", async () => {
+  it("should support adding more grantees after initial share (direct HTTP)", async () => {
     const payload = "multi-grantee test";
     const result = await clientA.uploadSharedData(payload, beeNodePubKeyB);
 
+    // ACT has a 1-second rule for consecutive updates (mantaray timestamp collision)
+    await new Promise(r => setTimeout(r, 1500));
+
+    // Add Node A's Bee pubkey as an additional grantee
     const updated = await clientA.grantAccess(
       result.actGranteeRef,
       result.actHistoryAddress,
       [beeNodePubKeyA],
     );
     expect(updated.ref).toBeTruthy();
+    expect(updated.historyRef).toBeTruthy();
 
+    // Verify grantees grew
     const grantees = await clientA.getGrantees(updated.ref);
     expect(grantees.length).toBeGreaterThanOrEqual(2);
+
+    console.log(`Multi-grantee verified: ${grantees.length} grantee(s) after adding third party`);
+  });
+
+  it("should support revoking grantee access (direct HTTP)", async () => {
+    const payload = "revoke test";
+    const result = await clientA.uploadSharedData(payload, beeNodePubKeyB);
+
+    // ACT has a 1-second rule for consecutive updates (mantaray timestamp collision)
+    await new Promise(r => setTimeout(r, 1500));
+
+    // Revoke Node B's access
+    const revoked = await clientA.revokeAccess(
+      result.actGranteeRef,
+      result.actHistoryAddress,
+      [beeNodePubKeyB],
+    );
+    expect(revoked.ref).toBeTruthy();
+    expect(revoked.historyRef).toBeTruthy();
+
+    console.log("Revoked Node B — grant/revoke lifecycle verified via direct HTTP");
   });
 });

@@ -165,23 +165,86 @@ export class SwarmClient {
         return data;
     }
     // ═══════════════════════════════════════════════════════════════
-    // ACT Access Control
+    // ACT Access Control (direct HTTP — bypasses bee-js Reference bug)
+    //
+    // bee-js truncates the 128-char encrypted grantee reference to 92
+    // chars when serializing for URLs, causing patchGrantees to 500.
+    // These methods call the Bee API directly with correct references.
     // ═══════════════════════════════════════════════════════════════
-    async grantAccess(granteeRef, historyRef, publicKeys) {
-        const result = await this.bee.patchGrantees(this.batchId, granteeRef, historyRef, { add: publicKeys });
-        return { ref: result.ref.toHex(), historyRef: result.historyref.toHex() };
-    }
-    async revokeAccess(granteeRef, historyRef, publicKeys) {
-        const result = await this.bee.patchGrantees(this.batchId, granteeRef, historyRef, { revoke: publicKeys });
-        return { ref: result.ref.toHex(), historyRef: result.historyref.toHex() };
-    }
+    /**
+     * Create a new grantee list with the given public keys.
+     * Returns the encrypted grantee reference (128 hex) and history ref (64 hex).
+     */
     async createGrantees(publicKeys) {
-        const result = await this.bee.createGrantees(this.batchId, publicKeys);
-        return { ref: result.ref.toHex(), historyRef: result.historyref.toHex() };
+        const res = await fetch(`${this.bee.url}/grantee`, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "Swarm-Postage-Batch-Id": this.batchId,
+            },
+            body: JSON.stringify({ grantees: publicKeys }),
+        });
+        if (!res.ok) {
+            const body = await res.text().catch(() => "");
+            throw new Error(`createGrantees failed (${res.status}): ${body}`);
+        }
+        const data = (await res.json());
+        return { ref: data.ref, historyRef: data.historyref };
     }
+    /**
+     * Get the list of grantee public keys for a grantee reference.
+     * Only the publisher can decrypt this list.
+     */
     async getGrantees(granteeRef) {
-        const result = await this.bee.getGrantees(granteeRef);
-        return result.grantees.map((pk) => pk.toCompressedHex());
+        const res = await fetch(`${this.bee.url}/grantee/${granteeRef}`);
+        if (!res.ok) {
+            const body = await res.text().catch(() => "");
+            throw new Error(`getGrantees failed (${res.status}): ${body}`);
+        }
+        const data = (await res.json());
+        return data;
+    }
+    /**
+     * Add grantees to an existing ACT.
+     * Uses the full 128-char encrypted grantee ref (bee-js truncates this).
+     */
+    async grantAccess(granteeRef, historyRef, publicKeys) {
+        const res = await fetch(`${this.bee.url}/grantee/${granteeRef}`, {
+            method: "PATCH",
+            headers: {
+                "Content-Type": "application/json",
+                "Swarm-Postage-Batch-Id": this.batchId,
+                "Swarm-Act-History-Address": historyRef,
+            },
+            body: JSON.stringify({ add: publicKeys }),
+        });
+        if (!res.ok) {
+            const body = await res.text().catch(() => "");
+            throw new Error(`grantAccess failed (${res.status}): ${body}`);
+        }
+        const data = (await res.json());
+        return { ref: data.ref, historyRef: data.historyref };
+    }
+    /**
+     * Revoke grantees from an existing ACT.
+     * Uses the full 128-char encrypted grantee ref (bee-js truncates this).
+     */
+    async revokeAccess(granteeRef, historyRef, publicKeys) {
+        const res = await fetch(`${this.bee.url}/grantee/${granteeRef}`, {
+            method: "PATCH",
+            headers: {
+                "Content-Type": "application/json",
+                "Swarm-Postage-Batch-Id": this.batchId,
+                "Swarm-Act-History-Address": historyRef,
+            },
+            body: JSON.stringify({ revoke: publicKeys }),
+        });
+        if (!res.ok) {
+            const body = await res.text().catch(() => "");
+            throw new Error(`revokeAccess failed (${res.status}): ${body}`);
+        }
+        const data = (await res.json());
+        return { ref: data.ref, historyRef: data.historyref };
     }
     // ═══════════════════════════════════════════════════════════════
     // Document Manifest
