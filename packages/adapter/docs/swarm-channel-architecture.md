@@ -182,43 +182,43 @@ export class CompositeChannelFactory implements IChannelFactory {
 
 ### Wiring Into createBrowserReactor
 
-Our fork's `createBrowserReactor()` currently uses:
+Our fork's `createBrowserReactor()` uses the proper reactor builder API:
+
 ```typescript
-new ReactorBuilder()
-  .withChannelScheme(ChannelScheme.CONNECT)  // ← auto-creates GQL factory
-  .withJwtHandler(jwtHandler)
+import { createSwarmSyncBuilder } from "../../../adapter/src/channel/create-composite-factory.js";
+
+// 1. Create SyncBuilder with Swarm channel registered at build time.
+//    GQL is deferred — needs the queue (with document model resolver)
+//    which is created inside buildModule().
+const { syncBuilder, registerGqlFactory } = createSwarmSyncBuilder(logger, jwtHandler);
+
+// 2. Wire into ReactorBuilder via withSync() — no monkey-patching
+const builder = new ReactorClientBuilder()
+  .withReactorBuilder(
+    new ReactorBuilder()
+      .withSync(syncBuilder)         // ← CompositeChannelFactory with "swarm"
+      .withJwtHandler(jwtHandler)    // ← still needed for GQL auth
+      ...
+  );
+
+const module = await builder.buildModule();
+
+// 3. Register GQL factory after build (needs queue with proper resolver)
+const queue = module.reactorModule?.queue;
+if (queue) registerGqlFactory(queue);
 ```
 
-We change it to:
-```typescript
-import { SyncBuilder, GqlRequestChannelFactory } from "@powerhousedao/reactor";
-import { CompositeChannelFactory } from "../adapter/src/channel/composite-factory.js";
-import { SwarmChannelFactory } from "../adapter/src/channel/swarm-channel-factory.js";
-
-// Create composite factory with both channel types
-const compositeFactory = new CompositeChannelFactory();
-compositeFactory.register("gql",
-  new GqlRequestChannelFactory(logger, jwtHandler, queue)
-);
-compositeFactory.register("swarm",
-  new SwarmChannelFactory(logger)
-);
-
-// Use SyncBuilder directly (bypasses channelScheme enum)
-const syncBuilder = new SyncBuilder().withChannelFactory(compositeFactory);
-
-new ReactorBuilder()
-  .withSync(syncBuilder)           // ← custom factory with both channels
-  .withJwtHandler(jwtHandler)      // ← still needed for GQL auth
-```
-
-**Why this works:** The ReactorBuilder has two code paths (line 386-410):
+**Why this works:** The ReactorBuilder has two code paths:
 1. `if (this.channelScheme)` — auto-creates a single factory type
 2. `else if (this.syncBuilder)` — uses YOUR factory
 
-By switching from path 1 to path 2, we get full control over which channel
-types are available. The SyncManager doesn't care — it just calls
-`factory.instance(config)` for each remote.
+By using path 2, we get full control over which channel types are available.
+Swarm remotes persist in `sync_remotes` and are recreated natively on startup.
+GQL is registered after build because `GqlRequestChannelFactory` needs the
+queue (for poll timer backpressure), which requires the document model resolver
+created inside `buildModule()`.
+
+No monkey-patching. No SQL hacks. No dynamic re-registration.
 
 ---
 

@@ -95,10 +95,9 @@ reactor.subscribe({})                     SyncManager (built-in)
   └─ replay on startup                    └─ no separate persistence needed
        │                                         │
   init.ts (552 lines)                    createBrowserReactor() + init helper
-  ├─ swarmPluginProcessorBuilder          ├─ CompositeChannelFactory
-  ├─ initSwarmPlugin() monolith           ├─ register "swarm" channel type
-  ├─ waitForBeeNode()                     └─ auto-register Swarm remotes
-  └─ fetchUsableStamp()
+  ├─ initSwarmPlugin()                    ├─ createSwarmSyncBuilder() → withSync()
+  ├─ waitForBeeNode()                     ├─ CompositeChannelFactory (GQL + Swarm)
+  └─ fetchUsableStamp()                   └─ Swarm remotes persist natively
 ```
 
 ---

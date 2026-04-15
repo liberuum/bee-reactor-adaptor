@@ -17,9 +17,9 @@ User edits document in Connect
        |
 Reactor stores operation in local PGlite (Postgres in WASM)
        |
-swarm-plugin.ts receives change event, buffers operation
-       |  (3-second debounce)
-Encrypts all buffered ops --> uploads to Swarm /bytes --> updates feed pointer
+SyncManager detects new ordinal --> populates SwarmChannel outbox
+       |
+SwarmChannel encrypts ops --> uploads to Swarm /bytes --> updates feed pointer
        |
 On new device: wallet signature --> same key --> read feeds --> download ops --> replay --> restored
 ```
@@ -30,9 +30,8 @@ See [docs/architecture.md](docs/architecture.md) for the full technical deep div
 
 | Package | npm | Description |
 |---------|-----|-------------|
-| `bee-reactor-adaptor/` | `@liberuum-org/bee-reactor-adapter` | Core adapter: SwarmClient, encryption, feeds, stamps, ACT |
-| `swarm-doc-model/` | — | Connect processor plugin: sync, recovery, settings UI integration |
-| `packages/connect/` | `@liberuum-org/connect` | Fork of Connect with Swarm settings tab |
+| `packages/adapter/` | `@liberuum-org/bee-reactor-adapter` | Core adapter: SwarmClient, SwarmChannel, encryption, feeds, stamps |
+| `packages/connect/` | `@liberuum-org/connect` | Fork of Connect with Swarm landing page + settings UI |
 
 ## Prerequisites
 
@@ -59,19 +58,23 @@ pnpm build
 Connect (Browser)
   +-- Reactor (event-sourced operations engine)
   +-- PGlite (local Postgres in WASM for fast reads)
-  +-- swarm-plugin.ts (subscribes to changes, uploads to Swarm)
-  |     +-- Buffers operations per document (pendingOps)
-  |     +-- Debounces manifest writes (3s per document)
-  |     +-- Handles recovery on new device login
-  |     +-- Exposes status to settings UI via window.ph.swarm
+  +-- SyncManager (orchestrates all sync channels)
+  |     +-- CompositeChannelFactory (routes by config.type)
+  |     |     +-- "gql"   → GqlRequestChannel (Switchboard cloud sync)
+  |     |     +-- "swarm" → SwarmChannel (Swarm decentralized sync)
+  |     +-- SwarmChannel (native IChannel implementation)
+  |           +-- Outbox: push ops to Swarm (encrypt + upload + feed write)
+  |           +-- Inbox: pull ops from Swarm (read feed + download + decrypt)
+  |           +-- Cursors persist in sync_cursors (survive page reload)
   +-- SwarmClient (bee-reactor-adapter)
-        +-- AES-256-GCM encryption (wallet-derived key)
-        +-- /bytes uploads (immutable, content-addressed)
-        +-- Feed writes (mutable pointers, per-topic write lock)
-        +-- Stamp management (status, top-up, expand, create)
-        +-- ACT access control (for sharing)
+  |     +-- AES-256-GCM encryption (wallet-derived key)
+  |     +-- /bytes uploads (immutable, content-addressed)
+  |     +-- Feed writes (mutable pointers, per-topic write lock)
+  |     +-- Stamp management (status, top-up, expand, create)
+  +-- Swarm Plugin (init.ts — Bee detection, stamps, wallet, events)
+        +-- Exposes status to settings UI via window.ph.swarm
               |
-        Bee Node (localhost:1633)
+        Bee Node (localhost:1633 or remote)
               |
         Swarm Network (decentralized p2p)
 ```
@@ -100,12 +103,16 @@ Same wallet + same message = same key on any device. Deterministic. Portable. Su
 
 | File | Purpose |
 |------|---------|
-| `bee-reactor-adaptor/src/swarm-client.ts` | Bee SDK wrapper: upload, download, feeds, encryption, stamps, ACT |
-| `bee-reactor-adaptor/src/swarm-crypto.ts` | AES-256-GCM encrypt/decrypt with SWE prefix detection |
-| `bee-reactor-adaptor/src/wallet-signer.ts` | Deterministic key derivation from wallet signature |
-| `bee-reactor-adaptor/src/types.ts` | Type definitions: manifests, stamps, entries |
-| `swarm-doc-model/processors/swarm-plugin.ts` | Browser plugin: sync, recovery, debouncing, UI state |
-| `packages/connect/.../swarm-storage.tsx` | Settings UI component |
+| `src/channel/swarm-channel.ts` | Native IChannel: outbox push + inbox pull via Swarm |
+| `src/channel/composite-factory.ts` | Routes "gql"/"swarm" to sub-factories |
+| `src/channel/create-composite-factory.ts` | `createSwarmSyncBuilder()` — wires into ReactorBuilder |
+| `src/channel/add-swarm-remote.ts` | Per-drive Swarm remote registration |
+| `src/channel/manifest-manager.ts` | User + drive manifest writes on Swarm |
+| `src/swarm-client.ts` | Bee SDK wrapper: upload, download, feeds, encryption, stamps |
+| `src/swarm-crypto.ts` | AES-256-GCM encrypt/decrypt with SWE prefix detection |
+| `src/wallet-signer.ts` | Deterministic key derivation from wallet signature |
+| `src/plugin/init.ts` | Browser plugin: Bee detection, stamps, wallet, events |
+| `src/plugin/sharing.ts` | Cross-user encrypted sharing + import |
 
 ## Documentation
 
@@ -118,12 +125,16 @@ Same wallet + same message = same key on any device. Deterministic. Portable. Su
 
 - [x] Core sync and recovery (operations to Swarm, full restore from wallet)
 - [x] AES-256-GCM encryption (wallet-derived, deterministic)
-- [x] Feed optimization (3s debounce, op batch accumulation, manifest-as-reference)
+- [x] Feed optimization (op batch accumulation, manifest-as-reference)
 - [x] Hierarchical manifests (user → drive → document feeds)
 - [x] Folder structure preservation (sync, recovery, sharing)
 - [x] Settings UI (stamp management, storage stats, sync badges, folder tree, USD pricing)
 - [x] Encrypted document sharing between users (SHA-256 shared key, drive bundles with folder metadata)
-- [ ] SwarmChannel for DocSync (live collaborative editing via feed polling)
+- [x] SwarmChannel as native IChannel (push/pull via reactor SyncManager)
+- [x] CompositeChannelFactory for dual GQL + Swarm sync (proper builder API, no monkey-patching)
+- [x] Cursor persistence across page reloads (sync_cursors in PGlite)
+- [x] Recovery from Swarm (full drive + document restore from wallet signature)
+- [ ] Manifest update debouncing (reduce network round-trips per push)
 - [ ] GSOC/PSS real-time notifications
 - [ ] ETH address → signer address registry (on-chain, share by ETH address)
 

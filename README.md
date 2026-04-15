@@ -6,7 +6,7 @@ Decentralized storage for [Powerhouse](https://powerhouse.io) Connect using the 
 
 ## Swarm-connect workspace
 
-This monorepo is the **Bee ↔ Connect glue** (adapter + forked Connect, reactor, switchboard). Sibling folders sit under the same parent directory:
+This monorepo is the **Bee ↔ Connect glue** (adapter + forked Connect). Sibling folders sit under the same parent directory:
 
 | What you need | Where (from this folder) |
 |---------------|---------------------------|
@@ -22,10 +22,8 @@ Published Swarm product docs: [docs.ethswarm.org](https://docs.ethswarm.org).
 
 | Package | npm | Description |
 |---------|-----|-------------|
-| [`packages/adapter`](packages/adapter/) | `@liberuum-org/bee-reactor-adapter` | Core adapter: SwarmClient, encryption, feeds, stamps, processor plugin |
+| [`packages/adapter`](packages/adapter/) | `@liberuum-org/bee-reactor-adapter` | Core adapter: SwarmClient, SwarmChannel, encryption, feeds, stamps |
 | [`packages/connect`](packages/connect/) | `@liberuum-org/connect` | Fork of Powerhouse Connect with Swarm landing page + settings UI |
-| [`packages/reactor`](packages/reactor/) | `@liberuum-org/reactor` | Forked reactor with `withOperationStore` / `withKeyframeStore` |
-| [`packages/switchboard`](packages/switchboard/) | `@liberuum-org/switchboard` | Forked switchboard for Swarm-aware API |
 
 ## Quick Start
 
@@ -34,24 +32,17 @@ Published Swarm product docs: [docs.ethswarm.org](https://docs.ethswarm.org).
 ```json
 {
   "dependencies": {
-    "@liberuum-org/bee-reactor-adapter": "0.20.0"
+    "@liberuum-org/bee-reactor-adapter": "0.23.0"
   },
   "overrides": {
-    "@powerhousedao/connect": "npm:@liberuum-org/connect@6.0.0-dev.163-swarm.24"
+    "@powerhousedao/connect": "npm:@liberuum-org/connect@6.0.0-dev.174-swarm.1"
   }
 }
 ```
 
-Register the processor:
+The adapter integrates as a native reactor `IChannel` via `createSwarmSyncBuilder()`. The Connect fork wires it into `ReactorBuilder.withSync()` at build time — Swarm remotes persist in `sync_remotes` and survive page reloads natively alongside GQL channels.
 
-```typescript
-// processors/connect.ts
-import { swarmPluginProcessorBuilder } from "@liberuum-org/bee-reactor-adapter";
-
-export const processorFactoryBuilders = [swarmPluginProcessorBuilder];
-```
-
-That's it. The landing page forces wallet login, the plugin syncs all drives and docs to Swarm automatically.
+The landing page forces wallet login, the plugin syncs all drives and docs to Swarm automatically.
 
 ### Prerequisites
 
@@ -66,9 +57,9 @@ User edits document in Connect
        ↓
 Reactor stores operation in local PGlite
        ↓
-swarm-plugin receives change event, buffers operation
-       ↓  (3-second debounce)
-Encrypts all buffered ops → uploads to Swarm /bytes → updates feed pointer
+SyncManager detects new ordinal → populates SwarmChannel outbox
+       ↓
+SwarmChannel encrypts ops → uploads to Swarm /bytes → updates feed pointer
        ↓
 On new device: wallet signature → same key → read feeds → download ops → replay → restored
 ```

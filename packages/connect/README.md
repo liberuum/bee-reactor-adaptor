@@ -14,16 +14,18 @@ Fork of `@powerhousedao/connect` with **Swarm Storage** integration. Adds decent
 - **Stamp management**: extend duration, expand storage, buy new stamps
 - **Clear storage**: surgical clear (keeps identity, clears drives/shares)
 
-### Source Changes vs Upstream
+### Source Changes vs Upstream (`@powerhousedao/connect@6.0.0-dev.174`)
 
 | File | Change |
 |------|--------|
+| `src/utils/reactor.ts` | Uses `createSwarmSyncBuilder()` + `ReactorBuilder.withSync()` for dual GQL + Swarm channels |
+| `src/store/reactor.ts` | Swarm plugin init, event handlers, drive registration + recovery from Swarm |
 | `src/components/modal/modals/SettingsModal.tsx` | Added SwarmIcon + "Swarm Storage" tab |
-| `src/components/modal/modals/settings/swarm-storage.tsx` | Full Swarm settings UI (new file) |
-| `src/globals.ts` | Added `window.ethereum` type for wallet interaction |
-| `src/hooks/useRegistryPackages.ts` | Added `isUsableRegistryUrl` guard for null registry URLs |
+| `src/components/modal/modals/settings/swarm-settings/` | Full Swarm settings UI (12 new files) |
+| `src/components/swarm-landing.tsx` | Landing gate — forces wallet login before app access |
+| `src/components/app-loader.tsx` | Wraps `<App>` in `<SwarmLandingGate>` |
 
-All other source files are synced from upstream `@powerhousedao/connect`.
+All other source files are synced from upstream `@powerhousedao/connect@6.0.0-dev.174`.
 
 ## Publishing
 
@@ -34,13 +36,13 @@ npm publish --tag swarm
 
 Published as `@liberuum-org/connect` on npm with the `swarm` tag.
 
-## Usage in swarm-doc-model
+## Usage
 
-In `package.json` resolutions:
+In `package.json` overrides:
 ```json
 {
-  "resolutions": {
-    "@powerhousedao/connect": "npm:@liberuum-org/connect@6.0.0-dev.161-swarm.23"
+  "overrides": {
+    "@powerhousedao/connect": "npm:@liberuum-org/connect@6.0.0-dev.174-swarm.1"
   }
 }
 ```

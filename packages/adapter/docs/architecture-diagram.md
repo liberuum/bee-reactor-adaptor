@@ -259,17 +259,28 @@ Connect UI renders the recovered drive
 ## CompositeChannelFactory — How Two Channels Coexist
 
 ```
+createSwarmSyncBuilder(logger, jwtHandler)
+  │
+  │  Returns: { syncBuilder, compositeFactory, registerGqlFactory }
+  │
+  │  1. CompositeChannelFactory created with "swarm" registered
+  │  2. SyncBuilder.withChannelFactory(compositeFactory)
+  ▼
 ReactorBuilder
   │
-  │  .withChannelScheme(ChannelScheme.CONNECT)
-  │  → Creates GqlRequestChannelFactory internally
+  │  .withSync(syncBuilder)       ← proper builder API
+  │  .withJwtHandler(jwtHandler)
   │
-  │  After build:
+  │  buildModule() runs:
+  │  → Creates queue with document model resolver
+  │  → SyncManager.startup() recreates persisted remotes
+  │  → Swarm remotes work immediately (factory registered)
   ▼
-patchReactorBuilderForSwarm()
+After buildModule():
   │
-  │  Wraps the GQL factory in CompositeChannelFactory
-  │  Adds SwarmChannelFactory alongside
+  │  registerGqlFactory(reactorModule.queue)
+  │  → Registers "gql" on the CompositeChannelFactory
+  │  → GQL remotes can now be added via addRemoteDrive()
   ▼
 CompositeChannelFactory
   │
@@ -428,10 +439,10 @@ adapter/src/channel/
   ├── composite-factory.ts        — Routes "gql"/"swarm" to sub-factories
   ├── swarm-channel.ts            — IChannel: outbox push + inbox pull
   ├── swarm-channel-factory.ts    — Creates SwarmChannel from ChannelConfig
-  ├── register-swarm-channel.ts   — Post-build factory injection
+  ├── create-composite-factory.ts — createSwarmSyncBuilder() for ReactorBuilder.withSync()
+  ├── register-swarm-channel.ts   — Runtime factory injection utility (legacy/edge cases)
   ├── add-swarm-remote.ts         — Per-drive Swarm remote registration
-  ├── manifest-manager.ts         — User + drive manifest writes
-  └── create-composite-factory.ts — Helper for future direct SyncBuilder use
+  └── manifest-manager.ts         — User + drive manifest writes
 
 adapter/src/ (kept — infrastructure)
   │
