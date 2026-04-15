@@ -118,13 +118,14 @@ Feed topic: `ph:v2:profile:<address>`
 **This is exactly what PSS needs:** the `beeNodePublicKey` is the PSS recipient
 key, and the `overlayAddress` is the PSS target for routing.
 
-### Share Infrastructure
+### Share Infrastructure (ACT-protected)
 
-- `shareDocuments(docIds, recipientAddress)` — encrypt + upload drive bundle
-- `importSharedDocuments(senderAddress)` — download + decrypt shared bundles
-- `lookupUser(address)` — read public profile from Swarm
-- Share manifest at feed `ph:v2:share:<sender>:<recipient>`
-- Encryption: `SHA-256(sender + ":" + recipient)` → AES-256-GCM shared key
+- `shareDocuments(docIds, recipientAddress)` — ACT-protected upload, grants recipient's Bee node access
+- `importSharedDocuments(senderAddress)` — ACT download, Bee node handles ECDH decryption
+- `lookupUser(address)` — read public profile from Swarm (includes `beeNodePublicKey` for ACT)
+- Share manifest at feed `ph:v2:share:<sender>:<recipient>` (unencrypted — discovery index)
+- Encryption: **Swarm ACT** — ECDH(publisher_privkey x grantee_pubkey), handled transparently by Bee node
+- Grantee management: `createGrantees()`, `patchGrantees()` for add/revoke access
 
 ### Sidebar (`sidebar.tsx`)
 
@@ -185,15 +186,17 @@ of who initiates.
 ### Chat History Persistence
 
 PSS messages are ephemeral (expire with stamp TTL). For persistent chat
-history, messages are also written to a **shared feed**:
+history, messages are also written to an **ACT-protected feed**:
 
 ```
 Feed: ph:v2:chatlog:<sorted(alice, bob)>
-Encryption: SHA-256(alice + ":" + bob) — same key as share channel
+Encryption: Swarm ACT — both parties' Bee node public keys added as grantees
 Each entry: { from, text, timestamp, attachments? }
 ```
 
-Both users can read/write this feed using the deterministic shared key.
+Each user uploads their messages to the feed with `{ act: true }`. Both
+users' Bee node public keys are added as grantees via `createGrantees()`.
+The Bee node handles ECDH decryption transparently — no app-level keys.
 History survives node restarts and stamp expiration.
 
 ### Document Sharing in Chat
@@ -438,14 +441,60 @@ shows presence indicators:
 
 ---
 
+## Security Model: ACT vs Legacy deriveShareKey
+
+### The vulnerability (fixed)
+
+The original sharing used `SHA-256(sender_address + ":" + recipient_address)` as
+the encryption key. Both addresses are public (on-chain, ENS, etherscan), so any
+third party who knows both addresses could derive the same key and decrypt all
+shared content. This was **security theater**.
+
+### The fix: Swarm ACT (Access Control Trie)
+
+ACT uses **ECDH** (Elliptic Curve Diffie-Hellman):
+```
+session_key = SHA-256(ECDH(publisher_privkey, grantee_pubkey) || salt)
+```
+
+This requires the publisher's **private key** — which only their Bee node has.
+Even knowing both public keys, a third party cannot derive the session key.
+
+| | Old (deriveShareKey) | New (ACT) |
+|---|---|---|
+| Key derivation | `SHA-256(public_addr_a + public_addr_b)` | `ECDH(privkey × pubkey) + salt` |
+| Third party attack | Trivial — both addresses public | Impossible — discrete log problem |
+| Encryption | App-level AES-256-GCM | Bee node handles natively |
+| Grantee management | None | Add/remove via `patchGrantees()` |
+| Revocation | Impossible | Rebuild ACT with new access key |
+
+### What uses ACT
+
+- **Document sharing** — drive bundles between users (`shareDocuments`)
+- **Chat history feeds** — persistent message log between two users
+- **Collaboration data** — any multi-party encrypted content
+
+### What does NOT use ACT (by design)
+
+- **Personal data** (user manifest, doc manifests, operation batches) — encrypted
+  with wallet-derived AES key. Single-user, private key required. ACT not needed.
+- **Public profiles** — intentionally unencrypted for user discovery.
+- **Share manifests** — intentionally unencrypted (discovery index listing what
+  was shared). The actual data at the referenced hashes IS ACT-protected.
+- **PSS messages** — use PSS's own asymmetric encryption (recipient's Bee pubkey).
+
+---
+
 ## Dependencies
 
 | Dependency | Status | Notes |
 |------------|--------|-------|
 | `@ethersphere/bee-js` PSS API | Available (v11+) | `pssSend`, `pssSubscribe`, `pssReceive` |
 | `@ethersphere/bee-js` GSOC API | Available (v11+) | `gsocMine`, `gsocSend`, `gsocSubscribe` |
-| Public profile with overlay | **Needs extension** | Add `overlayAddress` to profile publish |
+| `@ethersphere/bee-js` ACT API | Available (v11+) | `createGrantees`, `patchGrantees`, upload/download with `act: true` |
+| ACT sharing (replaces deriveShareKey) | **Done** | ShareManager rewritten, 105/105 tests pass |
+| Public profile with overlay | Already published | `beeNodePublicKey` + `overlayAddress` in profile |
 | Full Bee node (both users) | **Hard requirement** | Light nodes cannot receive PSS/GSOC |
 | Mutable stamp | Already available | Current stamp selection prefers mutable |
-| Chat history feed | **New** | Append-only encrypted feed |
+| Chat history feed | **New** | Append-only ACT-encrypted feed |
 | GSOC signer mining | **New** | One-time per peer pair (~10-30s) |

@@ -293,11 +293,15 @@ export class SwarmClient {
         const hex = this.bee.signer.publicKey().address().toHex();
         return hex.startsWith("0x") ? hex : `0x${hex}`;
     }
+    cachedBeeNodePubKey = null;
     async getBeeNodePublicKey() {
+        if (this.cachedBeeNodePubKey)
+            return this.cachedBeeNodePubKey;
         const response = await fetch(`${this.bee.url}/addresses`);
         if (!response.ok)
             throw new Error(`Failed to get Bee node addresses: ${response.status}`);
         const data = (await response.json());
+        this.cachedBeeNodePubKey = data.publicKey;
         return data.publicKey;
     }
     async getNodeWallet() {
@@ -463,8 +467,10 @@ export class SwarmClient {
     // ═══════════════════════════════════════════════════════════════
     async publishPublicProfile(addr, profile) { return this.sharing.publishPublicProfile(addr, profile); }
     async readPublicProfile(addr) { return this.sharing.readPublicProfile(addr); }
-    async uploadSharedData(data, sender, recipient) { return this.sharing.uploadSharedData(data, sender, recipient); }
-    async downloadSharedData(ref, sender, recipient) { return this.sharing.downloadSharedData(ref, sender, recipient); }
+    async uploadSharedData(data, recipientBeeNodePubKey) { return this.sharing.uploadSharedData(data, recipientBeeNodePubKey); }
+    async downloadSharedData(ref, publisherBeeNodePubKey, actHistoryAddress) { return this.sharing.downloadSharedData(ref, publisherBeeNodePubKey, actHistoryAddress); }
+    /** @deprecated Legacy v1 download for migration — uses insecure deriveShareKey */
+    async legacyDownloadSharedData(ref, sender, recipient) { return this.sharing.legacyDownloadSharedData(ref, sender, recipient); }
     async writeShareManifest(sender, recipient, manifest) { return this.sharing.writeShareManifest(sender, recipient, manifest); }
     async readShareManifest(sender, recipient) { return this.sharing.readShareManifest(sender, recipient); }
     /** @deprecated Use getNodeWallet() instead */

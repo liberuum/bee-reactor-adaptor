@@ -383,10 +383,14 @@ export class SwarmClient {
     return hex.startsWith("0x") ? hex : `0x${hex}`;
   }
 
+  private cachedBeeNodePubKey: string | null = null;
+
   async getBeeNodePublicKey(): Promise<string> {
+    if (this.cachedBeeNodePubKey) return this.cachedBeeNodePubKey;
     const response = await fetch(`${this.bee.url}/addresses`);
     if (!response.ok) throw new Error(`Failed to get Bee node addresses: ${response.status}`);
     const data = (await response.json()) as { publicKey: string };
+    this.cachedBeeNodePubKey = data.publicKey;
     return data.publicKey;
   }
 
@@ -586,8 +590,10 @@ export class SwarmClient {
 
   async publishPublicProfile(addr: string, profile: SwarmPublicProfile): Promise<void> { return this.sharing.publishPublicProfile(addr, profile); }
   async readPublicProfile(addr: string): Promise<SwarmPublicProfile | null> { return this.sharing.readPublicProfile(addr); }
-  async uploadSharedData(data: string | Uint8Array, sender: string, recipient: string) { return this.sharing.uploadSharedData(data, sender, recipient); }
-  async downloadSharedData(ref: string, sender: string, recipient: string) { return this.sharing.downloadSharedData(ref, sender, recipient); }
+  async uploadSharedData(data: string | Uint8Array, recipientBeeNodePubKey: string) { return this.sharing.uploadSharedData(data, recipientBeeNodePubKey); }
+  async downloadSharedData(ref: string, publisherBeeNodePubKey: string, actHistoryAddress: string) { return this.sharing.downloadSharedData(ref, publisherBeeNodePubKey, actHistoryAddress); }
+  /** @deprecated Legacy v1 download for migration — uses insecure deriveShareKey */
+  async legacyDownloadSharedData(ref: string, sender: string, recipient: string) { return this.sharing.legacyDownloadSharedData(ref, sender, recipient); }
   async writeShareManifest(sender: string, recipient: string, manifest: ShareManifest) { return this.sharing.writeShareManifest(sender, recipient, manifest); }
   async readShareManifest(sender: string, recipient: string) { return this.sharing.readShareManifest(sender, recipient); }
 

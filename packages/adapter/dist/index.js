@@ -1,7 +1,7 @@
 // ─── Core ────────────────────────────────────────────────────
 export { SwarmClient } from "./swarm-client.js";
 export { StampManager, getBzzUsdPrice } from "./stamp-manager.js";
-export { ShareManager, deriveShareKey } from "./share-manager.js";
+export { ShareManager } from "./share-manager.js";
 export { SwarmConnectPlugin } from "./connect-plugin.js";
 export { hexToBytes, bytesToHex, concatBytes } from "./bytes-utils.js";
 // ─── Crypto + Wallet ────────────────────────────────────────

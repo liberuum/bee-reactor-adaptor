@@ -194,7 +194,7 @@ describe("SwarmClient with feed mode (uploadReference)", () => {
 });
 
 describe("SwarmClient sharing (feed mode)", () => {
-  it("should upload and download shared data with derived key", async () => {
+  it("should upload and download shared data with ACT", async () => {
     const client = new SwarmClient({
       beeUrl: BEE_URL,
       batchId: BATCH_ID,
@@ -202,19 +202,20 @@ describe("SwarmClient sharing (feed mode)", () => {
       useFeedMode: true,
     });
 
-    const senderAddr = "0xaaaa1111bbbb2222cccc3333dddd4444eeee5555";
-    const recipientAddr = "0xffff6666aaaa7777bbbb8888cccc9999dddd0000";
+    // Use the Bee node's own public key as grantee (single-node test)
+    const beeNodePubKey = await client.getBeeNodePublicKey();
     const secretData = JSON.stringify({ documents: [{ id: "doc-1", ops: [1, 2, 3] }] });
 
-    const { reference } = await client.uploadSharedData(secretData, senderAddr, recipientAddr);
+    const { reference, actHistoryAddress } = await client.uploadSharedData(secretData, beeNodePubKey);
     expect(reference).toBeTruthy();
+    expect(actHistoryAddress).toBeTruthy();
 
-    const downloaded = await client.downloadSharedData(reference, senderAddr, recipientAddr);
+    const downloaded = await client.downloadSharedData(reference, beeNodePubKey, actHistoryAddress);
     const parsed = JSON.parse(new TextDecoder().decode(downloaded));
     expect(parsed.documents[0].id).toBe("doc-1");
   });
 
-  it("should fail to download shared data with wrong addresses", async () => {
+  it("should fail to download ACT data without correct publisher key", async () => {
     const client = new SwarmClient({
       beeUrl: BEE_URL,
       batchId: BATCH_ID,
@@ -222,15 +223,13 @@ describe("SwarmClient sharing (feed mode)", () => {
       useFeedMode: true,
     });
 
-    const sender = "0xaaaa1111bbbb2222cccc3333dddd4444eeee5555";
-    const recipient = "0xffff6666aaaa7777bbbb8888cccc9999dddd0000";
-    const wrongRecipient = "0x1111222233334444555566667777888899990000";
+    const beeNodePubKey = await client.getBeeNodePublicKey();
+    const { reference, actHistoryAddress } = await client.uploadSharedData("secret", beeNodePubKey);
 
-    const { reference } = await client.uploadSharedData("secret", sender, recipient);
-
-    // Wrong recipient address → wrong derived key → decryption fails
+    // Wrong publisher key → ECDH fails → download should fail
+    const fakePubKey = "02" + "0".repeat(64); // invalid compressed pubkey
     await expect(
-      client.downloadSharedData(reference, sender, wrongRecipient),
+      client.downloadSharedData(reference, fakePubKey, actHistoryAddress),
     ).rejects.toThrow();
   });
 

@@ -212,6 +212,8 @@ export interface ShareManifest {
     to: string;
     shares: SharedDriveBundle[];
     createdAt: string;
+    /** Version: 1 = legacy deriveShareKey (insecure), 2 = ACT (ECDH-based) */
+    version?: 1 | 2;
 }
 /**
  * A drive bundle shared from one user to another.
@@ -220,8 +222,14 @@ export interface ShareManifest {
 export interface SharedDriveBundle {
     driveId: string;
     driveName: string;
-    /** Swarm reference to the encrypted drive bundle */
+    /** Swarm reference to the ACT-protected drive bundle */
     reference: string;
+    /** ACT history address — grantee needs this to download */
+    actHistoryAddress?: string;
+    /** ACT grantee list reference — for future grant/revoke */
+    actGranteeRef?: string;
+    /** Publisher's Bee node public key (compressed hex) — grantee needs this for ECDH */
+    publisherBeeNodePubKey?: string;
     /** Documents in this bundle */
     documents: Array<{
         documentId: string;

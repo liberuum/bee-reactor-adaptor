@@ -105,6 +105,14 @@ export async function shareDocumentsWithUser(client, docIds, recipientSignerAddr
         if (docsByDrive.size === 0) {
             return { success: false, shared: 0, error: "No documents could be shared." };
         }
+        // Resolve recipient's Bee node public key for ACT grant
+        const recipientProfile = await client.readPublicProfile(recipientSignerAddress);
+        if (!recipientProfile?.beeNodePublicKey) {
+            return { success: false, shared: 0, error: "Recipient has no public profile or missing Bee node public key. They need to connect to Swarm first." };
+        }
+        const recipientBeeNodePubKey = recipientProfile.beeNodePublicKey;
+        // Get our own Bee node public key (stored in share manifest for recipient to download)
+        const myBeeNodePubKey = await client.getBeeNodePublicKey();
         // Build share entries — ONE bundle per drive
         const shareEntries = [];
         let totalDocs = 0;
@@ -159,11 +167,14 @@ export async function shareDocumentsWithUser(client, docIds, recipientSignerAddr
                 ...(folderInfo ? { folders: folderInfo.folders, docFolders: folderInfo.docFolders } : {}),
                 ...(dm?.preferredEditor ? { preferredEditor: dm.preferredEditor } : {}),
             };
-            const shareResult = await client.uploadSharedData(JSON.stringify(bundle), mySignerAddress, recipientSignerAddress);
+            const shareResult = await client.uploadSharedData(JSON.stringify(bundle), recipientBeeNodePubKey);
             shareEntries.push({
                 driveId,
                 driveName,
                 reference: shareResult.reference,
+                actHistoryAddress: shareResult.actHistoryAddress,
+                actGranteeRef: shareResult.actGranteeRef,
+                publisherBeeNodePubKey: myBeeNodePubKey,
                 documents: docs.map((d) => ({
                     documentId: d.docId,
                     documentType: d.docType,
@@ -175,12 +186,13 @@ export async function shareDocumentsWithUser(client, docIds, recipientSignerAddr
             totalDocs += docs.length;
             console.log(`[SwarmPlugin] Bundled ${docs.length} doc(s) for drive "${driveName}" (${docs.reduce((s, d) => s + d.ops.length, 0)} total ops)`);
         }
-        // Write ONE clean share manifest
+        // Write ONE clean share manifest (v2 = ACT-protected)
         const shareManifest = {
             from: mySignerAddress,
             to: recipientSignerAddress,
             shares: shareEntries,
             createdAt: new Date().toISOString(),
+            version: 2,
         };
         await client.writeShareManifest(mySignerAddress, recipientSignerAddress, shareManifest);
         console.log(`[SwarmPlugin] Shared ${totalDocs} doc(s) across ${shareEntries.length} drive(s)`);
@@ -228,7 +240,15 @@ export async function importFromUser(client, senderSignerAddress) {
                     await new Promise((r) => setTimeout(r, retryDelays[attempt]));
                 }
                 try {
-                    bundleData = await client.downloadSharedData(share.reference, senderSignerAddress, mySignerAddress);
+                    if (shareManifest.version === 2 && share.publisherBeeNodePubKey && share.actHistoryAddress) {
+                        // v2: ACT-protected download — Bee node handles ECDH decryption
+                        bundleData = await client.downloadSharedData(share.reference, share.publisherBeeNodePubKey, share.actHistoryAddress);
+                    }
+                    else {
+                        // v1 legacy: insecure deriveShareKey — warn user
+                        console.warn("[SwarmPlugin] Share uses insecure v1 encryption. Ask sender to re-share for better security.");
+                        bundleData = await client.legacyDownloadSharedData(share.reference, senderSignerAddress, mySignerAddress);
+                    }
                     break;
                 }
                 catch (dlErr) {

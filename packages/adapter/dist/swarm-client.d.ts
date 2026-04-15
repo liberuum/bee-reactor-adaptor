@@ -127,6 +127,7 @@ export declare class SwarmClient {
     readDriveManifest(driveId: string): Promise<SwarmDriveManifest | null>;
     updateDriveManifest(driveId: string, manifest: SwarmDriveManifest): Promise<void>;
     getOwnerAddress(): string;
+    private cachedBeeNodePubKey;
     getBeeNodePublicKey(): Promise<string>;
     getNodeWallet(): Promise<{
         address: string;
@@ -249,10 +250,14 @@ export declare class SwarmClient {
     }): Promise<string>;
     publishPublicProfile(addr: string, profile: SwarmPublicProfile): Promise<void>;
     readPublicProfile(addr: string): Promise<SwarmPublicProfile | null>;
-    uploadSharedData(data: string | Uint8Array, sender: string, recipient: string): Promise<{
+    uploadSharedData(data: string | Uint8Array, recipientBeeNodePubKey: string): Promise<{
         reference: string;
+        actHistoryAddress: string;
+        actGranteeRef: string;
     }>;
-    downloadSharedData(ref: string, sender: string, recipient: string): Promise<Uint8Array<ArrayBufferLike>>;
+    downloadSharedData(ref: string, publisherBeeNodePubKey: string, actHistoryAddress: string): Promise<Uint8Array<ArrayBufferLike>>;
+    /** @deprecated Legacy v1 download for migration — uses insecure deriveShareKey */
+    legacyDownloadSharedData(ref: string, sender: string, recipient: string): Promise<Uint8Array<ArrayBufferLike>>;
     writeShareManifest(sender: string, recipient: string, manifest: ShareManifest): Promise<void>;
     readShareManifest(sender: string, recipient: string): Promise<ShareManifest | null>;
     /** @deprecated Use getNodeWallet() instead */
