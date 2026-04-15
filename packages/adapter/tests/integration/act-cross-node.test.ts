@@ -182,11 +182,12 @@ describe("ACT cross-node sharing", () => {
     console.log(`Grantee list verified: ${grantees.length} grantee(s), includes Node B`);
   });
 
-  // NOTE: patchGrantees (add more grantees after initial upload) returns 500
-  // on Bee 2.7.1. This appears to be a Bee node limitation — the initial
-  // createGrantees + upload flow works correctly for the primary sharing case.
-  // Investigate with Swarm team if dynamic grant/revoke is needed later.
-  it.skip("should support granting access to additional keys (patchGrantees 500 on Bee 2.7.1)", async () => {
+  // bee-js bug: patchGrantees serializes the 128-char encrypted grantee
+  // reference incorrectly (truncates to 92 chars in URL). The Bee node
+  // returns 500 because the reference is corrupted. Curl with the correct
+  // 128-char ref works. Workaround: create all grantees upfront.
+  // TODO: file bug with bee-js team or implement direct HTTP patchGrantees
+  it.skip("should support adding more grantees after initial share (bee-js Reference serialization bug)", async () => {
     const payload = "multi-grantee test";
     const result = await clientA.uploadSharedData(payload, beeNodePubKeyB);
 
