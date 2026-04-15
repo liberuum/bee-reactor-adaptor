@@ -39,6 +39,28 @@ export {
 } from "./channel/index.js";
 export type { SwarmChannelConfig } from "./channel/index.js";
 
+// ─── Chat (PSS + GSOC + ACT history) ──────────────────────
+export {
+  ChatManager,
+  PssMessenger,
+  ChatHistory,
+  GsocNotifier,
+  chatTopic,
+  historyTopic,
+} from "./chat/index.js";
+export type {
+  ChatMessage,
+  ChatAttachment,
+  ChatSession,
+  ChatHistoryPage,
+  ConversationSummary,
+  GsocNotification,
+  GsocNotificationType,
+  ChatEvent,
+  ChatEventType,
+  ChatEventHandler,
+} from "./chat/index.js";
+
 // ─── Types ──────────────────────────────────────────────────
 export type {
   BeeAdapterConfig,
