@@ -12,11 +12,13 @@
 import type { Bee } from "@ethersphere/bee-js";
 import type { SwarmClient } from "../swarm-client.js";
 import type { ChatMessage, ChatSession, ChatAttachment, ChatEventHandler, GsocNotification } from "./types.js";
+import { SwarmFile } from "./swarm-file.js";
 export declare class ChatManager {
     private readonly client;
     private readonly pss;
     private readonly history;
     private readonly gsoc;
+    readonly file: SwarmFile;
     private readonly sessions;
     private readonly eventHandlers;
     private readonly myAddress;
@@ -57,6 +59,15 @@ export declare class ChatManager {
      * chat message with an attachment.
      */
     shareDocumentInChat(session: ChatSession, text: string, docIds: string[], driveId: string, driveName: string): Promise<ChatMessage>;
+    /**
+     * Share a raw file (image, audio, video, PDF, etc.) inline in chat.
+     *
+     * The file is uploaded to Swarm with ACT protection. For images,
+     * a thumbnail is generated for inline chat preview.
+     *
+     * For Powerhouse document models, use shareDocumentInChat() instead.
+     */
+    shareFileInChat(session: ChatSession, text: string, fileData: Uint8Array | ArrayBuffer, fileName: string, mimeType: string): Promise<ChatMessage>;
     /**
      * Send a typing indicator to a peer.
      */

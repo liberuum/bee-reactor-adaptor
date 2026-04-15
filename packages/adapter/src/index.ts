@@ -45,12 +45,18 @@ export {
   PssMessenger,
   ChatHistory,
   GsocNotifier,
+  SwarmFile,
   chatTopic,
   historyTopic,
+  getFileCategory,
+  INLINE_RENDERABLE,
 } from "./chat/index.js";
 export type {
   ChatMessage,
   ChatAttachment,
+  FileAttachment,
+  DocumentShareAttachment,
+  FileCategory,
   ChatSession,
   ChatHistoryPage,
   ConversationSummary,

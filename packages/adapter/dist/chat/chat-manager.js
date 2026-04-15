@@ -1,11 +1,13 @@
 import { PssMessenger, chatTopic } from "./pss-messenger.js";
 import { ChatHistory, historyTopic } from "./chat-history.js";
 import { GsocNotifier } from "./gsoc-notifier.js";
+import { SwarmFile } from "./swarm-file.js";
 export class ChatManager {
     client;
     pss;
     history;
     gsoc;
+    file;
     sessions = new Map();
     eventHandlers = new Set();
     myAddress;
@@ -15,6 +17,7 @@ export class ChatManager {
         this.pss = new PssMessenger(bee, batchId, myAddress);
         this.history = new ChatHistory(client, myAddress);
         this.gsoc = new GsocNotifier(bee, batchId, myAddress);
+        this.file = new SwarmFile(client);
     }
     // ─── Session Management ──────────────────────────────────────
     /**
@@ -145,6 +148,18 @@ export class ChatManager {
             })),
         };
         return this.sendMessage(session, text, attachment);
+    }
+    /**
+     * Share a raw file (image, audio, video, PDF, etc.) inline in chat.
+     *
+     * The file is uploaded to Swarm with ACT protection. For images,
+     * a thumbnail is generated for inline chat preview.
+     *
+     * For Powerhouse document models, use shareDocumentInChat() instead.
+     */
+    async shareFileInChat(session, text, fileData, fileName, mimeType) {
+        const result = await this.file.upload(fileData, fileName, mimeType, session.peerBeeNodePubKey);
+        return this.sendMessage(session, text, result.attachment);
     }
     // ─── Notifications ───────────────────────────────────────────
     /**

@@ -25,12 +25,42 @@ export interface ChatMessage {
   status: "sending" | "sent" | "delivered" | "read";
 }
 
-export interface ChatAttachment {
+/**
+ * Chat attachment — either a raw file (image, audio, video, etc.)
+ * or a Powerhouse document model share (operations-based).
+ */
+export type ChatAttachment = FileAttachment | DocumentShareAttachment;
+
+/**
+ * Raw file shared via Swarm — images, audio, video, PDFs, etc.
+ * ACT-protected so only the chat participants can access it.
+ */
+export interface FileAttachment {
+  kind: "file";
+  /** Original filename */
+  fileName: string;
+  /** MIME type (e.g., "image/png", "audio/mp3", "video/mp4") */
+  mimeType: string;
+  /** File size in bytes */
+  sizeBytes: number;
+  /** ACT-protected Swarm reference to the file content */
+  reference: string;
+  actHistoryAddress: string;
+  publisherBeeNodePubKey: string;
+  /** Optional thumbnail reference for images/videos (small preview, also ACT-protected) */
+  thumbnailReference?: string;
+}
+
+/**
+ * Powerhouse document model share — operations-based sharing
+ * using the existing SwarmChannel sync infrastructure.
+ */
+export interface DocumentShareAttachment {
   kind: "document-share";
   /** Drive containing the shared documents */
   driveId: string;
   driveName: string;
-  /** ACT-protected Swarm reference to the shared bundle */
+  /** ACT-protected Swarm reference to the operations bundle */
   shareReference: string;
   actHistoryAddress: string;
   publisherBeeNodePubKey: string;
@@ -41,6 +71,27 @@ export interface ChatAttachment {
     type: string;
   }>;
 }
+
+// ─── File Type Helpers ─────────────────────────────────────────
+
+export type FileCategory = "image" | "audio" | "video" | "document" | "other";
+
+export function getFileCategory(mimeType: string): FileCategory {
+  if (mimeType.startsWith("image/")) return "image";
+  if (mimeType.startsWith("audio/")) return "audio";
+  if (mimeType.startsWith("video/")) return "video";
+  if (mimeType === "application/pdf" || mimeType.startsWith("text/")) return "document";
+  return "other";
+}
+
+/** MIME types that can be rendered inline in chat */
+export const INLINE_RENDERABLE: Record<FileCategory, string[]> = {
+  image: ["image/png", "image/jpeg", "image/gif", "image/svg+xml", "image/webp"],
+  audio: ["audio/mpeg", "audio/ogg", "audio/wav", "audio/webm"],
+  video: ["video/mp4", "video/webm", "video/ogg"],
+  document: ["application/pdf"],
+  other: [],
+};
 
 // ─── Chat Sessions ─────────────────────────────────────────────
 

@@ -9,9 +9,17 @@ export { ChatManager } from "./chat-manager.js";
 export { PssMessenger, chatTopic, makeTarget } from "./pss-messenger.js";
 export { ChatHistory, historyTopic } from "./chat-history.js";
 export { GsocNotifier } from "./gsoc-notifier.js";
+export { SwarmFile } from "./swarm-file.js";
+export {
+  getFileCategory,
+  INLINE_RENDERABLE,
+} from "./types.js";
 export type {
   ChatMessage,
   ChatAttachment,
+  FileAttachment,
+  DocumentShareAttachment,
+  FileCategory,
   ChatSession,
   ChatHistoryPage,
   ConversationSummary,

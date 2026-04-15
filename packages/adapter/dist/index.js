@@ -13,7 +13,7 @@ export { onSwarmEvent, emitSwarmEvent } from "./plugin/events.js";
 // ─── SwarmChannel (native reactor sync) ─────────────────────
 export { CompositeChannelFactory, SwarmChannel, SwarmChannelFactory, registerSwarmChannel, createSwarmSyncBuilder, } from "./channel/index.js";
 // ─── Chat (PSS + GSOC + ACT history) ──────────────────────
-export { ChatManager, PssMessenger, ChatHistory, GsocNotifier, chatTopic, historyTopic, } from "./chat/index.js";
+export { ChatManager, PssMessenger, ChatHistory, GsocNotifier, SwarmFile, chatTopic, historyTopic, getFileCategory, INLINE_RENDERABLE, } from "./chat/index.js";
 export { createEmptyManifest } from "./types.js";
 // ─── Utilities ──────────────────────────────────────────────
 export { buildFolderTree } from "./folder-tree.js";
