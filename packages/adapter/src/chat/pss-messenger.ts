@@ -98,7 +98,9 @@ export class PssMessenger {
   ): PssSubscription {
     const topic = chatTopic(this.myAddress, peerAddress);
     const existingSub = this.subscriptions.get(topic);
-    if (existingSub) existingSub.cancel();
+    if (existingSub) {
+      try { existingSub.cancel(); } catch { /* WebSocket may already be closing */ }
+    }
 
     const sub = this.bee.pssSubscribe(Topic.fromString(topic), {
       onMessage: (data: any) => {

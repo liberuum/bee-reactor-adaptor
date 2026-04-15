@@ -3,45 +3,82 @@
  * Bridges the adapter's ChatManager with React component state.
  */
 import { useState, useEffect, useCallback, useRef } from "react";
-import type { ChatMessage, ChatSession, ConversationSummary, GsocNotification, ChatView } from "./types.js";
+import type { ChatMessage, ChatSession, ConversationSummary, ChatView } from "./types.js";
 
-/** Global chat state exposed via window.ph.swarm.chat */
-interface SwarmChatState {
-  manager: any; // ChatManager from adapter
-  sessions: Map<string, ChatSession>;
-}
-
-function getChat(): SwarmChatState | null {
+function getManager(): any | null {
   const ph = (globalThis as any).window?.ph;
-  return ph?.swarm?.chat ?? null;
+  return ph?.swarm?.chat?.manager ?? null;
 }
 
 export function useChat() {
   const [view, setView] = useState<ChatView>("conversations");
   const [activePeer, setActivePeer] = useState<string | null>(null);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [messagesByPeer, setMessagesByPeer] = useState<Map<string, ChatMessage[]>>(new Map());
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [isReady, setIsReady] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const unsubRef = useRef<(() => void) | null>(null);
+  const activePeerRef = useRef<string | null>(null);
 
-  // Check if chat manager is available
+  // Keep ref in sync so callbacks see latest value
+  activePeerRef.current = activePeer;
+
+  // Current conversation messages
+  const messages = activePeer ? (messagesByPeer.get(activePeer) ?? []) : [];
+
+  // Add a message to a peer's message list
+  const addMessage = useCallback((peerAddress: string, msg: ChatMessage) => {
+    setMessagesByPeer(prev => {
+      const next = new Map(prev);
+      const existing = next.get(peerAddress) ?? [];
+      // Deduplicate by message ID
+      if (existing.some(m => m.id === msg.id)) return prev;
+      next.set(peerAddress, [...existing, msg]);
+      return next;
+    });
+  }, []);
+
+  // Rebuild conversation list from ChatManager sessions + local messages
+  const refreshConversations = useCallback(() => {
+    const manager = getManager();
+    if (!manager) return;
+
+    const sessions = manager.listSessions() as ChatSession[];
+    const summaries: ConversationSummary[] = sessions.map((s: ChatSession) => {
+      const peerMsgs = messagesByPeer.get(s.peerAddress) ?? [];
+      const lastMsg = peerMsgs[peerMsgs.length - 1];
+      const unread = activePeerRef.current === s.peerAddress
+        ? 0
+        : peerMsgs.filter((m: ChatMessage) => m.from !== ((globalThis as any).window?.ph?.swarm?.signerEntry?.ownerAddress ?? "")).length;
+      return {
+        peerAddress: s.peerAddress,
+        peerDisplayName: s.peerDisplayName,
+        lastMessage: lastMsg?.text?.slice(0, 50),
+        lastMessageTime: lastMsg?.timestamp ?? s.lastActivity,
+        unreadCount: unread,
+        isOnline: s.ready,
+      };
+    });
+    setConversations(summaries);
+  }, [messagesByPeer]);
+
+  // Check if chat manager is available + subscribe to events
   useEffect(() => {
     const check = () => {
-      const chat = getChat();
-      if (chat?.manager) {
+      const manager = getManager();
+      if (manager && !isReady) {
         setIsReady(true);
-
-        // Subscribe to incoming messages
-        if (!unsubRef.current) {
-          unsubRef.current = chat.manager.onMessage((msg: ChatMessage) => {
-            setMessages(prev => [...prev, msg]);
-            // Update conversation list
-            updateConversations(chat);
-          });
-        }
-
-        updateConversations(chat);
+      }
+      if (manager && !unsubRef.current) {
+        // Subscribe to ALL incoming messages (from any peer)
+        unsubRef.current = manager.onMessage((msg: ChatMessage) => {
+          const peerAddr = msg.from;
+          console.log(`[Chat UI] Message received from ${peerAddr.slice(0, 10)}: "${msg.text.slice(0, 30)}"`);
+          addMessage(peerAddr, msg);
+        });
+      }
+      if (manager) {
+        refreshConversations();
       }
     };
 
@@ -50,85 +87,77 @@ export function useChat() {
     return () => {
       clearInterval(interval);
       unsubRef.current?.();
+      unsubRef.current = null;
     };
-  }, []);
+  }, [isReady, addMessage, refreshConversations]);
 
-  const updateConversations = useCallback((chat: SwarmChatState) => {
-    const sessions = chat.manager.listSessions() as ChatSession[];
-    const summaries: ConversationSummary[] = sessions.map(s => ({
-      peerAddress: s.peerAddress,
-      peerDisplayName: s.peerDisplayName,
-      lastMessage: undefined,
-      lastMessageTime: s.lastActivity,
-      unreadCount: 0,
-      isOnline: s.ready,
-    }));
-    setConversations(summaries);
-  }, []);
+  // Refresh conversation list when messages change
+  useEffect(() => {
+    refreshConversations();
+  }, [messagesByPeer, refreshConversations]);
 
   const openConversation = useCallback(async (peerAddress: string) => {
-    const chat = getChat();
-    if (!chat?.manager) return;
+    const manager = getManager();
+    if (!manager) return;
 
     setActivePeer(peerAddress);
     setView("thread");
-    setMessages([]);
 
     // Start or resume session
     try {
-      await chat.manager.startSession(peerAddress, { skipGsoc: true });
+      await manager.startSession(peerAddress, { skipGsoc: true });
+      refreshConversations();
     } catch (err) {
       console.warn("[Chat] Failed to start session:", err);
     }
-  }, []);
+  }, [refreshConversations]);
 
   const sendMessage = useCallback(async (text: string) => {
-    const chat = getChat();
-    if (!chat?.manager || !activePeer) return;
+    const manager = getManager();
+    if (!manager || !activePeer) return;
 
     setIsSending(true);
     try {
-      const session = chat.manager.getSession(activePeer);
+      const session = manager.getSession(activePeer);
       if (!session) throw new Error("No active session");
 
-      const msg = await chat.manager.sendMessage(session, text);
-      setMessages(prev => [...prev, msg]);
+      const msg = await manager.sendMessage(session, text);
+      addMessage(activePeer, msg);
     } catch (err) {
       console.error("[Chat] Send failed:", err);
     } finally {
       setIsSending(false);
     }
-  }, [activePeer]);
+  }, [activePeer, addMessage]);
 
   const sendFile = useCallback(async (file: File, text?: string) => {
-    const chat = getChat();
-    if (!chat?.manager || !activePeer) return;
+    const manager = getManager();
+    if (!manager || !activePeer) return;
 
     setIsSending(true);
     try {
-      const session = chat.manager.getSession(activePeer);
+      const session = manager.getSession(activePeer);
       if (!session) throw new Error("No active session");
 
       const data = new Uint8Array(await file.arrayBuffer());
-      const msg = await chat.manager.shareFileInChat(
+      const msg = await manager.shareFileInChat(
         session,
         text || file.name,
         data,
         file.name,
         file.type || "application/octet-stream",
       );
-      setMessages(prev => [...prev, msg]);
+      addMessage(activePeer, msg);
     } catch (err) {
       console.error("[Chat] File send failed:", err);
     } finally {
       setIsSending(false);
     }
-  }, [activePeer]);
+  }, [activePeer, addMessage]);
 
   const goBack = useCallback(() => {
     setView("conversations");
     setActivePeer(null);
-    setMessages([]);
   }, []);
 
   return {

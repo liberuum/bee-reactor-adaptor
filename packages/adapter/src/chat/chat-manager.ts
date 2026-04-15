@@ -46,6 +46,28 @@ export class ChatManager {
     this.history = new ChatHistory(client, myAddress);
     this.gsoc = new GsocNotifier(bee, batchId, myAddress);
     this.file = new SwarmFile(client);
+
+    // Auto-subscribe to broadcast topic so we discover new conversations.
+    // When another user sends us a message for the first time, they also
+    // send a ping to our broadcast topic. We auto-create a session and
+    // subscribe to the direct topic so we receive their messages.
+    this.pss.subscribeAll({
+      onMessage: (message) => {
+        console.log(`[Chat] Broadcast ping from ${message.from.slice(0, 10)}: "${message.text.slice(0, 30)}"`);
+        // Auto-create session with the sender so we start receiving their messages
+        this.startSession(message.from, { skipGsoc: true })
+          .then(() => {
+            this.emit({ type: "message-received", data: message });
+          })
+          .catch((err) => {
+            console.warn(`[Chat] Auto-session for ${message.from.slice(0, 10)} failed:`, err);
+          });
+      },
+      onError: (err) => {
+        console.warn("[Chat] Broadcast subscription error:", err.message);
+      },
+    });
+    console.log("[Chat] Listening for new conversations on broadcast topic");
   }
 
   // ─── Session Management ──────────────────────────────────────
@@ -161,13 +183,23 @@ export class ChatManager {
       status: "sending",
     };
 
-    // Send via PSS
+    // Send via PSS (direct topic between the two users)
     await this.pss.send(
       session.peerOverlay,
       session.peerBeeNodePubKey,
       session.peerAddress,
       message,
     );
+
+    // Also send a broadcast ping so the recipient discovers this conversation
+    // even if they haven't opened a chat with us yet. The broadcast topic
+    // is per-recipient: ph:v2:chat:broadcast:<recipientAddress>
+    this.pss.sendBroadcastPing(
+      session.peerOverlay,
+      session.peerBeeNodePubKey,
+      session.peerAddress,
+      message,
+    ).catch(() => {}); // best-effort, don't block on this
 
     message.status = "sent";
     session.lastActivity = message.timestamp;

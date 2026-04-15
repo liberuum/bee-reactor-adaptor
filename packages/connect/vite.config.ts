@@ -2,6 +2,7 @@ import tailwind from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 import { analyzer } from "vite-bundle-analyzer";
+import { nodePolyfills } from "vite-plugin-node-polyfills";
 
 export default defineConfig({
   resolve: {
@@ -18,6 +19,7 @@ export default defineConfig({
   },
   plugins: [
     process.env.PH_DEBUG_BUILD === "true" ? analyzer() : undefined,
+    nodePolyfills({ include: ["buffer"], exclude: ["stream"] }),
     tailwind(),
     react(),
   ],

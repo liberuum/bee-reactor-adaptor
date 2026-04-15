@@ -1,7 +1,9 @@
 /**
- * Message input — text compose + file attach button.
+ * Message input with Swarm orange styling.
  */
 import React, { useState, useRef } from "react";
+
+const SWARM_ORANGE = "#F7931A";
 
 export function MessageInput({
   onSend,
@@ -41,12 +43,13 @@ export function MessageInput({
   };
 
   return (
-    <form onSubmit={handleSubmit} className="flex items-end gap-2 border-t border-gray-200 p-3">
+    <form onSubmit={handleSubmit} className="flex items-end gap-2 border-t border-orange-100 bg-white px-3 py-2.5">
       <button
         type="button"
         onClick={() => fileRef.current?.click()}
         disabled={disabled || isSending}
-        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-gray-400 hover:bg-gray-100 hover:text-gray-600 disabled:opacity-50"
+        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors hover:bg-orange-50 disabled:opacity-40"
+        style={{ color: SWARM_ORANGE }}
         title="Attach file"
       >
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -67,16 +70,19 @@ export function MessageInput({
         placeholder="Type a message..."
         disabled={disabled || isSending}
         rows={1}
-        className="min-h-[36px] max-h-[120px] flex-1 resize-none rounded-lg border border-gray-200 px-3 py-2 text-sm outline-none focus:border-blue-400 disabled:opacity-50"
+        className="min-h-[36px] max-h-[120px] flex-1 resize-none rounded-xl border border-orange-200 bg-orange-50/30 px-3 py-2 text-sm outline-none placeholder:text-gray-400 focus:border-orange-400 focus:bg-white disabled:opacity-40"
       />
       <button
         type="submit"
         disabled={!text.trim() || disabled || isSending}
-        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
+        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-white transition-all hover:brightness-110 disabled:opacity-40"
+        style={{ backgroundColor: SWARM_ORANGE }}
         title="Send"
       >
         {isSending ? (
-          <span className="animate-spin text-xs">...</span>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="animate-spin">
+            <circle cx="12" cy="12" r="10" strokeDasharray="32" strokeDashoffset="8" />
+          </svg>
         ) : (
           <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
             <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
