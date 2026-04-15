@@ -7,27 +7,21 @@
  *
  * Usage in Connect's reactor.ts:
  *   import { createSwarmSyncBuilder } from "../../../adapter/src/channel/create-composite-factory.js";
- *   const syncBuilder = createSwarmSyncBuilder(logger, jwtHandler, queue);
- *   new ReactorBuilder().withSync(syncBuilder)
+ *   const { syncBuilder, registerGqlFactory } = createSwarmSyncBuilder(logger, jwtHandler);
+ *   // ... build reactor ...
+ *   registerGqlFactory(reactorModule.queue);
  */
 import type { ILogger } from "document-model";
 import { SyncBuilder, type JwtHandler, type IQueue } from "@powerhousedao/reactor";
 import { CompositeChannelFactory } from "./composite-factory.js";
 /**
  * Creates a CompositeChannelFactory with Swarm channel support.
- * GQL channel is registered lazily when a queue becomes available.
+ * GQL channel is registered via the returned `registerGqlFactory` callback
+ * once the queue becomes available after ReactorBuilder.buildModule().
  */
-export declare function createCompositeFactory(logger: ILogger): CompositeChannelFactory;
-/**
- * Creates a SyncBuilder with a CompositeChannelFactory that supports
- * both "gql" (Switchboard/Connect cloud) and "swarm" (Bee node) channels.
- *
- * The GQL channel requires a queue instance. If no queue is provided,
- * only the Swarm channel is registered (GQL addRemoteDrive will fail).
- *
- * @param logger - Logger instance
- * @param jwtHandler - JWT handler for GQL authentication (optional)
- * @param queue - Queue instance for the GQL channel (optional)
- */
-export declare function createSwarmSyncBuilder(logger: ILogger, jwtHandler?: JwtHandler, queue?: IQueue): SyncBuilder;
+export declare function createSwarmSyncBuilder(logger: ILogger, jwtHandler?: JwtHandler): {
+    syncBuilder: SyncBuilder;
+    compositeFactory: CompositeChannelFactory;
+    registerGqlFactory: (queue: IQueue) => void;
+};
 //# sourceMappingURL=create-composite-factory.d.ts.map

@@ -9,11 +9,6 @@ import {
   type JwtHandler,
   type SignerConfig,
 } from "@powerhousedao/reactor-browser";
-import {
-  EventBus,
-  InMemoryQueue,
-  NullDocumentModelResolver,
-} from "@powerhousedao/reactor";
 import type {
   DocumentModelModule,
   UpgradeManifest,
@@ -27,10 +22,13 @@ import { createSwarmSyncBuilder } from "../../../adapter/src/channel/create-comp
 /**
  * Creates a Reactor with dual GQL + Swarm sync via the proper builder API.
  *
- * Uses ReactorBuilder.withSync() + withQueue() + withEventBus() to inject
- * a CompositeChannelFactory that handles both "gql" and "swarm" channel
- * types. No monkey-patching required — Swarm remotes persist in
- * sync_remotes and survive page reloads natively.
+ * Uses ReactorBuilder.withSync() to inject a CompositeChannelFactory that
+ * handles both "gql" and "swarm" channel types. The GQL factory is registered
+ * after buildModule() once the queue (with proper document model resolver)
+ * is available from ReactorModule.
+ *
+ * No monkey-patching required — Swarm remotes persist in sync_remotes
+ * and survive page reloads natively.
  */
 export async function createBrowserReactor(
   documentModelModules: DocumentModelModule[],
@@ -56,14 +54,14 @@ export async function createBrowserReactor(
 
   const logger = new ConsoleLogger(["reactor-client"]);
 
-  // Create shared components externally so both the ReactorBuilder
-  // and the GqlRequestChannelFactory share the same instances.
-  const eventBus = new EventBus();
-  const queue = new InMemoryQueue(eventBus, new NullDocumentModelResolver());
-
-  // Build a SyncBuilder with CompositeChannelFactory (GQL + Swarm).
-  // This replaces the old monkey-patching approach entirely.
-  const syncBuilder = createSwarmSyncBuilder(logger, jwtHandler, queue);
+  // Build a SyncBuilder with CompositeChannelFactory.
+  // Swarm is registered immediately; GQL is deferred until after build
+  // because GqlRequestChannelFactory needs the queue (which contains
+  // the document model resolver created inside buildModule).
+  const { syncBuilder, registerGqlFactory } = createSwarmSyncBuilder(
+    logger,
+    jwtHandler,
+  );
 
   const builder = new ReactorClientBuilder()
     .withLogger(logger)
@@ -72,8 +70,6 @@ export async function createBrowserReactor(
       new ReactorBuilder()
         .withDocumentModels(documentModelModules)
         .withUpgradeManifests(upgradeManifests)
-        .withEventBus(eventBus)
-        .withQueue(queue)
         .withSync(syncBuilder)
         .withJwtHandler(jwtHandler)
         .withKysely(
@@ -88,6 +84,15 @@ export async function createBrowserReactor(
   }
 
   const module = await builder.buildModule();
+
+  // Register the GQL factory now that the queue (with document model
+  // resolver) is available. Any GQL remotes persisted in sync_remotes
+  // were already restored during startup — new GQL remotes added via
+  // addRemoteDrive() will use this factory.
+  const queue = module.reactorModule?.queue;
+  if (queue) {
+    registerGqlFactory(queue);
+  }
 
   return {
     ...module,
