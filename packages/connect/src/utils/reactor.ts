@@ -1,7 +1,6 @@
 import { PGlite } from "@electric-sql/pglite";
 import {
   addRemoteDrive,
-  ChannelScheme,
   ReactorBuilder,
   ReactorClientBuilder,
   type BrowserReactorClientModule,
@@ -10,6 +9,11 @@ import {
   type JwtHandler,
   type SignerConfig,
 } from "@powerhousedao/reactor-browser";
+import {
+  EventBus,
+  InMemoryQueue,
+  NullDocumentModelResolver,
+} from "@powerhousedao/reactor";
 import type {
   DocumentModelModule,
   UpgradeManifest,
@@ -18,21 +22,15 @@ import { createSignatureVerifier, type IRenown } from "@renown/sdk";
 import { ConsoleLogger } from "document-model";
 import { Kysely } from "kysely";
 import { PGliteDialect } from "kysely-pglite-dialect";
-// Swarm sync channel — patch builder before build so persisted remotes work on restart
-import { patchReactorBuilderForSwarm } from "../../../adapter/src/channel/register-swarm-channel.js";
+import { createSwarmSyncBuilder } from "../../../adapter/src/channel/create-composite-factory.js";
 
 /**
- * Creates a Reactor with GQL sync (via ChannelScheme.CONNECT).
+ * Creates a Reactor with dual GQL + Swarm sync via the proper builder API.
  *
- * The Swarm sync channel is registered separately after init via
- * the existing plugin system (initSwarmPlugin). Once the SwarmChannel
- * is proven stable, we'll switch to CompositeChannelFactory here.
- *
- * SWARM INTEGRATION NOTE:
- * To switch to CompositeChannelFactory (GQL + Swarm dual sync):
- * 1. Import { createSwarmSyncBuilder } from adapter/src/channel
- * 2. Replace .withChannelScheme(ChannelScheme.CONNECT) with .withSync(syncBuilder)
- * 3. This requires passing a queue — see swarm-channel-architecture.md
+ * Uses ReactorBuilder.withSync() + withQueue() + withEventBus() to inject
+ * a CompositeChannelFactory that handles both "gql" and "swarm" channel
+ * types. No monkey-patching required — Swarm remotes persist in
+ * sync_remotes and survive page reloads natively.
  */
 export async function createBrowserReactor(
   documentModelModules: DocumentModelModule[],
@@ -56,18 +54,17 @@ export async function createBrowserReactor(
     relaxedDurability: true,
   });
 
-  // Remove persisted Swarm remotes from sync_remotes before startup.
-  // The GQL channelFactory doesn't know "swarm" type and would crash
-  // SyncManager.startup(). We re-register them dynamically after build.
-  // KEEP sync_cursors — cursor positions must survive page reload so the
-  // outbox doesn't re-push all ops from the beginning.
-  try {
-    await pg.exec(`DELETE FROM reactor.sync_remotes WHERE channel_type = 'swarm'`);
-  } catch {
-    // Table may not exist yet on first run — that's fine
-  }
-
   const logger = new ConsoleLogger(["reactor-client"]);
+
+  // Create shared components externally so both the ReactorBuilder
+  // and the GqlRequestChannelFactory share the same instances.
+  const eventBus = new EventBus();
+  const queue = new InMemoryQueue(eventBus, new NullDocumentModelResolver());
+
+  // Build a SyncBuilder with CompositeChannelFactory (GQL + Swarm).
+  // This replaces the old monkey-patching approach entirely.
+  const syncBuilder = createSwarmSyncBuilder(logger, jwtHandler, queue);
+
   const builder = new ReactorClientBuilder()
     .withLogger(logger)
     .withSigner(signerConfig)
@@ -75,7 +72,9 @@ export async function createBrowserReactor(
       new ReactorBuilder()
         .withDocumentModels(documentModelModules)
         .withUpgradeManifests(upgradeManifests)
-        .withChannelScheme(ChannelScheme.CONNECT)
+        .withEventBus(eventBus)
+        .withQueue(queue)
+        .withSync(syncBuilder)
         .withJwtHandler(jwtHandler)
         .withKysely(
           new Kysely<Database>({
@@ -87,12 +86,6 @@ export async function createBrowserReactor(
   if (documentModelLoader) {
     builder.withDocumentModelLoader(documentModelLoader);
   }
-
-  // Patch the builder so that after internal build + startup,
-  // the GQL channelFactory is wrapped in a CompositeChannelFactory
-  // with Swarm support. This ensures persisted Swarm remotes
-  // are re-registered on page reload.
-  patchReactorBuilderForSwarm(builder, logger);
 
   const module = await builder.buildModule();
 
