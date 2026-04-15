@@ -14,6 +14,7 @@ import type {
 } from "@powerhousedao/reactor";
 import type { PHDocumentHeader } from "document-model";
 import type { SwarmClient } from "../swarm-client.js";
+import { ChatManager } from "../chat/chat-manager.js";
 import { SwarmConnectPlugin } from "../connect-plugin.js";
 import { state, setSwarmStatus, getUploadedBytes, persistBeeUrl, loadDriveMapping } from "./state.js";
 import { loadManifestIndex, clearSwarmStorage } from "./storage.js";
@@ -355,6 +356,33 @@ export async function initSwarmPlugin(): Promise<void> {
 
   // plugin.start() overwrites ph.swarm — apply all our custom fields
   applySwarmExtensions((globalThis as any).window?.ph, isDevMode);
+
+  // Initialize ChatManager (PSS + GSOC + ACT history)
+  const phAfterStart = (globalThis as any).window?.ph;
+  const swarmClient = phAfterStart?.swarm?.client as SwarmClient | undefined;
+  if (swarmClient && plugin.getSignerEntry()) {
+    try {
+      const { Bee } = await import("@ethersphere/bee-js");
+      const bee = new Bee(state.beeUrl);
+      const ownerAddress = swarmClient.getOwnerAddress();
+      const chatManager = new ChatManager(swarmClient, bee, usableStamp.batchID, ownerAddress);
+
+      if (phAfterStart.swarm) {
+        phAfterStart.swarm.chat = {
+          manager: chatManager,
+        };
+      }
+
+      // Subscribe to broadcast messages (new conversation pings)
+      chatManager.onMessage((msg) => {
+        console.log(`[Chat] Message from ${msg.from.slice(0, 10)}: ${msg.text.slice(0, 50)}`);
+      });
+
+      console.log("[SwarmPlugin] ChatManager initialized");
+    } catch (err) {
+      console.warn("[SwarmPlugin] ChatManager init failed:", err instanceof Error ? err.message : err);
+    }
+  }
 
   console.log("[SwarmPlugin] Initialized");
 }

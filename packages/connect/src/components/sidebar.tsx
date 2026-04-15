@@ -18,7 +18,9 @@ import {
   useSelectedDriveSafe,
   useUser,
 } from "@powerhousedao/reactor-browser";
+import { useState } from "react";
 import { ErrorBoundary } from "./error-boundary.js";
+import { ChatPanel } from "./chat/index.js";
 
 export function Sidebar() {
   const user = useUser();
@@ -26,6 +28,7 @@ export function Sidebar() {
   const [selectedDrive] = useSelectedDriveSafe();
   const inspectorEnabled = useInspectorEnabled();
   const connectDebug = localStorage.getItem("CONNECT_DEBUG") === "true";
+  const [chatOpen, setChatOpen] = useState(false);
 
   const ensName = user?.ens?.name || user?.profile?.username || undefined;
   const avatarUrl =
@@ -51,6 +54,11 @@ export function Sidebar() {
 
   return (
     <ConnectTooltipProvider>
+      {chatOpen && (
+        <div className="fixed inset-y-0 left-[240px] z-50 w-[340px] border-r border-gray-200 bg-white shadow-lg">
+          <ChatPanel onClose={() => setChatOpen(false)} />
+        </div>
+      )}
       <ConnectSidebar
         id="sidebar"
         onClick={() => setSelectedDrive(undefined)}
@@ -70,6 +78,18 @@ export function Sidebar() {
         showDebug={connectDebug}
         onDebugClick={() => showPHModal({ type: "debugSettings" })}
       >
+        <button
+          type="button"
+          onClick={() => setChatOpen(!chatOpen)}
+          className={`mb-1 flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm ${
+            chatOpen ? "bg-blue-50 text-blue-600" : "text-gray-600 hover:bg-gray-50"
+          }`}
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
+          </svg>
+          <span>Chat</span>
+        </button>
         <ErrorBoundary
           variant="text"
           fallbackMessage="There was an error loading drives"
