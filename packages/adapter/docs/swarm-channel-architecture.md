@@ -338,56 +338,18 @@ syncManager.add("swarm:" + driveId, collectionId, {
 
 ---
 
-## What This Replaces
+## Key Source Files
 
-### Current custom code (~2500 lines):
-- `sync.ts` — subscriber-based operation sync
-- `flush.ts` — debounced manifest writes (3 flush pipelines)
-- `hydration.ts` — recovery from Swarm
-- `pending-ops-store.ts` — IndexedDB persistence for unsent ops
-- `state.ts` — manual sync tracking (syncPaused, syncedRevisions, etc.)
-- `events.ts` — custom event system for UI notifications
-
-### New code (~500 lines estimated):
-- `swarm-channel.ts` — IChannel implementation
-- `swarm-channel-factory.ts` — IChannelFactory implementation
-- `composite-factory.ts` — routes by config.type
-- Modified `createBrowserReactor()` — wire composite factory
-
-### What we keep:
-- `swarm-client.ts` — Bee API operations (upload, feeds, manifests)
-- `stamp-manager.ts` — postage stamp lifecycle
-- `wallet-signer.ts` — key derivation
-- `connect-plugin.ts` — initialization orchestration
-- `sharing.ts` — cross-user encrypted sharing
-- All Settings UI components
-
----
-
-## Key Reference Files (Powerhouse Monorepo)
-
-| File | What to learn |
+| File | Purpose |
 |---|---|
-| `reactor/src/sync/interfaces.ts` | IChannel, IChannelFactory, ISyncManager |
-| `reactor/src/sync/types.ts` | ChannelConfig, SyncEnvelope, ConnectionState |
-| `reactor/src/sync/sync-manager.ts` | Push/pull orchestration, cursor management |
-| `reactor/src/sync/channels/gql-req-channel.ts` | Reference IChannel implementation |
-| `reactor/src/sync/channels/gql-request-channel-factory.ts` | Reference factory |
-| `reactor/src/sync/mailbox.ts` | IMailbox interface, Mailbox class |
-| `reactor/src/sync/sync-operation.ts` | SyncOperation lifecycle |
-| `reactor/src/sync/sync-builder.ts` | How to configure sync module |
-| `reactor/src/core/reactor-builder.ts:386-410` | Factory selection (two paths) |
-| `connect/src/utils/reactor.ts` | Where to wire composite factory |
-
----
-
-## Implementation Order
-
-1. **CompositeChannelFactory** — trivial routing layer (~30 lines)
-2. **SwarmChannel** — IChannel implementation using swarm-client
-3. **SwarmChannelFactory** — creates SwarmChannel from ChannelConfig
-4. **Wire into createBrowserReactor** — replace channelScheme with syncBuilder
-5. **Auto-register Swarm remotes** — for local drives on creation
-6. **Auto-register Swarm remotes** — for remote drives after GQL sync completes
-7. **Remove custom sync code** — sync.ts, flush.ts, hydration.ts, pending-ops-store.ts
-8. **Test** — verify push, pull, bridge (GQL→Swarm), recovery, offline→reconnect
+| `adapter/src/channel/swarm-channel.ts` | IChannel implementation: outbox push + inbox pull |
+| `adapter/src/channel/swarm-channel-factory.ts` | IChannelFactory — creates SwarmChannel from ChannelConfig |
+| `adapter/src/channel/composite-factory.ts` | Routes "gql"/"swarm" to sub-factories |
+| `adapter/src/channel/create-composite-factory.ts` | createSwarmSyncBuilder() for ReactorBuilder.withSync() |
+| `adapter/src/channel/manifest-manager.ts` | User + drive manifest writes |
+| `adapter/src/channel/add-swarm-remote.ts` | Per-drive Swarm remote registration |
+| `adapter/src/swarm-client.ts` | Bee API: upload, download, feeds, encrypt |
+| `adapter/src/swarm-crypto.ts` | AES-256-GCM encryption |
+| `adapter/src/wallet-signer.ts` | Key derivation from wallet signature |
+| `adapter/src/stamp-manager.ts` | Postage stamp lifecycle |
+| `connect/src/utils/reactor.ts` | Wires CompositeChannelFactory into createBrowserReactor |

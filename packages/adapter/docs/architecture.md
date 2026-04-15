@@ -14,11 +14,9 @@ This document explains the plumbing: how Powerhouse Connect documents get encryp
 │       ↓                                                                   │
 │  PGlite (local Postgres in WASM) stores the operation                    │
 │       ↓                                                                   │
-│  swarm-plugin.ts receives the change event                               │
+│  SyncManager detects new ordinals in operation_index_operations          │
 │       ↓                                                                   │
-│  Buffers the operation in memory (pendingOps map)                        │
-│       ↓  (3-second debounce)                                              │
-│  Flushes: encrypt → upload to Swarm /bytes → update feed                 │
+│  SwarmChannel.outbox: encrypt → upload to Swarm /bytes → update feed     │
 │                                                                           │
 └──────────────────────────────────┬────────────────────────────────────────┘
                                    │
@@ -127,33 +125,30 @@ The client also handles:
 - **3-retry with backoff** — handles Swarm propagation delays on feed writes
 - **Auto-detect feed format** — reference (64-char hex) vs inline JSON (legacy)
 
-### Layer 2: swarm-plugin.ts (processor in swarm-doc-model)
+### Layer 2: SwarmChannel (native IChannel implementation)
 
-This is the glue between Connect's reactor and the SwarmClient. It runs as a processor in the browser.
+SwarmChannel implements the reactor's `IChannel` interface. It is wired into the
+reactor via `ReactorBuilder.withSync()` and a `CompositeChannelFactory` that
+routes `"swarm"` and `"gql"` config types to the appropriate sub-factory.
 
-**On startup:**
-1. Checks Bee node health (`/health`)
-2. Finds a usable postage stamp (`/stamps`)
-3. Imports `SwarmConnectPlugin` from the adapter
-4. Triggers wallet signature → derives Swarm key (or loads from IndexedDB cache)
-5. Reads user manifest from Swarm → discovers existing documents
-6. If documents exist that aren't local → runs recovery (hydration)
-7. Subscribes to ALL reactor document change events
+**Push (outbox):** SyncManager detects new ordinals → groups ops into SyncOperations
+→ SwarmChannel serializes, encrypts, uploads to /bytes, writes reference to feed,
+updates drive/user manifests via ManifestManager.
 
-**On document edit:**
-1. Reactor fires a change event with the new operation(s)
-2. Plugin checks if we've already synced this operation (via `syncedRevisions` map)
-3. New ops are buffered in `pendingOps` map (per document)
-4. Document manifest is updated in memory (`pendingManifests` map)
-5. A 3-second debounce timer is set for this document
+**Pull (inbox):** SwarmChannel polls user manifest → discovers drives → reads drive
+manifests → reads document manifests → downloads operation batches from /bytes →
+decrypts → creates SyncOperations → adds to inbox → SyncManager applies via
+`reactor.load()`.
 
-**On debounce flush (3s after last edit for this document):**
-1. ALL buffered ops for the document are uploaded as ONE `/bytes` batch
-2. The document manifest (listing all operation batches) is uploaded to `/bytes`
-3. Only the 64-char hash reference is written to the feed (72-byte SOC)
-4. The user manifest is scheduled for update (another 3s debounce)
+**Cursor tracking:** `sync_cursors` in PGlite (survives page reload). No custom
+persistence needed.
 
-This means 50 rapid edits → 1 upload + 1 feed write, not 50 of each.
+**Dead letters:** Failed operations go to `sync_dead_letters` — persisted, queryable,
+retryable.
+
+The plugin layer (`plugin/init.ts`) still handles Bee node detection, stamp
+selection, wallet key derivation, and UI event emission. The sharing flow
+(`plugin/sharing.ts`) operates independently of the sync channel.
 
 ### Layer 3: Connect Settings UI (swarm-storage.tsx)
 
@@ -275,63 +270,31 @@ When a user opens Connect on a new device (or after clearing browser data):
 ```
 1. User connects wallet (MetaMask)
 2. Plugin requests personal_sign → derives the SAME Swarm key as before
-3. Read user manifest from feed: ph:v2:user:<address>
+3. SwarmChannel.pollInbox() reads user manifest from feed: ph:v2:user:<address>
 4. Read drive manifests for each drive listed in the user manifest
 5. For each document in the drive manifests that doesn't exist locally:
-
-   a. Create a local drive for each unique driveId (with correct name)
-   b. For each document in the drive:
-      - Read document manifest from feed: ph:v2:doc:<docId>
-      - Download each operation batch from /bytes (auto-decrypted)
-      - Get the document model's default state via reactorClient.getDocumentModelModule(type)
-      - Create a shell document in the local drive
-      - Replay all operations via reactorClient.execute(docId, "main", ops)
-      - Mark as synced in syncedRevisions map
-   c. Restore folder structure from drive manifest:
-      - Execute ADD_FOLDER actions for each folder (with id, timestampUtcMs, scope: "global")
-      - Execute MOVE_NODE actions to place docs in their folders
-
-6. Write a clean user manifest (only recovered drives, no stale entries)
-7. Resume normal sync (subscribe to change events)
+   - Read document manifest from feed: ph:v2:doc:<docId>
+   - Download each operation batch from /bytes (auto-decrypted)
+   - Create SyncOperations and add to inbox
+   - SyncManager applies via reactor.load() with ORIGINAL document IDs
+   - Cursor advances in sync_cursors
+6. Drive materializes in PGlite with correct folder structure
+7. Future polls are incremental (cursor-based)
 ```
 
 Key details:
-- **`hydrationRan`** is stored in `sessionStorage` to survive Vite HMR resets
-- **`recoveringDocs`** set prevents the plugin from re-uploading ops it just downloaded
-- **`manifestFlushGeneration`** counter prevents stale debounced flushes from overwriting clean state
-- **`syncPaused`** stays true during the entire recovery to prevent race conditions
+- **Cursor-based** — `sync_cursors` in PGlite tracks exactly what has been synced, survives page reload
+- **No race conditions** — SyncManager processes inbox before outbox; no re-upload of recovered ops
+- **Dead letter handling** — failed operations go to `sync_dead_letters` for retry
 
 ---
 
-## Optimization: Debounced Writes
+## Write Optimization
 
-The plugin uses three levels of debouncing to minimize Swarm feed writes:
-
-### 1. Operation Buffering (per document)
-```
-Edit 1 → buffer in pendingOps["doc-123"]
-Edit 2 → buffer in pendingOps["doc-123"]  (100ms later)
-Edit 3 → buffer in pendingOps["doc-123"]  (200ms later)
-...
-[3s after last edit] → flush ALL buffered ops as ONE /bytes upload
-```
-
-### 2. Document Manifest Debounce (3s per document)
-```
-Each flush → update pendingManifests["doc-123"] in memory
-Reset 3s timer
-[3s after last flush] → upload manifest to /bytes → write ref to feed
-```
-
-### 3. User Manifest Debounce (3s global)
-```
-Each document manifest flush → schedule user manifest update
-[3s after last doc flush] → upload user manifest to /bytes → write ref to feed
-```
-
-For a burst of 100 edits across 3 documents:
-- **Without optimization**: 100 /bytes + 100 doc feed writes + 100 user feed writes = 300 Swarm operations
-- **With optimization**: 3 /bytes (op batches) + 3 /bytes (manifests) + 3 doc feed writes + 1 user manifest + 1 user feed write = 11 Swarm operations
+The SyncManager batches operations by (documentId, scope, branch) into
+SyncOperations. SwarmChannel uploads each batch as a single /bytes entry
+and writes one feed update per document. ManifestManager handles drive
+and user manifest updates.
 
 ---
 
@@ -355,29 +318,18 @@ During recovery, folders are restored by executing ADD_FOLDER and MOVE_NODE acti
 
 ---
 
-## Module-Level State in swarm-plugin.ts
+## Sync State
 
-The plugin maintains several maps and flags at module scope (persisted across function calls within the same browser session):
+Sync state is managed by the reactor's SyncManager and persisted in PGlite:
 
-| State | Type | Purpose |
-|-------|------|---------|
-| `syncedRevisions` | `Map<string, number>` | Last synced op index per document — prevents re-uploading |
-| `docToDrive` | `Map<string, string>` | Confirmed document → drive relationships |
-| `driveNames` | `Map<string, string>` | Known drive names (for manifest writes) |
-| `driveManifestCache` | `Map<string, SwarmDriveManifest>` | Local source of truth for drive contents (avoids stale Swarm reads) |
-| `pendingManifests` | `Map<string, manifest>` | In-memory doc manifests waiting for debounce flush |
-| `pendingOps` | `Map<string, ops[]>` | Buffered operations waiting for batch upload |
-| `docManifestTimers` | `Map<string, timeout>` | Active debounce timers per document |
-| `pendingDriveUpdates` | `Map<string, Map<docId, entry>>` | Pending drive manifest updates (batched) |
-| `driveManifestTimers` | `Map<string, timeout>` | Active debounce timers per drive manifest |
-| `driveManifestFlushInProgress` | `Map<string, Promise>` | Write lock per drive manifest |
-| `pendingManifestDriveUpdates` | `Map<string, entry>` | Pending user manifest drive entries |
-| `manifestFlushTimer` | `timeout \| null` | Active debounce timer for user manifest |
-| `lastSeenDriveId` | `string` | Most recent drive ID from subscriber events |
-| `syncPaused` | `boolean` | Pauses all sync during recovery |
-| `hydrationRan` | `boolean` (sessionStorage) | Prevents duplicate recovery across HMR |
-| `recoveringDocs` | `Set<string>` | Documents currently being recovered (skip sync) |
-| `manifestFlushGeneration` | `number` | Incremented on clearStorage to abort stale flushes |
+| Table | Purpose |
+|-------|---------|
+| `sync_remotes` | Registered remotes with channel_type, push/pull state, failure counts |
+| `sync_cursors` | Per-remote ordinal-based cursor tracking (inbox and outbox) |
+| `sync_dead_letters` | Failed operations with error details for retry |
+
+The plugin layer (`plugin/state.ts`) maintains only UI-related state:
+Bee URL, UI cache fields, and drive mapping for the settings panel.
 
 ---
 
@@ -391,9 +343,9 @@ Client Action → Job Queue → Reducer (pure fn) → Operation Store (PGlite)
                                              Read Model Coordinator
                                                         ↓
                           ┌──────────────────────┬──────┴──────────────────┐
-                Pre-ready Read Models      Post-ready Read Models     Processors
-                (DocumentView,               (ProcessorManager)      (swarm-plugin)
-                 DocumentIndexer)
+                Pre-ready Read Models      Post-ready Read Models     Sync Channels
+                (DocumentView,               (ProcessorManager)      (SwarmChannel,
+                 DocumentIndexer)                                     GqlChannel)
 ```
 
 ### Job Lifecycle
@@ -405,35 +357,21 @@ PENDING → RUNNING → WRITE_READY → READ_READY
 
 - `WRITE_READY` = Operations persisted to PGlite
 - `READ_READY` = All read models updated (DocumentView, DocumentIndexer)
-- Our plugin fires on `READ_READY` events
+- SyncManager detects new ordinals and populates channel outboxes
 
-### Key Reactor APIs Used by the Plugin
+### Key Reactor APIs
 
 | API | What it does |
 |-----|-------------|
 | `reactorClient.get(id)` | Get a document by ID (NOT `getDocument`) |
 | `reactorClient.getDocumentModelModule(type)` | Get document model utils (for creating default state) |
-| `reactorClient.execute(docId, branch, ops)` | Replay operations on a document |
 | `reactorClient.addDrive(...)` | Create a new local drive |
-| `driveClient.addDocument(driveId, doc)` | Add a document to a drive |
-| Subscriber callback | Fires on every document change with operation details |
+| `syncManager.add(remoteName, collectionId, config)` | Register a sync remote (Swarm or GQL) |
+| `reactor.load(docId, branch, ops)` | Apply remote operations to a document |
 
 ---
 
 ## Architecture Decision Records
-
-### ADR-001: Split swarm-plugin.ts into plugin/ module
-
-**Status:** Accepted (2026-04-10)
-
-**Context:** The original `swarm-plugin.ts` was 2,576 lines with 7 tangled concerns and ~20 module-level mutable variables. Impossible to reason about individual flows.
-
-**Decision:** Split into 6 files in `src/plugin/`: state.ts (shared state), init.ts (orchestrator), sync.ts (reactor subscriber), flush.ts (debounced writes), hydration.ts (recovery), sharing.ts (share/import). A thin `swarm-plugin.ts` re-exports the entry point.
-
-**Consequences:**
-- Positive: Each file has a single responsibility. State is centralized. Flows are traceable.
-- Positive: `restoreFolderStructure` deduplicated between hydration and import.
-- Negative: 6 files instead of 1; more imports to manage. Clean DAG prevents circular deps.
 
 ### ADR-002: Extract StampManager and ShareManager from SwarmClient
 
@@ -457,7 +395,6 @@ PENDING → RUNNING → WRITE_READY → READ_READY
 **Decision:** Add optional dependency injection parameters:
 - `SwarmClient`: optional `bee: Bee` instance
 - `wallet-signer`: optional `provider: EthereumProvider`
-- `BeeReactorAdapter`: optional `deps: { swarmClient?, hydrator? }`
 
 All parameters are optional — defaults preserve existing behavior.
 
@@ -465,123 +402,9 @@ All parameters are optional — defaults preserve existing behavior.
 - Positive: Unit tests can inject mocks. No global patching needed.
 - Positive: Zero breaking changes — all injection points are optional.
 
-### ADR-004: Serialize all manifest writes to prevent lost-update races
-
-**Status:** Accepted (2026-04-10)
-
-**Context:** User manifest updates used unserialized read-modify-write. Two concurrent document syncs could lose each other's manifest entries.
-
-**Decision:** Per-address write lock (`userManifestLocks`) in `SwarmSyncReadModel`. Debounced pipeline with generation counter in the plugin. `reconcileUserManifest` routes through the debounced pipeline instead of writing directly.
-
-**Consequences:**
-- Positive: No lost-update races on user manifest.
-- Trade-off: Slightly higher latency for user manifest writes (debounce + lock wait).
-
-### ADR-005: Ops buffer cleared only on full success (atomic flush)
-
-**Status:** Accepted (2026-04-10)
-
-**Context:** `flushDocumentManifest` deleted ops from the buffer before attempting upload. If `uploadData` succeeded but `updateManifest` failed, ops were re-queued but the manifest had a stale duplicate batch entry.
-
-**Decision:** Snapshot ops (don't delete), deep-copy the manifest before mutation, and only delete from buffer after both `uploadData` AND `updateManifest` succeed.
-
-**Consequences:**
-- Positive: Partial failure cannot create duplicate batches or corrupt in-memory manifest.
-- Positive: Retry path is clean — same ops, same manifest state as before the attempt.
-
-### ADR-006: Drive matching by name, not position
-
-**Status:** Accepted (2026-04-10)
-
-**Context:** Hydration matched Swarm drives to local drives by array position. Any locally-created drive that wasn't on Swarm shifted all indices, injecting recovered docs into the wrong drive.
-
-**Decision:** Match by drive name. Only reuse a local drive if its `state.global.name` matches the Swarm drive's name. Create new drives for unmatched entries.
-
-**Consequences:**
-- Positive: Correct matching even with extra local drives.
-- Trade-off: If the user renames a drive locally but hasn't synced, it won't match. New drive created (acceptable — data is not lost).
-
 ---
 
-## Testing Architecture
+## Testing
 
-### Test Strategy
-
-The adapter has injectable dependencies at every boundary, enabling 3 levels of testing:
-
-#### Level 1: Unit Tests (fast, no network)
-
-Test individual modules with mock dependencies:
-
-| Module | What to test | Mock |
-|--------|-------------|------|
-| `swarm-crypto.ts` | encrypt → decrypt roundtrip, SWE prefix detection | None (pure functions, uses Web Crypto) |
-| `bytes-utils.ts` | hexToBytes/bytesToHex roundtrip | None (pure functions) |
-| `wallet-signer.ts` | `deriveSwarmKey` determinism, `buildSignMessage` format | `EthereumProvider` mock for `requestSwarmKeyFromWallet` |
-| `stamp-manager.ts` | Status parsing, cost estimation, preset generation | Mock `Bee` instance |
-| `share-manager.ts` | Share key derivation, profile read/write | Mock `SwarmClient` |
-| `types.ts` | `createEmptyManifest` factory | None |
-
-#### Level 2: Integration Tests (live Bee node)
-
-Test end-to-end data paths against `bee dev`:
-
-| Flow | Test |
-|------|------|
-| **Upload → Download** | `uploadData` → `downloadData` roundtrip with encryption |
-| **Manifest CRUD** | `updateManifest` → `readManifest` roundtrip (bytes mode) |
-| **Feed CRUD** | `writeFeedPayload` → `readFeedJson` roundtrip (requires real Bee, not dev) |
-| **User Manifest** | `updateUserManifest` → `readUserManifest` roundtrip |
-| **Drive Manifest** | `updateDriveManifest` → `readDriveManifest` roundtrip |
-| **Compaction** | Upload 30 batches → `compactManifest` → verify single batch, same ops |
-| **Sharing** | `uploadSharedData` → `downloadSharedData` with matching/mismatched keys |
-
-#### Level 3: E2E Flow Tests (plugin simulation)
-
-Test the 6 user flows with a mock `reactorClient` and real `SwarmClient`:
-
-| Flow | What to verify |
-|------|---------------|
-| **Create** | New doc triggers subscriber → ops buffered → flush → all 3 manifests updated |
-| **Sync** | 10 rapid edits → debounce → 1 upload + 1 feed write |
-| **Recover** | Write manifests → clear local state → `hydrateFromSwarm` → all docs restored with correct drive assignment and folder structure |
-| **Share** | Flush pending → bundle by drive → encrypt → share manifest written → recipient can import |
-| **Import** | Read share manifest → download → decrypt → correct drives/folders created |
-| **Clear Cache** | Empty manifests written → auto-reconnect → `syncPaused` resets → new sync works |
-
-### Test Infrastructure
-
-Existing test file: `tests/integration.test.ts` (12 tests against `bee dev`).
-
-Recommended additions:
-```
-tests/
-  unit/
-    swarm-crypto.test.ts      — encrypt/decrypt roundtrips
-    bytes-utils.test.ts       — hex conversion
-    wallet-signer.test.ts     — key derivation with mock provider
-    stamp-manager.test.ts     — status parsing with mock Bee
-    share-manager.test.ts     — share key + profile with mock client
-  integration/
-    integration.test.ts       — existing tests (SwarmClient against bee dev)
-    manifest-flush.test.ts    — debounced flush pipeline
-    compaction.test.ts        — manifest compaction per scope/branch
-  e2e/
-    create-sync-recover.test.ts  — full create → sync → recover flow
-    share-import.test.ts         — full share → import flow
-    clear-cache.test.ts          — clear → reconnect → sync flow
-```
-
-### Running Tests
-
-```bash
-# Unit tests (no Bee node needed)
-pnpm test:unit
-
-# Integration tests (requires bee dev running on localhost:1633)
-bee dev &
-pnpm test:integration
-
-# All tests
-pnpm test
-```
+See [testing.md](testing.md) for the full testing guide including test structure,
+running commands, and configuration.

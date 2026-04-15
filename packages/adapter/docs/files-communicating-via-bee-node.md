@@ -88,5 +88,12 @@ How they interact
                       (via client)  files (via      (via client)
                                     client)
 
+5. channel/swarm-channel.ts — sync push and pull
+Uses SwarmClient (via the same methods above) for push/pull operations.
+No direct Bee API calls — all Bee communication goes through SwarmClient.
+
+6. channel/manifest-manager.ts — drive and user manifest updates
+Uses SwarmClient for manifest reads/writes during the push cycle.
+
 Everything else in the codebase calls SwarmClient methods.
 No other file touches the Bee node directly.

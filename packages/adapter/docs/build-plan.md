@@ -38,16 +38,27 @@ What's done and what's next for the Powerhouse Connect + Swarm decentralized sto
 - **Drive bundle format** — `{ documents, folders, docFolders }` — one upload per drive with folder metadata
 - **Import with drive dedup** — creates single drive, reuses on repeated imports, restores folder structure
 
-### Connect Plugin (`swarm-doc-model/processors/swarm-plugin.ts`)
+### SwarmChannel (native IChannel implementation)
 
-- Subscribes to ALL reactor document changes, uploads new ops to Swarm
-- Hierarchical manifest writes (user → drive → document)
-- Recovery from Swarm (drive manifests → docs → folder structure)
-- Sharing and import with folder structure preservation
-- Debounced writes (3s doc, 3s user, 2s drive manifests)
-- Op batch accumulation — all ops per flush as ONE /bytes batch
-- Clean manifest after recovery (prevents stale accumulation)
-- `beforeunload` handler flushes pending manifests
+- `SwarmChannel` implements the reactor's `IChannel` interface (inbox/outbox/deadLetter)
+- `CompositeChannelFactory` routes `"swarm"` and `"gql"` config types to sub-factories
+- `createSwarmSyncBuilder()` returns `{ syncBuilder, compositeFactory, registerGqlFactory }`
+- Wired via `ReactorBuilder.withSync(syncBuilder)` — no monkey-patching
+- Push: SyncManager detects new ordinals → SwarmChannel encrypts + uploads to /bytes + writes feed
+- Pull: SwarmChannel polls user/drive/doc manifests → downloads batches → adds to inbox
+- ManifestManager handles user/drive manifest writes
+- Cursor tracking in `sync_cursors` (PGlite) — survives page reload
+- Dead letters in `sync_dead_letters` — persisted, queryable, retryable
+- Bridge pattern: same drive can sync to BOTH Switchboard (GQL) AND Swarm simultaneously
+
+### Plugin Layer (`adapter/src/plugin/`)
+
+- `init.ts` — Bee node detection, stamp selection, wallet key derivation, UI event emission
+- `sharing.ts` — Cross-user encrypted sharing and import with folder structure preservation
+- `hydration.ts` — Folder structure restoration helpers
+- `state.ts` — Bee URL, UI cache fields, drive mapping for settings panel
+- `storage.ts` — clearSwarmStorage + loadManifestIndex (IndexedDB)
+- `events.ts` — Toast event system (onSwarmEvent/emitSwarmEvent)
 - Exposes on `ph.swarm`: `clearStorage()`, `reconnect()`, `refreshBalances()`, `setBeeUrl()`, `shareDocuments()`, `importSharedDocuments()`, `lookupUser()`
 
 ### Connect Settings UI (`packages/connect/.../swarm-storage.tsx`)
@@ -65,41 +76,7 @@ What's done and what's next for the Powerhouse Connect + Swarm decentralized sto
 
 ## What's Next
 
-### 1. SwarmChannel + DocSync (Live Collaborative Editing)
-
-The biggest feature unlock. Implement a `SwarmChannel` that plugs into the reactor's existing DocSync protocol. DocSync already handles operation ordering, deduplication, conflict resolution, and batching — we just build the transport.
-
-**Architecture:**
-```
-Current (single-user):
-  Edit → PGlite → swarm-plugin → /bytes + feed → Swarm
-
-With SwarmChannel (multi-user):
-  Edit → PGlite → SyncManager → SwarmChannel.outbox → own feed → Swarm
-  Collaborator's feed → poll → SwarmChannel.inbox → SyncManager → PGlite → apply
-```
-
-**Feed layout (multi-author blog pattern):**
-```
-Collaboration Index Feed: ph:v2:collab:<docId> (document creator)
-  → { collaborators: [{ address, topic, overlayAddress }, ...] }
-
-Alice's Op Feed: ph:v2:ops:<alice>:<docId> → SyncEnvelopes
-Bob's Op Feed:   ph:v2:ops:<bob>:<docId>   → SyncEnvelopes
-```
-
-**Implementation:**
-1. `SwarmChannel` class implementing Channel interface (inbox/outbox/deadLetter)
-2. `flush()`: drain outbox → upload SyncEnvelopes to /bytes → write ref to own op feed
-3. `poll()`: read collaborators' feeds → download SyncEnvelopes → add to inbox
-4. Collaboration index feed — created on share, lists all collaborators' feed topics
-5. Register with SyncManager in swarm-plugin.ts after sharing/import
-
-**What we DON'T build:** merge logic, CRDTs, conflict resolution UI — DocSync handles all of this.
-
-**Start with polling (5-10s latency)**, upgrade to GSOC/PSS later.
-
-### 2. GSOC/PSS Real-Time Notifications
+### 1. GSOC/PSS Real-Time Notifications
 
 Enhance SwarmChannel with sub-second latency:
 
@@ -114,7 +91,7 @@ Enhance SwarmChannel with sub-second latency:
 - Mailboxing: works even if recipient is temporarily offline
 - Requires full Bee nodes
 
-### 3. Publish Packages
+### 2. Publish Packages
 
 Publish updated packages to npm with all current features:
 
@@ -150,9 +127,15 @@ Deploy the Connect SPA itself to Swarm:
 
 | File | Purpose |
 |------|---------|
-| `bee-reactor-adaptor/src/swarm-client.ts` | Bee SDK wrapper: upload, download, feeds, encryption, stamps, sharing |
-| `bee-reactor-adaptor/src/swarm-crypto.ts` | AES-256-GCM encrypt/decrypt with SWE prefix |
-| `bee-reactor-adaptor/src/wallet-signer.ts` | Deterministic key derivation from wallet signature |
-| `bee-reactor-adaptor/src/types.ts` | All type definitions (manifests, stamps, sharing, profiles) |
-| `swarm-doc-model/processors/swarm-plugin.ts` | Browser plugin: sync, recovery, sharing, folder restore, UI state |
-| `packages/connect/.../swarm-storage.tsx` | Settings UI component |
+| `adapter/src/swarm-client.ts` | Bee SDK wrapper: upload, download, feeds, encryption |
+| `adapter/src/swarm-crypto.ts` | AES-256-GCM encrypt/decrypt with SWE prefix |
+| `adapter/src/wallet-signer.ts` | Deterministic key derivation from wallet signature |
+| `adapter/src/types.ts` | All type definitions (manifests, stamps, sharing, profiles) |
+| `adapter/src/channel/swarm-channel.ts` | IChannel implementation: outbox push + inbox pull |
+| `adapter/src/channel/composite-factory.ts` | Routes "gql"/"swarm" to sub-factories |
+| `adapter/src/channel/create-composite-factory.ts` | createSwarmSyncBuilder() for ReactorBuilder.withSync() |
+| `adapter/src/channel/manifest-manager.ts` | User + drive manifest writes |
+| `adapter/src/plugin/init.ts` | Bee detection, stamps, wallet, events |
+| `adapter/src/plugin/sharing.ts` | Cross-user encrypted sharing + import |
+| `connect/src/utils/reactor.ts` | Wire CompositeChannelFactory into createBrowserReactor |
+| `connect/.../swarm-storage.tsx` | Settings UI component |
