@@ -307,6 +307,18 @@ export async function initSwarmPlugin() {
     const swarmClient = phAfterStart?.swarm?.client;
     if (swarmClient && plugin.getSignerEntry()) {
         try {
+            // Shutdown any previous ChatManager to prevent duplicate PSS subscriptions.
+            // Happens when the plugin re-initializes (reconnect, Bee URL change, HMR).
+            const prevChat = phAfterStart?.swarm?.chat?.manager;
+            if (prevChat && typeof prevChat.shutdown === "function") {
+                try {
+                    prevChat.shutdown();
+                    console.log("[SwarmPlugin] Old ChatManager shut down");
+                }
+                catch (err) {
+                    console.warn("[SwarmPlugin] Old ChatManager shutdown failed:", err);
+                }
+            }
             const { Bee } = await import("@ethersphere/bee-js");
             const bee = new Bee(state.beeUrl);
             const ownerAddress = swarmClient.getOwnerAddress();
@@ -316,9 +328,29 @@ export async function initSwarmPlugin() {
                     manager: chatManager,
                 };
             }
-            // Subscribe to broadcast messages (new conversation pings)
+            // Persist incoming messages to localStorage at the plugin level.
+            // This runs even when the chat panel is CLOSED, so the unread badge
+            // on the sidebar can reflect new messages, and history survives
+            // across app restarts.
             chatManager.onMessage((msg) => {
                 console.log(`[Chat] Message from ${msg.from.slice(0, 10)}: ${msg.text.slice(0, 50)}`);
+                try {
+                    const raw = localStorage.getItem("swarm:chatMessages");
+                    const entries = raw ? JSON.parse(raw) : [];
+                    const map = new Map(entries);
+                    const peerKey = msg.from; // conversations are keyed by peer address
+                    const existing = map.get(peerKey) ?? [];
+                    // Dedupe by message ID
+                    if (existing.some((m) => m.id === msg.id))
+                        return;
+                    const updated = [...existing, msg].slice(-100); // keep last 100
+                    map.set(peerKey, updated);
+                    localStorage.setItem("swarm:chatMessages", JSON.stringify([...map]));
+                    window.dispatchEvent(new CustomEvent("swarm:chatMessages:updated"));
+                }
+                catch (err) {
+                    console.warn("[Chat] Failed to persist message:", err instanceof Error ? err.message : err);
+                }
             });
             console.log("[SwarmPlugin] ChatManager initialized");
         }

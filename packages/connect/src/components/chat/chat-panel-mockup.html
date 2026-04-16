@@ -3,28 +3,31 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Connect Chat — UI mockup (Swarm settings style)</title>
+  <title>Connect Chat — UI mockup (Discord-style stacked)</title>
   <style>
     :root {
       --border: #f3f4f6;
       --border-strong: #e5e7eb;
       --bg-page: #f9fafb;
       --bg-sidebar: #ffffff;
-      --bg-main: #f9fafb;
+      --bg-main: #ffffff;
       --bg-card: #ffffff;
+      --bg-hover: #f9fafb;
       --text-primary: #111827;
       --text-secondary: #6b7280;
       --text-muted: #9ca3af;
+      --text-timestamp: #9ca3af;
       --accent: #2563eb;
       --accent-hover: #1d4ed8;
+      --accent-mention: #eff6ff;
       --green-online: #22c55e;
       --radius-lg: 8px;
+      --radius-sm: 4px;
       --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
     }
 
-    * {
-      box-sizing: border-box;
-    }
+    * { box-sizing: border-box; }
 
     body {
       margin: 0;
@@ -45,25 +48,12 @@
       color: #1e40af;
     }
 
-    .banner strong {
-      color: #1e3a8a;
-    }
+    .banner strong { color: #1e3a8a; }
 
-    /* Full-height chat strip; in Connect this attaches beside the real app sidebar */
-    .app-frame {
-      flex: 1;
-      display: flex;
-      min-height: 0;
-    }
+    .app-frame { flex: 1; display: flex; min-height: 0; }
+    .shell { flex: 1; display: flex; min-width: 0; }
 
-    .shell {
-      flex: 1;
-      display: flex;
-      min-width: 0;
-      border-left: 0;
-    }
-
-    /* DM list — settings-style sections */
+    /* ─── Sidebar: DM list ─────────────────────────────────────── */
     .sidebar {
       width: 280px;
       background: var(--bg-sidebar);
@@ -110,25 +100,7 @@
       cursor: pointer;
     }
 
-    .btn-primary:hover {
-      background: var(--accent-hover);
-    }
-
-    .btn-ghost {
-      width: 100%;
-      border: 1px solid var(--border-strong);
-      border-radius: 6px;
-      background: #fff;
-      color: var(--text-secondary);
-      font-size: 12px;
-      font-weight: 500;
-      padding: 8px 12px;
-      cursor: pointer;
-    }
-
-    .btn-ghost:hover {
-      background: #f9fafb;
-    }
+    .btn-primary:hover { background: var(--accent-hover); }
 
     .input-fake {
       width: 100%;
@@ -151,19 +123,17 @@
       display: flex;
       align-items: center;
       gap: 10px;
-      padding: 10px 10px;
+      padding: 10px;
       border-radius: var(--radius-lg);
       cursor: default;
       margin-bottom: 4px;
       border: 1px solid transparent;
     }
 
-    .conv-item:hover {
-      background: #f9fafb;
-    }
+    .conv-item:hover { background: var(--bg-hover); }
 
     .conv-item.active {
-      background: #eff6ff;
+      background: var(--accent-mention);
       border-color: #bfdbfe;
     }
 
@@ -182,10 +152,10 @@
       position: relative;
     }
 
-    .avatar.sm {
-      width: 36px;
-      height: 36px;
-      font-size: 13px;
+    .avatar.lg {
+      width: 40px;
+      height: 40px;
+      font-size: 14px;
     }
 
     .online-dot {
@@ -199,10 +169,7 @@
       border-radius: 50%;
     }
 
-    .conv-meta {
-      min-width: 0;
-      flex: 1;
-    }
+    .conv-meta { min-width: 0; flex: 1; }
 
     .conv-title {
       font-size: 14px;
@@ -228,7 +195,7 @@
       flex-shrink: 0;
     }
 
-    /* Main thread */
+    /* ─── Main thread ─────────────────────────────────────────── */
     .main {
       flex: 1;
       display: flex;
@@ -243,14 +210,11 @@
       background: #fff;
       border-bottom: 1px solid var(--border-strong);
       display: flex;
-      align-items: flex-start;
+      align-items: center;
       gap: 12px;
     }
 
-    .thread-title-block {
-      flex: 1;
-      min-width: 0;
-    }
+    .thread-title-block { flex: 1; min-width: 0; }
 
     .thread-title {
       font-size: 15px;
@@ -277,7 +241,7 @@
       font-size: 12px;
       color: var(--text-muted);
       margin-top: 4px;
-      font-family: ui-monospace, monospace;
+      font-family: var(--font-mono);
     }
 
     .tabs {
@@ -302,9 +266,7 @@
       margin-bottom: -1px;
     }
 
-    .tab:hover {
-      color: var(--text-secondary);
-    }
+    .tab:hover { color: var(--text-secondary); }
 
     .tab.active {
       color: var(--accent);
@@ -318,21 +280,20 @@
       flex-direction: column;
     }
 
-    .tab-panel.active {
-      display: flex;
-    }
+    .tab-panel.active { display: flex; }
 
+    /* ─── Messages area (Discord-style stacked) ─────────────────── */
     .messages {
       flex: 1;
       overflow-y: auto;
-      padding: 20px;
+      padding: 8px 0;
     }
 
     .date-divider {
       display: flex;
       align-items: center;
       gap: 12px;
-      margin: 20px 0;
+      margin: 16px 20px 8px;
     }
 
     .date-divider::before,
@@ -351,99 +312,143 @@
       letter-spacing: 0.05em;
     }
 
-    .msg-row {
+    /* Message group — first message from a user */
+    .msg-group {
       display: flex;
-      justify-content: flex-start;
-      margin-bottom: 12px;
+      gap: 12px;
+      padding: 6px 20px;
+      margin-top: 8px;
+      position: relative;
     }
 
-    .msg-row.own {
-      justify-content: flex-end;
+    .msg-group:hover { background: var(--bg-hover); }
+
+    .msg-group .avatar { margin-top: 2px; }
+
+    .msg-content {
+      flex: 1;
+      min-width: 0;
     }
 
-    .bubble {
-      max-width: min(520px, 85%);
-      border-radius: var(--radius-lg);
-      padding: 10px 14px;
-    }
-
-    .bubble.peer {
-      background: #fff;
-      border: 1px solid var(--border);
-      box-shadow: 0 1px 2px rgb(0 0 0 / 0.04);
-    }
-
-    .bubble.own {
-      background: var(--accent);
-      color: #fff;
-    }
-
-    .bubble-meta {
-      font-size: 11px;
-      margin-bottom: 6px;
+    .msg-header {
       display: flex;
       align-items: baseline;
       gap: 8px;
-      flex-wrap: wrap;
+      margin-bottom: 2px;
     }
 
-    .bubble.peer .bubble-meta {
-      color: var(--text-secondary);
-    }
-
-    .bubble.own .bubble-meta {
-      color: rgb(255 255 255 / 0.85);
-    }
-
-    .bubble-author {
+    .msg-author {
+      font-size: 14px;
       font-weight: 600;
-      font-size: 13px;
       color: var(--text-primary);
     }
 
-    .bubble.own .bubble-author {
-      color: #fff;
+    .msg-author.you { color: var(--accent); }
+
+    .msg-timestamp {
+      font-size: 11px;
+      color: var(--text-timestamp);
+      font-weight: 400;
     }
 
-    .bubble-text {
+    .msg-text {
       font-size: 14px;
       line-height: 1.5;
+      color: var(--text-primary);
       margin: 0;
+      word-wrap: break-word;
     }
 
-    .bubble.peer .bubble-text {
-      color: #374151;
+    /* Continuation message — same author, no avatar */
+    .msg-continuation {
+      display: flex;
+      gap: 12px;
+      padding: 2px 20px;
+      position: relative;
     }
 
+    .msg-continuation:hover { background: var(--bg-hover); }
+
+    .msg-continuation .avatar-spacer {
+      width: 36px;
+      flex-shrink: 0;
+      position: relative;
+    }
+
+    .msg-continuation:hover .hover-timestamp {
+      display: block;
+    }
+
+    .hover-timestamp {
+      display: none;
+      position: absolute;
+      left: 0;
+      top: 4px;
+      font-size: 10px;
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+      text-align: right;
+      width: 36px;
+    }
+
+    .msg-continuation .msg-content { padding: 1px 0; }
+
+    /* Attachment card inside a message */
     .attachment-inline {
-      margin-top: 10px;
-      border-radius: 6px;
+      margin-top: 6px;
+      border-radius: var(--radius-sm);
       border: 1px solid var(--border-strong);
       overflow: hidden;
-      background: #f9fafb;
+      background: var(--bg-sidebar);
+      display: flex;
+      max-width: 420px;
     }
 
-    .bubble.own .attachment-inline {
-      border-color: rgb(255 255 255 / 0.35);
-      background: rgb(255 255 255 / 0.12);
+    .attachment-inline .file-icon-sm {
+      width: 44px;
+      flex-shrink: 0;
+      background: var(--accent);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
     }
 
-    .attachment-inline .thumb {
-      height: 100px;
-      background: linear-gradient(135deg, #e5e7eb, #f3f4f6);
+    .attachment-inline .file-info {
+      padding: 8px 12px;
+      min-width: 0;
+      flex: 1;
     }
 
-    .attachment-inline .cap {
-      padding: 8px 10px;
-      font-size: 12px;
-      color: var(--text-secondary);
+    .attachment-inline .file-name {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-primary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
-    .bubble.own .attachment-inline .cap {
-      color: rgb(255 255 255 / 0.9);
+    .attachment-inline .file-meta {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 2px;
     }
 
-    /* Files tab */
+    .attachment-inline.image {
+      max-width: 320px;
+    }
+
+    .attachment-inline.image .thumb {
+      width: 100%;
+      height: 160px;
+      background: linear-gradient(135deg, #dbeafe, #e0e7ff);
+    }
+
+    /* ─── Files tab ─────────────────────────────────────────────── */
     .files-section {
       padding: 16px 20px 20px;
       flex: 1;
@@ -519,74 +524,78 @@
       color: var(--text-muted);
     }
 
-    /* Composer */
+    /* ─── Composer ──────────────────────────────────────────────── */
     .composer-wrap {
       flex-shrink: 0;
-      padding: 16px 20px 20px;
+      padding: 12px 20px 16px;
       background: #fff;
-      border-top: 1px solid var(--border-strong);
     }
 
-    .composer-wrap.hidden-for-files {
-      display: none;
-    }
+    .composer-wrap.hidden-for-files { display: none; }
 
     .composer {
       border-radius: var(--radius-lg);
       border: 1px solid var(--border-strong);
       background: #f9fafb;
-      padding: 10px 12px;
-    }
-
-    .composer-tools {
+      padding: 8px 10px;
       display: flex;
-      gap: 6px;
-      margin-bottom: 8px;
+      align-items: flex-end;
+      gap: 8px;
     }
 
-    .composer-tools button {
+    .composer-attach {
       width: 32px;
       height: 32px;
+      flex-shrink: 0;
       border: none;
       border-radius: 6px;
       background: #fff;
       border: 1px solid var(--border);
       color: var(--text-secondary);
       cursor: default;
+      font-size: 16px;
+      line-height: 1;
     }
 
-    .composer-tools button:hover {
-      background: #f3f4f6;
-    }
+    .composer-attach:hover { background: #f3f4f6; }
 
     .composer-input {
-      width: 100%;
-      min-height: 40px;
+      flex: 1;
+      min-height: 32px;
+      max-height: 120px;
       border: none;
       background: transparent;
-      color: var(--text-muted);
+      color: var(--text-primary);
       font-size: 14px;
       resize: none;
       outline: none;
       font-family: inherit;
+      padding: 6px 4px;
     }
 
-    .composer-hint {
-      margin-top: 8px;
-      font-size: 11px;
-      color: var(--text-muted);
+    .composer-input::placeholder { color: var(--text-muted); }
+
+    .composer-send {
+      width: 32px;
+      height: 32px;
+      flex-shrink: 0;
+      border: none;
+      border-radius: 6px;
+      background: var(--accent);
+      color: #fff;
+      cursor: default;
     }
+
+    .composer-send:hover { background: var(--accent-hover); }
 
     @media (max-width: 768px) {
-      .sidebar {
-        width: 240px;
-      }
+      .sidebar { width: 240px; }
     }
   </style>
 </head>
 <body>
   <div class="banner">
-    <strong>Static mockup only</strong> — aligns with Swarm settings in Connect (light panels, gray borders, blue accent). In the app, this panel sits beside the existing Connect sidebar (not shown here). <strong>Direct messages only</strong>. Use <strong>Files</strong> for everything shared in this DM.
+    <strong>Discord-style mockup</strong> — stacked messages, avatar + author header, text below. Consecutive messages from the same author are grouped without repeating the avatar. Hover on a continuation shows its timestamp. No left/right sides — all messages read top-to-bottom.
   </div>
 
   <div class="app-frame">
@@ -598,17 +607,17 @@
             <div class="card">
               <button type="button" class="btn-primary">New conversation</button>
               <p style="margin:10px 0 0;font-size:11px;color:var(--text-muted);line-height:1.4;">
-                Mockup: opens inline field to paste a Swarm ID (same pattern as settings forms).
+                Paste a Swarm ID or ENS name to start chatting.
               </p>
             </div>
           </div>
           <div class="input-fake" role="search">Search people…</div>
           <div class="sidebar-scroll">
             <div class="conv-item active">
-              <div class="avatar">AK<span class="online-dot"></span></div>
+              <div class="avatar">AE<span class="online-dot"></span></div>
               <div class="conv-meta">
                 <div class="conv-title">alice.eth</div>
-                <div class="conv-preview">Sounds good — I&rsquo;ll upload the spec…</div>
+                <div class="conv-preview">Uploaded the spec — it's in the Files…</div>
               </div>
               <div class="conv-time">2m</div>
             </div>
@@ -616,7 +625,7 @@
               <div class="avatar">BM</div>
               <div class="conv-meta">
                 <div class="conv-title">bob.manifest</div>
-                <div class="conv-preview">You: here&rsquo;s the batch id</div>
+                <div class="conv-preview">You: here's the batch id</div>
               </div>
               <div class="conv-time">1h</div>
             </div>
@@ -634,6 +643,7 @@
 
       <main class="main" aria-label="Conversation">
         <header class="thread-header">
+          <div class="avatar lg">AE<span class="online-dot"></span></div>
           <div class="thread-title-block">
             <div class="thread-title">
               alice.eth
@@ -652,39 +662,76 @@
           <div class="messages">
             <div class="date-divider"><span>April 15, 2026</span></div>
 
-            <div class="msg-row">
-              <div class="bubble peer">
-                <div class="bubble-meta">
-                  <span class="bubble-author">alice.eth</span>
-                  <span>10:12</span>
+            <!-- First message from alice -->
+            <div class="msg-group">
+              <div class="avatar">AE</div>
+              <div class="msg-content">
+                <div class="msg-header">
+                  <span class="msg-author">alice.eth</span>
+                  <span class="msg-timestamp">10:12</span>
                 </div>
-                <p class="bubble-text">Hey — can you review the drive manifest before I pin it? I&rsquo;ll drop the JSON below.</p>
+                <p class="msg-text">Hey — can you review the drive manifest before I pin it? I'll drop the JSON below.</p>
+              </div>
+            </div>
+
+            <!-- Continuation from alice (same author, within a minute) -->
+            <div class="msg-continuation">
+              <div class="avatar-spacer">
+                <span class="hover-timestamp">10:12</span>
+              </div>
+              <div class="msg-content">
+                <p class="msg-text">It's the v3 schema with the new folder structure.</p>
                 <div class="attachment-inline">
-                  <div class="thumb" aria-hidden="true"></div>
-                  <div class="cap">drive-manifest-v3.json · 24 KB · shared in chat</div>
+                  <div class="file-icon-sm">JSON</div>
+                  <div class="file-info">
+                    <div class="file-name">drive-manifest-v3.json</div>
+                    <div class="file-meta">24 KB · Click to download</div>
+                  </div>
                 </div>
               </div>
             </div>
 
             <div class="date-divider"><span>Today</span></div>
 
-            <div class="msg-row own">
-              <div class="bubble own">
-                <div class="bubble-meta">
-                  <span class="bubble-author">You</span>
-                  <span>09:41</span>
+            <!-- First message from you -->
+            <div class="msg-group">
+              <div class="avatar" style="background:#dbeafe;color:#1e40af;">YO</div>
+              <div class="msg-content">
+                <div class="msg-header">
+                  <span class="msg-author you">You</span>
+                  <span class="msg-timestamp">09:41</span>
                 </div>
-                <p class="bubble-text">On it. If validation fails I&rsquo;ll reply with line numbers.</p>
+                <p class="msg-text">On it. If validation fails I'll reply with line numbers.</p>
               </div>
             </div>
 
-            <div class="msg-row">
-              <div class="bubble peer">
-                <div class="bubble-meta">
-                  <span class="bubble-author">alice.eth</span>
-                  <span>09:44</span>
+            <!-- First message from alice again (new group — different author) -->
+            <div class="msg-group">
+              <div class="avatar">AE</div>
+              <div class="msg-content">
+                <div class="msg-header">
+                  <span class="msg-author">alice.eth</span>
+                  <span class="msg-timestamp">09:44</span>
                 </div>
-                <p class="bubble-text">Uploaded the spec — it&rsquo;s in the Files tab with the rest of our attachments.</p>
+                <p class="msg-text">Uploaded the spec — it's in the Files tab with the rest of our attachments.</p>
+              </div>
+            </div>
+
+            <!-- Continuation with image attachment -->
+            <div class="msg-continuation">
+              <div class="avatar-spacer">
+                <span class="hover-timestamp">09:44</span>
+              </div>
+              <div class="msg-content">
+                <div class="attachment-inline image">
+                  <div style="flex:1;">
+                    <div class="thumb" aria-hidden="true"></div>
+                    <div class="file-info">
+                      <div class="file-name">topology-diagram.png</div>
+                      <div class="file-meta">182 KB · image/png</div>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -728,12 +775,10 @@
 
         <div id="composer" class="composer-wrap">
           <div class="composer">
-            <div class="composer-tools">
-              <button type="button" title="Attach file">+</button>
-            </div>
+            <button type="button" class="composer-attach" title="Attach file">+</button>
             <textarea class="composer-input" rows="1" readonly placeholder="Message alice.eth…" aria-label="Message input"></textarea>
+            <button type="button" class="composer-send" title="Send">→</button>
           </div>
-          <p class="composer-hint">Composer shows on Messages; hidden on Files in this mockup (toggle tabs to compare).</p>
         </div>
       </main>
     </div>

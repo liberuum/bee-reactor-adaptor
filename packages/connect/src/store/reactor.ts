@@ -379,14 +379,22 @@ export async function createReactor(localPackage?: DocumentModelLib) {
       }
 
       if (driveIds.length === 0) return false;
-      console.log(`[SwarmChannel] Registering ${driveIds.length} drive(s):`, driveIds.map((id: string) => id.slice(0, 8)));
 
       const ownerAddr = (window.ph as any)?.renown?.user?.address ?? swarmState.ownerAddress ?? "";
       let registered = 0;
+      let alreadyRegistered = 0;
       for (const driveId of driveIds) {
         if (!driveId) continue;
         try {
           const { addSwarmRemoteForDrive } = await import("../../../adapter/src/channel/add-swarm-remote.js");
+          // Skip if this drive is already registered (idempotent — avoids log spam)
+          const remoteName = `swarm:${driveId}`;
+          const existing = sm.list().find((r: any) => r.name === remoteName);
+          if (existing) {
+            alreadyRegistered++;
+            continue;
+          }
+
           const added = await addSwarmRemoteForDrive(sm, String(driveId), {
             beeUrl: swarmState.beeUrl,
             batchId: swarmState.client?.stamps?.batchId ?? "",
@@ -397,8 +405,12 @@ export async function createReactor(localPackage?: DocumentModelLib) {
           console.warn(`[SwarmChannel] Failed to register drive ${String(driveId).slice(0, 8)}:`, err);
         }
       }
+
+      // Only log + trigger recovery when we actually register NEW remotes.
+      // New drives created mid-session are handled by the drive-change
+      // "created" event listener (subscribe on line ~222), not this loop.
       if (registered > 0) {
-        console.log(`[SwarmChannel] Registered ${registered} Swarm remote(s)`);
+        console.log(`[SwarmChannel] Registered ${registered} new Swarm remote(s):`, driveIds.map((id: string) => id.slice(0, 8)));
 
         // If this was a recovery (drives from Swarm, not local), trigger one pull.
         const phAny = window.ph as any;
@@ -415,7 +427,11 @@ export async function createReactor(localPackage?: DocumentModelLib) {
           phAny._skipSwarmRecovery = false;
         }
       }
-      return registered > 0;
+
+      // "Done" when every discovered drive is accounted for (registered or
+      // already registered). This exits the retry loop once initial registration
+      // completes, instead of spamming logs for the full 30s window.
+      return (registered + alreadyRegistered) >= driveIds.length;
     };
 
     on("sync:confirmed", (e: Record<string, unknown>) => {
@@ -454,23 +470,16 @@ export async function createReactor(localPackage?: DocumentModelLib) {
 
     logger.info("[SwarmPlugin] Toast notifications active");
 
-    // Try immediately, then retry every 3s up to 30s (drives may be hydrating)
-    let attempts = 0;
-    const retryInterval = setInterval(async () => {
-      attempts++;
-      try {
-        const done = await registerSwarmRemotes();
-        if (done || attempts >= 10) {
-          clearInterval(retryInterval);
-          if (!done && attempts >= 10) {
-            console.log("[SwarmChannel] Gave up waiting for drives after 30s");
-          }
-        }
-      } catch (err) {
-        console.warn("[SwarmChannel] Registration attempt failed:", err);
-        if (attempts >= 10) clearInterval(retryInterval);
-      }
-    }, 3000);
+    // Initial registration attempt (covers the common case where drives are
+    // already hydrated by the time the Swarm plugin becomes ready).
+    // Additional coverage:
+    //   - "plugin:ready" event also calls registerSwarmRemotes() (above),
+    //     so late plugin init is handled.
+    //   - Reactor's "created" drive-change event listener registers any
+    //     new or late-hydrated drives.
+    registerSwarmRemotes().catch((err) =>
+      console.warn("[SwarmChannel] Initial registration failed:", err),
+    );
   }, 1000);
 
   window.ph.loading = false;

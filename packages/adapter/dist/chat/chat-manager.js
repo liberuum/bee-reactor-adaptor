@@ -11,6 +11,10 @@ export class ChatManager {
     sessions = new Map();
     eventHandlers = new Set();
     myAddress;
+    /** Set of message IDs we've already emitted, to prevent duplicates when
+     *  the same chunk arrives via multiple channels (broadcast + direct PSS,
+     *  or Bee node re-serving cached chunks). Trimmed periodically. */
+    seenMessageIds = new Set();
     constructor(client, bee, batchId, myAddress) {
         this.client = client;
         this.myAddress = myAddress;
@@ -24,6 +28,13 @@ export class ChatManager {
         // subscribe to the direct topic so we receive their messages.
         this.pss.subscribeAll({
             onMessage: (message) => {
+                // Deduplicate SYNCHRONOUSLY. Bee may re-serve the same cached chunk
+                // multiple times in rapid succession; if we wait until after the
+                // async startSession to mark it seen, parallel deliveries all race
+                // past the check.
+                if (this.seenMessageIds.has(message.id))
+                    return;
+                this.markSeen(message.id);
                 console.log(`[Chat] Broadcast ping from ${message.from.slice(0, 10)}: "${message.text.slice(0, 30)}"`);
                 // Auto-create session with the sender so we start receiving their messages
                 this.startSession(message.from, { skipGsoc: true })
@@ -59,11 +70,13 @@ export class ChatManager {
         // Resolve peer's public profile
         const profile = await this.client.readPublicProfile(peerSignerAddress);
         if (!profile) {
-            throw new Error(`Peer ${peerSignerAddress.slice(0, 10)} has no public profile on Swarm. ` +
-                `They need to connect to Swarm at least once.`);
+            throw new Error(`No Swarm profile found for ${peerSignerAddress.slice(0, 10)}…${peerSignerAddress.slice(-4)}. ` +
+                `Make sure you're using their Swarm ID (not wallet address). ` +
+                `They can find their Swarm ID in Swarm Settings → Your Swarm ID.`);
         }
         if (!profile.beeNodePublicKey || !profile.overlayAddress) {
-            throw new Error(`Peer ${peerSignerAddress.slice(0, 10)}'s profile is missing beeNodePublicKey or overlayAddress.`);
+            throw new Error(`Peer's profile is incomplete (missing Bee node public key or overlay). ` +
+                `Ask them to reconnect their Swarm node.`);
         }
         const session = {
             peerAddress: peerSignerAddress,
@@ -78,6 +91,11 @@ export class ChatManager {
         // Subscribe to incoming PSS messages from this peer
         this.pss.subscribe(peerSignerAddress, {
             onMessage: (message) => {
+                // Dedupe: same chunk can arrive multiple times (Bee re-serves cached
+                // chunks, or broadcast+direct both deliver the same message).
+                if (this.seenMessageIds.has(message.id))
+                    return;
+                this.markSeen(message.id);
                 session.lastActivity = new Date().toISOString();
                 this.emit({ type: "message-received", data: message });
             },
@@ -211,27 +229,82 @@ export class ChatManager {
             return;
         await this.gsoc.sendOnline(session.peerOverlay);
     }
-    // ─── History ─────────────────────────────────────────────────
+    // ─── History (feed-indexed pagination) ───────────────────────
+    /** Per-peer pending new messages to write as a batch */
+    pendingBatches = new Map();
+    /** Per-peer debounce timers for flushing batches */
+    persistTimers = new Map();
     /**
-     * Persist messages to the chat history feed (ACT-encrypted).
+     * Queue a new message to be written to the feed as part of the next batch.
+     * Debounces 3s: all messages queued within the window are written as a
+     * single feed entry (page), saving feed writes during rapid typing.
      */
-    async persistMessages(session, messages) {
-        const result = await this.history.writeMessages(session.peerAddress, messages, session.peerBeeNodePubKey);
-        session.actGranteeRef = result.actGranteeRef;
-        session.actHistoryRef = result.actHistoryRef;
+    queueMessageForHistory(session, message, debounceMs = 3000) {
+        const peer = session.peerAddress;
+        const pending = this.pendingBatches.get(peer) ?? [];
+        pending.push(message);
+        this.pendingBatches.set(peer, pending);
+        // Reset debounce timer
+        const existing = this.persistTimers.get(peer);
+        if (existing)
+            clearTimeout(existing);
+        const timer = setTimeout(() => {
+            this.persistTimers.delete(peer);
+            this.flushBatch(session).catch((err) => {
+                console.warn("[Chat] Batch flush failed:", err instanceof Error ? err.message : err);
+            });
+        }, debounceMs);
+        this.persistTimers.set(peer, timer);
+    }
+    /** Flush the pending batch as a new feed page. */
+    async flushBatch(session) {
+        const peer = session.peerAddress;
+        const batch = this.pendingBatches.get(peer);
+        if (!batch || batch.length === 0)
+            return;
+        this.pendingBatches.delete(peer);
+        await this.history.writePage(peer, batch, session.peerBeeNodePubKey);
+        console.log(`[Chat] Wrote page (${batch.length} msg) to feed for ${peer.slice(0, 10)}`);
     }
     /**
-     * Load chat history from the peer's feed.
+     * Force-flush any pending batch for a peer.
+     * Call when closing chat, switching conversations, or before unload.
      */
-    async loadHistory(session) {
-        if (!session.actHistoryRef)
-            return [];
-        const page = await this.history.readMessages(session.peerAddress, session.peerBeeNodePubKey, session.actHistoryRef);
-        if (page) {
-            this.emit({ type: "history-loaded", data: { peerAddress: session.peerAddress, count: page.messages.length } });
-            return page.messages;
+    async flushPendingHistory(session) {
+        const timer = this.persistTimers.get(session.peerAddress);
+        if (timer) {
+            clearTimeout(timer);
+            this.persistTimers.delete(session.peerAddress);
         }
-        return [];
+        await this.flushBatch(session);
+    }
+    /**
+     * Load the latest N pages of history from BOTH peers' feeds.
+     * Merges, dedupes by message ID, sorts chronologically.
+     * Returns a cursor for loading older pages.
+     *
+     * @param pageCount - How many pages to load per feed (default 3)
+     */
+    async loadHistoryLatest(session, pageCount = 3) {
+        const myBeeNodePubKey = await this.client.getBeeNodePublicKey();
+        const result = await this.history.loadConversationLatest(session.peerAddress, myBeeNodePubKey, session.peerBeeNodePubKey, pageCount);
+        this.emit({
+            type: "history-loaded",
+            data: { peerAddress: session.peerAddress, count: result.messages.length },
+        });
+        return result;
+    }
+    /**
+     * Load older pages using a cursor from a previous load.
+     */
+    async loadHistoryOlder(session, cursor, pageCount = 3) {
+        const myBeeNodePubKey = await this.client.getBeeNodePublicKey();
+        return this.history.loadConversationOlder(session.peerAddress, myBeeNodePubKey, session.peerBeeNodePubKey, cursor, pageCount);
+    }
+    /** @deprecated Use loadHistoryLatest instead */
+    async loadHistory(session) {
+        const result = await this.loadHistoryLatest(session, 3);
+        return result.messages;
     }
     // ─── Events ──────────────────────────────────────────────────
     /**
@@ -279,6 +352,19 @@ export class ChatManager {
             }
             catch {
                 // Don't let one handler crash others
+            }
+        }
+    }
+    markSeen(id) {
+        this.seenMessageIds.add(id);
+        // Trim in a batch when the set grows past the cap. One-at-a-time deletion
+        // can't keep up under bursts (Bee sometimes re-delivers cached chunks
+        // many times in the same tick).
+        if (this.seenMessageIds.size > 500) {
+            const ids = [...this.seenMessageIds];
+            this.seenMessageIds.clear();
+            for (let i = ids.length - 400; i < ids.length; i++) {
+                this.seenMessageIds.add(ids[i]);
             }
         }
     }

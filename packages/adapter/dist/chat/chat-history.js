@@ -1,18 +1,21 @@
 /**
- * Chat History — ACT-encrypted persistent message log on Swarm feeds.
+ * Chat History — ACT-encrypted persistent message log with feed-indexed pagination.
  *
- * PSS messages are ephemeral (expire with stamp TTL). This module
- * persists messages to a Swarm feed with ACT encryption so both
- * parties can read the history. Uses /bzz for ACT support.
+ * Each feed entry is a PAGE: a small batch of messages written together
+ * (usually 1-5 messages per batch — flushed after a 3s debounce).
  *
- * Each conversation has its own feed. Messages are stored in pages
- * (newest first). The feed index increments with each page write.
+ * Feed indices give us natural pagination:
+ *   - Latest page = highest feed index (read via downloadReference())
+ *   - Older pages = N-1, N-2, ... (read via downloadReference({ index }))
+ *
+ * Each user writes their own sent messages to their own feed. To reconstruct
+ * a conversation, both peers read both feeds in parallel, merge, dedupe.
  */
-import { Topic } from "@ethersphere/bee-js";
+import { Topic, FeedIndex } from "@ethersphere/bee-js";
 const HISTORY_TOPIC_PREFIX = "ph:v2:chatlog:";
 /**
  * Derive a deterministic feed topic for chat history.
- * Sorting ensures both parties use the same feed.
+ * Sorting ensures both parties use the same topic (but different owners).
  */
 export function historyTopic(addressA, addressB) {
     const sorted = [addressA.toLowerCase(), addressB.toLowerCase()].sort();
@@ -21,64 +24,174 @@ export function historyTopic(addressA, addressB) {
 export class ChatHistory {
     client;
     myAddress;
+    /** Cached grantee info per peer (create once, reuse for all writes) */
+    granteeCache = new Map();
     constructor(client, myAddress) {
         this.client = client;
         this.myAddress = myAddress;
     }
+    // ─── Write side ───────────────────────────────────────────────
     /**
-     * Persist a batch of messages to the chat history feed.
+     * Write a batch of new messages as a new feed entry.
+     * Each call creates a new feed index (one page).
      *
-     * Messages are uploaded with ACT protection and both parties'
-     * Bee node public keys as grantees. The feed is owned by the
-     * caller (each user writes their own messages to the feed).
-     *
-     * @param peerAddress - Peer's Swarm signer address
-     * @param messages - Messages to persist (newest last)
-     * @param peerBeeNodePubKey - Peer's Bee node public key for ACT grant
-     * @returns ACT metadata for the written page
+     * @param peerAddress - Peer's Swarm signer address (for topic + grant)
+     * @param messages - Batch of new messages to write (usually 1-5)
+     * @param peerBeeNodePubKey - Peer's Bee pubkey for ACT grant
      */
-    async writeMessages(peerAddress, messages, peerBeeNodePubKey) {
-        const myBeeNodePubKey = await this.client.getBeeNodePublicKey();
-        // Create grantee list with both parties (1-second ACT rule respected)
-        const { ref: granteeRef, historyRef: granteeHistRef } = await this.client.createGrantees([peerBeeNodePubKey, myBeeNodePubKey]);
-        // Wait for ACT 1-second rule
-        await new Promise(r => setTimeout(r, 1100));
-        // Upload message page with ACT, chained to grantee history
+    async writePage(peerAddress, messages, peerBeeNodePubKey) {
+        if (messages.length === 0)
+            return;
+        // Ensure grantees exist (cached per peer)
+        let grantees = this.granteeCache.get(peerAddress);
+        if (!grantees) {
+            const myBeeNodePubKey = await this.client.getBeeNodePublicKey();
+            const { ref: granteeRef, historyRef: granteeHistRef } = await this.client.createGrantees([peerBeeNodePubKey, myBeeNodePubKey]);
+            grantees = { granteeRef, granteeHistRef };
+            this.granteeCache.set(peerAddress, grantees);
+            await new Promise(r => setTimeout(r, 1100)); // ACT 1s rule
+        }
         const page = {
             messages,
-            page: 0,
-            hasMore: false,
+            writtenAt: new Date().toISOString(),
         };
-        const { reference, historyAddress } = await this.client.uploadFile(JSON.stringify(page), {
+        // Upload ACT-protected page
+        const { reference } = await this.client.uploadFile(JSON.stringify(page), {
             act: true,
-            actHistoryAddress: granteeHistRef,
-            skipEncryption: true, // ACT handles encryption
+            actHistoryAddress: grantees.granteeHistRef,
+            skipEncryption: true,
         });
-        // Write to the feed so the peer can discover it
+        // Write as a new feed entry (feed index auto-increments)
         const topic = Topic.fromString(historyTopic(this.myAddress, peerAddress));
         await this.client.writeFeedPayload(topic, reference);
+    }
+    // ─── Read side ────────────────────────────────────────────────
+    /**
+     * Load the latest N pages from a feed owner.
+     * Returns messages (newest-last) + cursor for loading older.
+     */
+    async loadLatestPages(feedOwner, publisherBeeNodePubKey, pageCount) {
+        const topic = Topic.fromString(historyTopic(this.myAddress, feedOwner));
+        const ownerNormalized = feedOwner.replace(/^0x/i, "").toLowerCase();
+        // Step 1: Get the latest feed index
+        const latestIndex = await this.getLatestFeedIndex(topic, ownerNormalized);
+        if (latestIndex === null) {
+            return { messages: [], cursor: { nextIndex: null } };
+        }
+        // Step 2: Load N pages going backwards from latestIndex
+        return this.loadPages(topic, ownerNormalized, publisherBeeNodePubKey, latestIndex, pageCount);
+    }
+    /**
+     * Load older pages starting from a cursor (continuation from previous load).
+     */
+    async loadOlderPages(feedOwner, publisherBeeNodePubKey, cursor, pageCount) {
+        if (cursor.nextIndex === null) {
+            return { messages: [], cursor: { nextIndex: null } };
+        }
+        const topic = Topic.fromString(historyTopic(this.myAddress, feedOwner));
+        const ownerNormalized = feedOwner.replace(/^0x/i, "").toLowerCase();
+        return this.loadPages(topic, ownerNormalized, publisherBeeNodePubKey, cursor.nextIndex, pageCount);
+    }
+    /**
+     * Load a full conversation (merge both feeds) starting from latest.
+     * Convenience wrapper used on initial load.
+     */
+    async loadConversationLatest(peerAddress, myBeeNodePubKey, peerBeeNodePubKey, pageCount) {
+        const [mine, peer] = await Promise.all([
+            this.loadLatestPages(this.myAddress, myBeeNodePubKey, pageCount),
+            this.loadLatestPages(peerAddress, peerBeeNodePubKey, pageCount),
+        ]);
+        const merged = this.mergeAndSort([...mine.messages, ...peer.messages]);
         return {
-            actHistoryRef: historyAddress ?? granteeHistRef,
-            actGranteeRef: granteeRef,
+            messages: merged,
+            cursor: { mine: mine.cursor, peer: peer.cursor },
+            hasMore: mine.cursor.nextIndex !== null || peer.cursor.nextIndex !== null,
         };
     }
     /**
-     * Read the latest chat history page from a peer's feed.
-     *
-     * @param peerAddress - Peer's Swarm signer address (feed owner)
-     * @param publisherBeeNodePubKey - Peer's Bee node public key (for ACT download)
-     * @param actHistoryAddress - ACT history address (from session metadata)
-     * @returns The latest message page, or null if no history exists
+     * Load more (older) pages from a conversation using a cursor.
      */
-    async readMessages(peerAddress, publisherBeeNodePubKey, actHistoryAddress) {
-        const topic = historyTopic(this.myAddress, peerAddress);
+    async loadConversationOlder(peerAddress, myBeeNodePubKey, peerBeeNodePubKey, cursor, pageCount) {
+        const [mine, peer] = await Promise.all([
+            this.loadOlderPages(this.myAddress, myBeeNodePubKey, cursor.mine, pageCount),
+            this.loadOlderPages(peerAddress, peerBeeNodePubKey, cursor.peer, pageCount),
+        ]);
+        const merged = this.mergeAndSort([...mine.messages, ...peer.messages]);
+        return {
+            messages: merged,
+            cursor: { mine: mine.cursor, peer: peer.cursor },
+            hasMore: mine.cursor.nextIndex !== null || peer.cursor.nextIndex !== null,
+        };
+    }
+    // ─── Private helpers ──────────────────────────────────────────
+    /** Get the latest feed index (returns null if feed doesn't exist) */
+    async getLatestFeedIndex(topic, owner) {
         try {
-            // Read the feed to get the latest history page
-            const topic = Topic.fromString(historyTopic(this.myAddress, peerAddress));
-            const page = await this.client.readFeedJson(topic, peerAddress.replace(/^0x/i, "").toLowerCase(), { skipDecryption: true });
-            // TODO: when ACT feed reads are supported, download with:
-            // actPublisher: publisherBeeNodePubKey, actHistoryAddress
-            return page;
+            const reader = this.client.bee.makeFeedReader(topic, owner);
+            const result = await reader.downloadReference();
+            // result.feedIndex is a FeedIndex (hex string of 8-byte big-endian integer)
+            return this.parseFeedIndex(result.feedIndex);
+        }
+        catch {
+            return null;
+        }
+    }
+    /** Load a range of pages going backwards from startIndex */
+    async loadPages(topic, owner, publisherBeeNodePubKey, startIndex, pageCount) {
+        const reader = this.client.bee.makeFeedReader(topic, owner);
+        const messages = [];
+        let currentIndex = startIndex;
+        let loaded = 0;
+        while (loaded < pageCount && currentIndex >= 0) {
+            try {
+                const feedIndex = FeedIndex.fromBigInt(BigInt(currentIndex));
+                const result = await reader.downloadReference({ index: feedIndex });
+                const ref = result.reference.toHex();
+                // Download page via /bzz (ACT-aware)
+                const data = await this.client.downloadFile(ref, {
+                    actPublisher: publisherBeeNodePubKey,
+                    skipDecryption: true,
+                });
+                const page = JSON.parse(new TextDecoder().decode(data));
+                if (Array.isArray(page.messages)) {
+                    messages.push(...page.messages);
+                }
+                loaded++;
+            }
+            catch {
+                // Index doesn't exist — stop
+                break;
+            }
+            currentIndex--;
+        }
+        return {
+            messages,
+            cursor: { nextIndex: currentIndex >= 0 ? currentIndex : null },
+        };
+    }
+    mergeAndSort(messages) {
+        const byId = new Map();
+        for (const m of messages) {
+            if (!byId.has(m.id))
+                byId.set(m.id, m);
+        }
+        return [...byId.values()].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+    }
+    /** Parse a FeedIndex (hex string) to a number. */
+    parseFeedIndex(idx) {
+        try {
+            if (idx === null || idx === undefined)
+                return null;
+            // Try toBigInt() method (bee-js FeedIndex)
+            if (typeof idx.toBigInt === "function") {
+                return Number(idx.toBigInt());
+            }
+            // Fallback: parse hex string
+            if (typeof idx === "string")
+                return parseInt(idx, 16);
+            if (typeof idx === "number")
+                return idx;
+            return null;
         }
         catch {
             return null;

@@ -1,38 +1,71 @@
 import type { SwarmClient } from "../swarm-client.js";
-import type { ChatMessage, ChatHistoryPage } from "./types.js";
+import type { ChatMessage } from "./types.js";
 /**
  * Derive a deterministic feed topic for chat history.
- * Sorting ensures both parties use the same feed.
+ * Sorting ensures both parties use the same topic (but different owners).
  */
 export declare function historyTopic(addressA: string, addressB: string): string;
+/** Cursor state for backward pagination per feed owner */
+export interface FeedCursor {
+    /** Next feed index to load (decrements on each load). null = no more */
+    nextIndex: number | null;
+}
+/** Combined cursor for a conversation — tracks both feeds */
+export interface HistoryCursor {
+    mine: FeedCursor;
+    peer: FeedCursor;
+}
+export interface LoadedHistory {
+    messages: ChatMessage[];
+    cursor: HistoryCursor;
+    /** true if at least one feed has more pages to load */
+    hasMore: boolean;
+}
 export declare class ChatHistory {
     private readonly client;
     private readonly myAddress;
+    /** Cached grantee info per peer (create once, reuse for all writes) */
+    private granteeCache;
     constructor(client: SwarmClient, myAddress: string);
     /**
-     * Persist a batch of messages to the chat history feed.
+     * Write a batch of new messages as a new feed entry.
+     * Each call creates a new feed index (one page).
      *
-     * Messages are uploaded with ACT protection and both parties'
-     * Bee node public keys as grantees. The feed is owned by the
-     * caller (each user writes their own messages to the feed).
-     *
-     * @param peerAddress - Peer's Swarm signer address
-     * @param messages - Messages to persist (newest last)
-     * @param peerBeeNodePubKey - Peer's Bee node public key for ACT grant
-     * @returns ACT metadata for the written page
+     * @param peerAddress - Peer's Swarm signer address (for topic + grant)
+     * @param messages - Batch of new messages to write (usually 1-5)
+     * @param peerBeeNodePubKey - Peer's Bee pubkey for ACT grant
      */
-    writeMessages(peerAddress: string, messages: ChatMessage[], peerBeeNodePubKey: string): Promise<{
-        actHistoryRef: string;
-        actGranteeRef: string;
+    writePage(peerAddress: string, messages: ChatMessage[], peerBeeNodePubKey: string): Promise<void>;
+    /**
+     * Load the latest N pages from a feed owner.
+     * Returns messages (newest-last) + cursor for loading older.
+     */
+    loadLatestPages(feedOwner: string, publisherBeeNodePubKey: string, pageCount: number): Promise<{
+        messages: ChatMessage[];
+        cursor: FeedCursor;
     }>;
     /**
-     * Read the latest chat history page from a peer's feed.
-     *
-     * @param peerAddress - Peer's Swarm signer address (feed owner)
-     * @param publisherBeeNodePubKey - Peer's Bee node public key (for ACT download)
-     * @param actHistoryAddress - ACT history address (from session metadata)
-     * @returns The latest message page, or null if no history exists
+     * Load older pages starting from a cursor (continuation from previous load).
      */
-    readMessages(peerAddress: string, publisherBeeNodePubKey: string, actHistoryAddress: string): Promise<ChatHistoryPage | null>;
+    loadOlderPages(feedOwner: string, publisherBeeNodePubKey: string, cursor: FeedCursor, pageCount: number): Promise<{
+        messages: ChatMessage[];
+        cursor: FeedCursor;
+    }>;
+    /**
+     * Load a full conversation (merge both feeds) starting from latest.
+     * Convenience wrapper used on initial load.
+     */
+    loadConversationLatest(peerAddress: string, myBeeNodePubKey: string, peerBeeNodePubKey: string, pageCount: number): Promise<LoadedHistory>;
+    /**
+     * Load more (older) pages from a conversation using a cursor.
+     */
+    loadConversationOlder(peerAddress: string, myBeeNodePubKey: string, peerBeeNodePubKey: string, cursor: HistoryCursor, pageCount: number): Promise<LoadedHistory>;
+    /** Get the latest feed index (returns null if feed doesn't exist) */
+    private getLatestFeedIndex;
+    /** Load a range of pages going backwards from startIndex */
+    private loadPages;
+    private mergeAndSort;
+    /** Parse a FeedIndex (hex string) to a number. */
+    private parseFeedIndex;
 }
 //# sourceMappingURL=chat-history.d.ts.map

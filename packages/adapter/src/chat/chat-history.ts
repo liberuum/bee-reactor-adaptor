@@ -1,113 +1,278 @@
 /**
- * Chat History — ACT-encrypted persistent message log on Swarm feeds.
+ * Chat History — ACT-encrypted persistent message log with feed-indexed pagination.
  *
- * PSS messages are ephemeral (expire with stamp TTL). This module
- * persists messages to a Swarm feed with ACT encryption so both
- * parties can read the history. Uses /bzz for ACT support.
+ * Each feed entry is a PAGE: a small batch of messages written together
+ * (usually 1-5 messages per batch — flushed after a 3s debounce).
  *
- * Each conversation has its own feed. Messages are stored in pages
- * (newest first). The feed index increments with each page write.
+ * Feed indices give us natural pagination:
+ *   - Latest page = highest feed index (read via downloadReference())
+ *   - Older pages = N-1, N-2, ... (read via downloadReference({ index }))
+ *
+ * Each user writes their own sent messages to their own feed. To reconstruct
+ * a conversation, both peers read both feeds in parallel, merge, dedupe.
  */
-import { Topic } from "@ethersphere/bee-js";
+import { Topic, FeedIndex } from "@ethersphere/bee-js";
 import type { SwarmClient } from "../swarm-client.js";
-import type { ChatMessage, ChatHistoryPage } from "./types.js";
+import type { ChatMessage } from "./types.js";
 
 const HISTORY_TOPIC_PREFIX = "ph:v2:chatlog:";
 
 /**
  * Derive a deterministic feed topic for chat history.
- * Sorting ensures both parties use the same feed.
+ * Sorting ensures both parties use the same topic (but different owners).
  */
 export function historyTopic(addressA: string, addressB: string): string {
   const sorted = [addressA.toLowerCase(), addressB.toLowerCase()].sort();
   return `${HISTORY_TOPIC_PREFIX}${sorted[0]}:${sorted[1]}`;
 }
 
+/** A single feed-indexed page of messages */
+interface HistoryPage {
+  messages: ChatMessage[];
+  writtenAt: string;
+}
+
+/** Cursor state for backward pagination per feed owner */
+export interface FeedCursor {
+  /** Next feed index to load (decrements on each load). null = no more */
+  nextIndex: number | null;
+}
+
+/** Combined cursor for a conversation — tracks both feeds */
+export interface HistoryCursor {
+  mine: FeedCursor;
+  peer: FeedCursor;
+}
+
+export interface LoadedHistory {
+  messages: ChatMessage[];
+  cursor: HistoryCursor;
+  /** true if at least one feed has more pages to load */
+  hasMore: boolean;
+}
+
 export class ChatHistory {
+  /** Cached grantee info per peer (create once, reuse for all writes) */
+  private granteeCache = new Map<string, { granteeRef: string; granteeHistRef: string }>();
+
   constructor(
     private readonly client: SwarmClient,
     private readonly myAddress: string,
   ) {}
 
+  // ─── Write side ───────────────────────────────────────────────
+
   /**
-   * Persist a batch of messages to the chat history feed.
+   * Write a batch of new messages as a new feed entry.
+   * Each call creates a new feed index (one page).
    *
-   * Messages are uploaded with ACT protection and both parties'
-   * Bee node public keys as grantees. The feed is owned by the
-   * caller (each user writes their own messages to the feed).
-   *
-   * @param peerAddress - Peer's Swarm signer address
-   * @param messages - Messages to persist (newest last)
-   * @param peerBeeNodePubKey - Peer's Bee node public key for ACT grant
-   * @returns ACT metadata for the written page
+   * @param peerAddress - Peer's Swarm signer address (for topic + grant)
+   * @param messages - Batch of new messages to write (usually 1-5)
+   * @param peerBeeNodePubKey - Peer's Bee pubkey for ACT grant
    */
-  async writeMessages(
+  async writePage(
     peerAddress: string,
     messages: ChatMessage[],
     peerBeeNodePubKey: string,
-  ): Promise<{ actHistoryRef: string; actGranteeRef: string }> {
-    const myBeeNodePubKey = await this.client.getBeeNodePublicKey();
+  ): Promise<void> {
+    if (messages.length === 0) return;
 
-    // Create grantee list with both parties (1-second ACT rule respected)
-    const { ref: granteeRef, historyRef: granteeHistRef } =
-      await this.client.createGrantees([peerBeeNodePubKey, myBeeNodePubKey]);
+    // Ensure grantees exist (cached per peer)
+    let grantees = this.granteeCache.get(peerAddress);
+    if (!grantees) {
+      const myBeeNodePubKey = await this.client.getBeeNodePublicKey();
+      const { ref: granteeRef, historyRef: granteeHistRef } =
+        await this.client.createGrantees([peerBeeNodePubKey, myBeeNodePubKey]);
+      grantees = { granteeRef, granteeHistRef };
+      this.granteeCache.set(peerAddress, grantees);
+      await new Promise(r => setTimeout(r, 1100)); // ACT 1s rule
+    }
 
-    // Wait for ACT 1-second rule
-    await new Promise(r => setTimeout(r, 1100));
-
-    // Upload message page with ACT, chained to grantee history
-    const page: ChatHistoryPage = {
+    const page: HistoryPage = {
       messages,
-      page: 0,
-      hasMore: false,
+      writtenAt: new Date().toISOString(),
     };
 
-    const { reference, historyAddress } = await this.client.uploadFile(
+    // Upload ACT-protected page
+    const { reference } = await this.client.uploadFile(
       JSON.stringify(page),
       {
         act: true,
-        actHistoryAddress: granteeHistRef,
-        skipEncryption: true, // ACT handles encryption
+        actHistoryAddress: grantees.granteeHistRef,
+        skipEncryption: true,
       },
     );
 
-    // Write to the feed so the peer can discover it
+    // Write as a new feed entry (feed index auto-increments)
     const topic = Topic.fromString(historyTopic(this.myAddress, peerAddress));
     await this.client.writeFeedPayload(topic, reference);
+  }
 
+  // ─── Read side ────────────────────────────────────────────────
+
+  /**
+   * Load the latest N pages from a feed owner.
+   * Returns messages (newest-last) + cursor for loading older.
+   */
+  async loadLatestPages(
+    feedOwner: string,
+    publisherBeeNodePubKey: string,
+    pageCount: number,
+  ): Promise<{ messages: ChatMessage[]; cursor: FeedCursor }> {
+    const topic = Topic.fromString(historyTopic(this.myAddress, feedOwner));
+    const ownerNormalized = feedOwner.replace(/^0x/i, "").toLowerCase();
+
+    // Step 1: Get the latest feed index
+    const latestIndex = await this.getLatestFeedIndex(topic, ownerNormalized);
+    if (latestIndex === null) {
+      return { messages: [], cursor: { nextIndex: null } };
+    }
+
+    // Step 2: Load N pages going backwards from latestIndex
+    return this.loadPages(topic, ownerNormalized, publisherBeeNodePubKey, latestIndex, pageCount);
+  }
+
+  /**
+   * Load older pages starting from a cursor (continuation from previous load).
+   */
+  async loadOlderPages(
+    feedOwner: string,
+    publisherBeeNodePubKey: string,
+    cursor: FeedCursor,
+    pageCount: number,
+  ): Promise<{ messages: ChatMessage[]; cursor: FeedCursor }> {
+    if (cursor.nextIndex === null) {
+      return { messages: [], cursor: { nextIndex: null } };
+    }
+    const topic = Topic.fromString(historyTopic(this.myAddress, feedOwner));
+    const ownerNormalized = feedOwner.replace(/^0x/i, "").toLowerCase();
+    return this.loadPages(topic, ownerNormalized, publisherBeeNodePubKey, cursor.nextIndex, pageCount);
+  }
+
+  /**
+   * Load a full conversation (merge both feeds) starting from latest.
+   * Convenience wrapper used on initial load.
+   */
+  async loadConversationLatest(
+    peerAddress: string,
+    myBeeNodePubKey: string,
+    peerBeeNodePubKey: string,
+    pageCount: number,
+  ): Promise<LoadedHistory> {
+    const [mine, peer] = await Promise.all([
+      this.loadLatestPages(this.myAddress, myBeeNodePubKey, pageCount),
+      this.loadLatestPages(peerAddress, peerBeeNodePubKey, pageCount),
+    ]);
+
+    const merged = this.mergeAndSort([...mine.messages, ...peer.messages]);
     return {
-      actHistoryRef: historyAddress ?? granteeHistRef,
-      actGranteeRef: granteeRef,
+      messages: merged,
+      cursor: { mine: mine.cursor, peer: peer.cursor },
+      hasMore: mine.cursor.nextIndex !== null || peer.cursor.nextIndex !== null,
     };
   }
 
   /**
-   * Read the latest chat history page from a peer's feed.
-   *
-   * @param peerAddress - Peer's Swarm signer address (feed owner)
-   * @param publisherBeeNodePubKey - Peer's Bee node public key (for ACT download)
-   * @param actHistoryAddress - ACT history address (from session metadata)
-   * @returns The latest message page, or null if no history exists
+   * Load more (older) pages from a conversation using a cursor.
    */
-  async readMessages(
+  async loadConversationOlder(
     peerAddress: string,
-    publisherBeeNodePubKey: string,
-    actHistoryAddress: string,
-  ): Promise<ChatHistoryPage | null> {
-    const topic = historyTopic(this.myAddress, peerAddress);
+    myBeeNodePubKey: string,
+    peerBeeNodePubKey: string,
+    cursor: HistoryCursor,
+    pageCount: number,
+  ): Promise<LoadedHistory> {
+    const [mine, peer] = await Promise.all([
+      this.loadOlderPages(this.myAddress, myBeeNodePubKey, cursor.mine, pageCount),
+      this.loadOlderPages(peerAddress, peerBeeNodePubKey, cursor.peer, pageCount),
+    ]);
 
+    const merged = this.mergeAndSort([...mine.messages, ...peer.messages]);
+    return {
+      messages: merged,
+      cursor: { mine: mine.cursor, peer: peer.cursor },
+      hasMore: mine.cursor.nextIndex !== null || peer.cursor.nextIndex !== null,
+    };
+  }
+
+  // ─── Private helpers ──────────────────────────────────────────
+
+  /** Get the latest feed index (returns null if feed doesn't exist) */
+  private async getLatestFeedIndex(topic: Topic, owner: string): Promise<number | null> {
     try {
-      // Read the feed to get the latest history page
-      const topic = Topic.fromString(historyTopic(this.myAddress, peerAddress));
-      const page = await this.client.readFeedJson<ChatHistoryPage>(
-        topic,
-        peerAddress.replace(/^0x/i, "").toLowerCase(),
-        { skipDecryption: true },
-      );
+      const reader = (this.client as any).bee.makeFeedReader(topic, owner);
+      const result = await reader.downloadReference();
+      // result.feedIndex is a FeedIndex (hex string of 8-byte big-endian integer)
+      return this.parseFeedIndex(result.feedIndex);
+    } catch {
+      return null;
+    }
+  }
 
-      // TODO: when ACT feed reads are supported, download with:
-      // actPublisher: publisherBeeNodePubKey, actHistoryAddress
-      return page;
+  /** Load a range of pages going backwards from startIndex */
+  private async loadPages(
+    topic: Topic,
+    owner: string,
+    publisherBeeNodePubKey: string,
+    startIndex: number,
+    pageCount: number,
+  ): Promise<{ messages: ChatMessage[]; cursor: FeedCursor }> {
+    const reader = (this.client as any).bee.makeFeedReader(topic, owner);
+    const messages: ChatMessage[] = [];
+    let currentIndex = startIndex;
+    let loaded = 0;
+
+    while (loaded < pageCount && currentIndex >= 0) {
+      try {
+        const feedIndex = FeedIndex.fromBigInt(BigInt(currentIndex));
+        const result = await reader.downloadReference({ index: feedIndex });
+        const ref = result.reference.toHex();
+
+        // Download page via /bzz (ACT-aware)
+        const data = await this.client.downloadFile(ref, {
+          actPublisher: publisherBeeNodePubKey,
+          skipDecryption: true,
+        });
+        const page = JSON.parse(new TextDecoder().decode(data)) as HistoryPage;
+        if (Array.isArray(page.messages)) {
+          messages.push(...page.messages);
+        }
+        loaded++;
+      } catch {
+        // Index doesn't exist — stop
+        break;
+      }
+      currentIndex--;
+    }
+
+    return {
+      messages,
+      cursor: { nextIndex: currentIndex >= 0 ? currentIndex : null },
+    };
+  }
+
+  private mergeAndSort(messages: ChatMessage[]): ChatMessage[] {
+    const byId = new Map<string, ChatMessage>();
+    for (const m of messages) {
+      if (!byId.has(m.id)) byId.set(m.id, m);
+    }
+    return [...byId.values()].sort(
+      (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
+    );
+  }
+
+  /** Parse a FeedIndex (hex string) to a number. */
+  private parseFeedIndex(idx: unknown): number | null {
+    try {
+      if (idx === null || idx === undefined) return null;
+      // Try toBigInt() method (bee-js FeedIndex)
+      if (typeof (idx as any).toBigInt === "function") {
+        return Number((idx as any).toBigInt());
+      }
+      // Fallback: parse hex string
+      if (typeof idx === "string") return parseInt(idx, 16);
+      if (typeof idx === "number") return idx;
+      return null;
     } catch {
       return null;
     }

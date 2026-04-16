@@ -786,6 +786,21 @@ export class SwarmClient {
   }
 
   /**
+   * Read only the reference (32-byte hex hash) from a feed.
+   * Useful for ACT-protected content where the caller wants to download
+   * via /bzz with ACT headers rather than /bytes.
+   */
+  async readFeedReference(topic: Topic, ownerAddress: string): Promise<string | null> {
+    try {
+      const reader = this.bee.makeFeedReader(topic, ownerAddress);
+      const result = await reader.downloadReference();
+      return result.reference.toHex();
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Write a /bytes reference to a feed using the native reference format.
    * Uses uploadReference (32-byte binary) — 69% smaller SOC than the legacy
    * uploadPayload approach (64-byte hex text).

@@ -22,6 +22,10 @@ export declare class ChatManager {
     private readonly sessions;
     private readonly eventHandlers;
     private readonly myAddress;
+    /** Set of message IDs we've already emitted, to prevent duplicates when
+     *  the same chunk arrives via multiple channels (broadcast + direct PSS,
+     *  or Bee node re-serving cached chunks). Trimmed periodically. */
+    private readonly seenMessageIds;
     constructor(client: SwarmClient, bee: Bee, batchId: string, myAddress: string);
     /**
      * Start a chat session with a peer.
@@ -80,13 +84,36 @@ export declare class ChatManager {
      * Announce online presence to a peer.
      */
     sendOnline(session: ChatSession): Promise<void>;
+    /** Per-peer pending new messages to write as a batch */
+    private pendingBatches;
+    /** Per-peer debounce timers for flushing batches */
+    private persistTimers;
     /**
-     * Persist messages to the chat history feed (ACT-encrypted).
+     * Queue a new message to be written to the feed as part of the next batch.
+     * Debounces 3s: all messages queued within the window are written as a
+     * single feed entry (page), saving feed writes during rapid typing.
      */
-    persistMessages(session: ChatSession, messages: ChatMessage[]): Promise<void>;
+    queueMessageForHistory(session: ChatSession, message: ChatMessage, debounceMs?: number): void;
+    /** Flush the pending batch as a new feed page. */
+    private flushBatch;
     /**
-     * Load chat history from the peer's feed.
+     * Force-flush any pending batch for a peer.
+     * Call when closing chat, switching conversations, or before unload.
      */
+    flushPendingHistory(session: ChatSession): Promise<void>;
+    /**
+     * Load the latest N pages of history from BOTH peers' feeds.
+     * Merges, dedupes by message ID, sorts chronologically.
+     * Returns a cursor for loading older pages.
+     *
+     * @param pageCount - How many pages to load per feed (default 3)
+     */
+    loadHistoryLatest(session: ChatSession, pageCount?: number): Promise<import("./chat-history.js").LoadedHistory>;
+    /**
+     * Load older pages using a cursor from a previous load.
+     */
+    loadHistoryOlder(session: ChatSession, cursor: import("./chat-history.js").HistoryCursor, pageCount?: number): Promise<import("./chat-history.js").LoadedHistory>;
+    /** @deprecated Use loadHistoryLatest instead */
     loadHistory(session: ChatSession): Promise<ChatMessage[]>;
     /**
      * Register a handler for chat events.
@@ -105,6 +132,7 @@ export declare class ChatManager {
      */
     shutdown(): void;
     private emit;
+    private markSeen;
     private buildShareBundle;
 }
 //# sourceMappingURL=chat-manager.d.ts.map
