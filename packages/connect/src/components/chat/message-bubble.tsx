@@ -452,14 +452,28 @@ function AudioAttachmentCard({ file }: { file: FileAttachment }) {
   );
 }
 
+function canBrowserPlay(mimeType: string): boolean {
+  if (typeof document === "undefined") return true;
+  const v = document.createElement("video");
+  const result = v.canPlayType(mimeType);
+  // "" = definitely no, "maybe" / "probably" = give it a try.
+  return result !== "";
+}
+
 function VideoAttachmentCard({ file }: { file: FileAttachment }) {
   // Video is already click-to-load — we never auto-download. Show a size
   // warning for large files so the user knows what Play will cost them,
   // but never block.
   const LARGE_WARN_LIMIT = 20 * 1024 * 1024;
   const isLarge = file.sizeBytes > LARGE_WARN_LIMIT;
+  // Pre-flight codec check. If the browser admits it can't play this mime
+  // at all (e.g. MKV in Firefox/Safari, HEVC in non-Safari), surface that
+  // up front so users don't download hundreds of MB only to hit Chromium's
+  // "save file" fallback after playback fails.
+  const playable = canBrowserPlay(file.mimeType);
 
   const [loadRequested, setLoadRequested] = useState(false);
+  const [playbackFailed, setPlaybackFailed] = useState(false);
   const state = useAttachmentUrl(file, { enabled: loadRequested });
   const sizeLabel = formatSize(file.sizeBytes);
 
@@ -489,12 +503,15 @@ function VideoAttachmentCard({ file }: { file: FileAttachment }) {
           </div>
           <div className="mt-0.5 text-[11px] text-gray-400">
             {sizeLabel} · {file.mimeType}
-            {isLarge && !loadRequested && (
+            {!playable && (
+              <span className="ml-1 text-amber-600">· not playable in this browser</span>
+            )}
+            {playable && isLarge && !loadRequested && (
               <span className="ml-1 text-amber-600">· large · will take a moment</span>
             )}
           </div>
         </div>
-        {!loadRequested && (
+        {playable && !loadRequested && !playbackFailed && (
           <button
             type="button"
             onClick={() => setLoadRequested(true)}
@@ -517,13 +534,26 @@ function VideoAttachmentCard({ file }: { file: FileAttachment }) {
           </svg>
         </button>
       </div>
-      {loadRequested && (
+      {!playable && (
+        <div className="border-t border-gray-100 bg-gray-50 px-4 py-3 text-[12px] text-gray-600">
+          Your browser can't play <code className="font-mono text-[11px]">{file.mimeType}</code>.
+          Try Chrome/Chromium, or use the Download button to watch it locally.
+        </div>
+      )}
+      {playable && playbackFailed && (
+        <div className="border-t border-gray-100 bg-amber-50 px-4 py-3 text-[12px] text-amber-800">
+          This video couldn't be decoded (likely an unsupported codec inside the container).
+          Use the Download button to watch it locally.
+        </div>
+      )}
+      {playable && loadRequested && !playbackFailed && (
         <div className="border-t border-gray-100 bg-black">
           {state.status === "ready" ? (
             <video
               src={state.url}
               controls
               preload="metadata"
+              onError={() => setPlaybackFailed(true)}
               className="block max-h-[360px] w-full bg-black"
             />
           ) : state.status === "error" ? (

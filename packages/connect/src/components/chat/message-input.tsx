@@ -120,7 +120,7 @@ export function MessageInput({
               type="file"
               className="hidden"
               onChange={handleFileSelect}
-              accept="image/*,audio/*,video/*,.pdf,.doc,.docx,.txt,.md,.json,.yml,.yaml,.xml,.csv,.log"
+              accept="image/*,audio/*,video/*,.mkv,.pdf,.doc,.docx,.txt,.md,.json,.yml,.yaml,.xml,.csv,.log"
             />
           </div>
           <div className="flex items-center gap-3">

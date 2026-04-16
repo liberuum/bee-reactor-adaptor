@@ -367,13 +367,40 @@ function AudioPane({ attachment }: { attachment: FileAttachment }) {
 }
 
 function VideoPane({ attachment }: { attachment: FileAttachment }) {
-  const state = useAttachmentUrl(attachment);
+  // Match the same pre-flight + post-load playability handling as
+  // VideoAttachmentCard so large MKV/HEVC files don't trigger Chromium's
+  // "save file" fallback after a multi-minute download.
+  const playable =
+    typeof document === "undefined"
+      ? true
+      : document.createElement("video").canPlayType(attachment.mimeType) !== "";
+  const [loadRequested, setLoadRequested] = useState(playable);
+  const [playbackFailed, setPlaybackFailed] = useState(false);
+  const state = useAttachmentUrl(attachment, { enabled: loadRequested });
+
+  if (!playable) {
+    return (
+      <div className="w-full bg-gray-50 px-6 py-10 text-center text-[13px] text-gray-700">
+        Your browser can't play <code className="font-mono text-[12px]">{attachment.mimeType}</code>.
+        Use the <strong>Download</strong> button above to watch it locally.
+      </div>
+    );
+  }
+  if (playbackFailed) {
+    return (
+      <div className="w-full bg-amber-50 px-6 py-10 text-center text-[13px] text-amber-800">
+        This video couldn't be decoded (likely an unsupported codec inside the container).
+        Use the <strong>Download</strong> button above to watch it locally.
+      </div>
+    );
+  }
   if (state.status === "ready") {
     return (
       <video
         src={state.url}
         controls
         autoPlay
+        onError={() => setPlaybackFailed(true)}
         className="block max-h-[70vh] w-full bg-black"
       />
     );

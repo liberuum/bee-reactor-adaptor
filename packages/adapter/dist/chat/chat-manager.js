@@ -1,3 +1,4 @@
+import { reconcileMime } from "./mime-guess.js";
 import { PssMessenger, chatTopic } from "./pss-messenger.js";
 import { ChatHistory, historyTopic } from "./chat-history.js";
 import { GsocNotifier } from "./gsoc-notifier.js";
@@ -247,14 +248,17 @@ export class ChatManager {
         if (!res.ok) {
             throw new Error(`Probe failed for ${reference.slice(0, 10)}…: ${res.status}`);
         }
-        const mimeType = (res.headers.get("content-type") ?? "application/octet-stream")
-            .split(";")[0]
-            .trim();
+        const reportedMime = (res.headers.get("content-type") ?? "").split(";")[0].trim();
         const sizeBytes = Number(res.headers.get("content-length") ?? 0);
         // Content-Disposition: attachment; filename="foo.mp4"
         const disp = res.headers.get("content-disposition") ?? "";
         const match = disp.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i);
         const fileName = match?.[1];
+        // Bee's /bzz/ often returns application/x-www-form-urlencoded or
+        // application/octet-stream for manifests where it can't identify the
+        // real content type. Prefer a filename-derived guess in that case so
+        // .mkv etc. still route to the video player.
+        const mimeType = reconcileMime(reportedMime, fileName);
         const result = { mimeType, sizeBytes, fileName };
         this.probeCache.set(reference, result);
         return result;

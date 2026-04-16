@@ -4,6 +4,7 @@
  */
 import { useState, useEffect, useCallback, useRef } from "react";
 import type { ChatMessage, ChatSession, ConversationSummary, ChatView } from "./types.js";
+import { reconcileMime } from "../../../../adapter/src/chat/mime-guess.js";
 
 function getManager(): any | null {
   const ph = (globalThis as any).window?.ph;
@@ -365,12 +366,16 @@ export function useChat() {
       if (!session) throw new Error("No active session");
 
       const data = new Uint8Array(await file.arrayBuffer());
+      // Some browsers/OSes report an empty file.type for less-common
+      // formats (e.g. .mkv). Fall back to our extension-based guess so
+      // the recipient's UI routes to the right preview component.
+      const resolvedMime = reconcileMime(file.type, file.name);
       const msg = await manager.shareFileInChat(
         session,
         text || file.name,
         data,
         file.name,
-        file.type || "application/octet-stream",
+        resolvedMime,
       );
       addMessage(peer, msg);
       refreshConversations();
