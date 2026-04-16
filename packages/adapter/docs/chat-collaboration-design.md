@@ -1,5 +1,11 @@
 # Swarm Chat & Live Collaboration — Design Investigation
 
+> **Implementation status (2026-04-16):** Phases 1 and 2 (adapter-side) are
+> shipped. Document-sharing UI wiring, GSOC typing/presence, and live
+> collaboration are still to build. See
+> [`chat-roadmap-next.md`](./chat-roadmap-next.md) for the prioritized
+> follow-on list with per-track size estimates.
+
 ## Goal
 
 Add a chat + document sharing + live collaboration feature to Connect, powered
@@ -356,7 +362,7 @@ shows presence indicators:
 
 ## Implementation Phases
 
-### Phase 1: PSS Chat (1-to-1 messaging)
+### Phase 1: PSS Chat (1-to-1 messaging) — ✅ shipped
 
 **New adapter code:**
 - `src/chat/pss-messenger.ts` — PSS send/receive wrapper
@@ -377,18 +383,32 @@ shows presence indicators:
 
 **Estimated message latency:** 2–10 seconds (PSS mining)
 
-### Phase 2: Document Sharing in Chat
+### Phase 2: Document Sharing in Chat — ⚠️ adapter done, UI wiring pending
 
 **Extend existing sharing:**
 - Reuse `shareDocuments()` / `importSharedDocuments()`
-- Add chat message type "share" with attachment metadata
-- Inline document preview cards in chat
-- "Open" button navigates to document in Connect
-- Share history visible in conversation
+- Add chat message type "share" with attachment metadata ✅ (`DocumentShareAttachment`)
+- Inline document preview cards in chat ✅ (`DocumentShareCard`, render-only)
+- "Open" button navigates to document in Connect — ❌ not wired
+- "Import" button runs `importFromUser` on the recipient — ❌ not wired
+- Composer "share a document" picker — ❌ not built
 
 **No new protocols needed** — uses existing share infrastructure + PSS.
 
-### Phase 3: GSOC Notifications
+### Phase 2b: File Sharing in Chat — ✅ shipped
+
+Not in the original design; added during implementation. Raw-file sharing
+(images, PDFs, audio, video, text) with:
+- ACT-encrypted upload via `/bzz` with grantee list of both parties
+- `FileAttachment` type + inline preview cards per mime type
+- Drag-and-drop zone in the thread
+- Files-tab grid with thumbnails and universal preview modal
+- Click-to-load video with pre-flight `canPlayType` check + download fallback
+- External `bzz://<hash>` link previews that route through the same render
+  path (no ACT, public content, badged as such)
+- 200 MB cap, matching client + adapter guards, broad mime-guess coverage
+
+### Phase 3: GSOC Notifications — ⚠️ adapter done, UI wiring pending
 
 **New adapter code:**
 - `src/chat/gsoc-notifier.ts` — mine signers, send/receive notifications
@@ -400,7 +420,7 @@ shows presence indicators:
 - Online/offline presence
 - Replaces SwarmChannel's polling with event-driven pull
 
-### Phase 4: Live Collaboration
+### Phase 4: Live Collaboration — ❌ not started
 
 **Extend SwarmChannel:**
 - GSOC-triggered inbox pull (instead of polling)
