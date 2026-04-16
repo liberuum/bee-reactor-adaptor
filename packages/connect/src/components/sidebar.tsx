@@ -98,10 +98,15 @@ export function Sidebar() {
       const target = e.target as Node;
       if (chatPanelRef.current?.contains(target)) return;
       if (chatButtonRef.current?.contains(target)) return;
+      // Ignore clicks on portaled chat overlays (image lightbox, etc.) —
+      // they live outside the chat panel's DOM but are logically part of it.
+      if (target instanceof Element && target.closest("[data-chat-overlay]")) return;
       setChatOpen(false);
     };
 
     const handleEscape = (e: KeyboardEvent) => {
+      // If a chat overlay is open, let it consume the Escape first.
+      if (document.querySelector("[data-chat-overlay]")) return;
       if (e.key === "Escape") setChatOpen(false);
     };
 

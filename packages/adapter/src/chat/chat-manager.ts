@@ -298,6 +298,34 @@ export class ChatManager {
     return this.sendMessage(session, text, result.attachment);
   }
 
+  /**
+   * Download a file attachment from Swarm (ACT-decrypted by Bee) and
+   * return it as a Blob ready for browser rendering.
+   *
+   * Prefers the thumbnail reference when `thumbnail: true` is passed and a
+   * thumbnail exists — callers (chat bubbles, Files tab) should pass `true`
+   * for grid/preview views to keep downloads small.
+   */
+  async downloadAttachment(
+    attachment: import("./types.js").FileAttachment,
+    opts?: { thumbnail?: boolean },
+  ): Promise<Blob> {
+    const wantThumb = opts?.thumbnail === true;
+    const data =
+      wantThumb && attachment.thumbnailReference
+        ? await this.file.downloadThumbnail(attachment)
+        : await this.file.download(attachment);
+    if (!data) {
+      throw new Error("Attachment data unavailable");
+    }
+    // If we asked for the thumbnail and it came back, the bytes are JPEG.
+    const mime =
+      wantThumb && attachment.thumbnailReference
+        ? "image/jpeg"
+        : attachment.mimeType;
+    return new Blob([data as BlobPart], { type: mime });
+  }
+
   // ─── Notifications ───────────────────────────────────────────
 
   /**

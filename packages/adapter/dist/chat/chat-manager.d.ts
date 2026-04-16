@@ -73,6 +73,17 @@ export declare class ChatManager {
      */
     shareFileInChat(session: ChatSession, text: string, fileData: Uint8Array | ArrayBuffer, fileName: string, mimeType: string): Promise<ChatMessage>;
     /**
+     * Download a file attachment from Swarm (ACT-decrypted by Bee) and
+     * return it as a Blob ready for browser rendering.
+     *
+     * Prefers the thumbnail reference when `thumbnail: true` is passed and a
+     * thumbnail exists — callers (chat bubbles, Files tab) should pass `true`
+     * for grid/preview views to keep downloads small.
+     */
+    downloadAttachment(attachment: import("./types.js").FileAttachment, opts?: {
+        thumbnail?: boolean;
+    }): Promise<Blob>;
+    /**
      * Send a typing indicator to a peer.
      */
     sendTyping(session: ChatSession): Promise<void>;

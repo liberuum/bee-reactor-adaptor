@@ -73,6 +73,11 @@ export function useChat() {
   // True from the moment a conversation is clicked until startSession resolves.
   // UI should show a "Connecting…" placeholder, not the empty state.
   const [isOpeningConversation, setIsOpeningConversation] = useState(false);
+  // Set while a file upload is in flight — the composer shows an
+  // "Uploading {name}…" pill. Uploads take multiple seconds (grantee
+  // creation + ACT wait + bzz upload + thumbnail), so users need a
+  // signal distinct from the plain send spinner.
+  const [uploadingFile, setUploadingFile] = useState<{ name: string; sizeBytes: number } | null>(null);
 
   // Cursor state per peer for pagination
   const cursorsRef = useRef<Map<string, any>>(new Map());
@@ -342,7 +347,18 @@ export function useChat() {
     const peer = activePeerRef.current;
     if (!manager || !peer) return;
 
+    // Client-side size guard — the adapter enforces 50 MB too, but failing
+    // in the browser first avoids a multi-second grantee + upload round-trip.
+    const MAX_BYTES = 50 * 1024 * 1024;
+    if (file.size > MAX_BYTES) {
+      setError(
+        `"${file.name}" is ${(file.size / 1024 / 1024).toFixed(1)} MB — max 50 MB for chat file sharing.`,
+      );
+      return;
+    }
+
     setIsSending(true);
+    setUploadingFile({ name: file.name, sizeBytes: file.size });
     try {
       const session = manager.getSession(peer);
       if (!session) throw new Error("No active session");
@@ -362,8 +378,10 @@ export function useChat() {
       manager.queueMessageForHistory(session, msg);
     } catch (err) {
       console.error("[Chat] File send failed:", err);
+      setError(err instanceof Error ? err.message : "File upload failed");
     } finally {
       setIsSending(false);
+      setUploadingFile(null);
     }
   }, [addMessage, refreshConversations]);
 
@@ -382,6 +400,7 @@ export function useChat() {
     isSending,
     isHydrating,
     isOpeningConversation,
+    uploadingFile,
     isLoadingOlder,
     hasMoreHistory,
     error,

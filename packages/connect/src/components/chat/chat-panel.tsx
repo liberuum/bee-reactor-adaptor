@@ -28,6 +28,7 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
     isSending,
     isHydrating,
     isOpeningConversation,
+    uploadingFile,
     isLoadingOlder,
     hasMoreHistory,
     error,
@@ -116,7 +117,11 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
               <Tabs tab={tab} onChange={setTab} />
 
               {tab === "messages" && (
-                <>
+                <ThreadDropZone
+                  onFileDrop={(file) => sendFile(file)}
+                  disabled={!!uploadingFile}
+                  peerLabel={peerLabel}
+                >
                   <MessagesArea
                     messages={messages}
                     myAddress={myAddress}
@@ -127,13 +132,15 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
                     hasMoreHistory={hasMoreHistory}
                     onLoadOlder={loadOlderHistory}
                   />
+                  {uploadingFile && <UploadingPill file={uploadingFile} />}
                   <MessageInput
                     onSend={sendMessage}
                     onSendFile={sendFile}
                     peerLabel={peerLabel}
                     isSending={isSending}
+                    disabled={!!uploadingFile}
                   />
-                </>
+                </ThreadDropZone>
               )}
 
               {tab === "files" && (
@@ -630,6 +637,121 @@ mainnet: true`}</pre>
           </p>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ─── Drag-and-drop zone (wraps MessagesArea + composer) ───────
+
+function ThreadDropZone({
+  onFileDrop,
+  disabled,
+  peerLabel,
+  children,
+}: {
+  onFileDrop: (file: File) => void;
+  disabled: boolean;
+  peerLabel: string;
+  children: React.ReactNode;
+}) {
+  const [isDragging, setIsDragging] = useState(false);
+  // Counter handles nested drag events — dragenter/dragleave fire per child
+  // element, so without counting, hovering a child would flicker the overlay.
+  const dragCounterRef = useRef(0);
+
+  // Accept only drags that carry file data (not text selections etc.)
+  const isFileDrag = (e: React.DragEvent): boolean =>
+    Array.from(e.dataTransfer?.types ?? []).includes("Files");
+
+  const handleDragEnter = (e: React.DragEvent) => {
+    if (disabled || !isFileDrag(e)) return;
+    e.preventDefault();
+    dragCounterRef.current += 1;
+    if (dragCounterRef.current === 1) setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    if (disabled) return;
+    e.preventDefault();
+    dragCounterRef.current = Math.max(0, dragCounterRef.current - 1);
+    if (dragCounterRef.current === 0) setIsDragging(false);
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    if (disabled || !isFileDrag(e)) return;
+    // Must preventDefault on dragover or the drop event won't fire.
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    if (disabled) return;
+    e.preventDefault();
+    dragCounterRef.current = 0;
+    setIsDragging(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) onFileDrop(file);
+  };
+
+  return (
+    <div
+      className="relative flex min-h-0 flex-1 flex-col"
+      onDragEnter={handleDragEnter}
+      onDragLeave={handleDragLeave}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+    >
+      {children}
+      {isDragging && (
+        <div
+          className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center bg-blue-50/90 backdrop-blur-sm"
+          style={{ border: `2px dashed ${ACCENT}` }}
+        >
+          <div className="text-center">
+            <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-white shadow-sm">
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke={ACCENT} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
+                <polyline points="17 8 12 3 7 8" />
+                <line x1="12" y1="3" x2="12" y2="15" />
+              </svg>
+            </div>
+            <p className="text-sm font-semibold text-blue-900">
+              Drop to send to {peerLabel || "peer"}
+            </p>
+            <p className="mt-1 text-xs text-blue-700/80">
+              Uploaded to Swarm · ACT-encrypted · max 50 MB
+            </p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function UploadingPill({ file }: { file: { name: string; sizeBytes: number } }) {
+  const sizeLabel =
+    file.sizeBytes < 1024
+      ? `${file.sizeBytes} B`
+      : file.sizeBytes < 1024 * 1024
+        ? `${(file.sizeBytes / 1024).toFixed(0)} KB`
+        : `${(file.sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
+  return (
+    <div className="mx-5 mb-1 flex items-center gap-2 rounded-md border border-blue-100 bg-blue-50 px-3 py-2">
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke={ACCENT}
+        strokeWidth="2.5"
+        className="animate-spin shrink-0"
+      >
+        <circle cx="12" cy="12" r="10" strokeDasharray="32" strokeDashoffset="8" />
+      </svg>
+      <span className="flex-1 truncate text-[12px] text-blue-900">
+        Uploading <span className="font-semibold">{file.name}</span> to Swarm…
+      </span>
+      <span className="shrink-0 text-[11px] text-blue-500">{sizeLabel}</span>
     </div>
   );
 }
