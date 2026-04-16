@@ -11,7 +11,7 @@
  */
 import type { Bee } from "@ethersphere/bee-js";
 import type { SwarmClient } from "../swarm-client.js";
-import type { ChatMessage, ChatSession, ChatAttachment, ChatEventHandler, GsocNotification } from "./types.js";
+import type { ChatMessage, ChatSession, ChatAttachment, DocumentShareAttachment, ChatEventHandler, GsocNotification } from "./types.js";
 import { SwarmFile } from "./swarm-file.js";
 export declare class ChatManager {
     private readonly client;
@@ -66,6 +66,22 @@ export declare class ChatManager {
      * chat message with an attachment.
      */
     shareDocumentInChat(session: ChatSession, text: string, docIds: string[], driveId: string, driveName: string): Promise<ChatMessage>;
+    /**
+     * Import a document-share attachment into the local reactor.
+     *
+     * Downloads the ACT-protected bundle using the attachment's references,
+     * then creates a new drive (or reuses a cached one from a prior import
+     * of the same share) and replays all operations.
+     *
+     * Idempotent: the sessionStorage cache key includes the shareReference,
+     * so repeated imports of the same attachment reuse the existing drive.
+     */
+    importDocumentShare(attachment: DocumentShareAttachment): Promise<{
+        success: boolean;
+        driveId?: string;
+        imported: string[];
+        error?: string;
+    }>;
     /**
      * Share a raw file (image, audio, video, PDF, etc.) inline in chat.
      *

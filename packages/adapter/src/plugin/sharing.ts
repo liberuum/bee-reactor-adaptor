@@ -252,6 +252,151 @@ export async function shareDocumentsWithUser(
 // Import Shared Documents
 // ═══════════════════════════════════════════════════════════════
 
+/**
+ * Apply a share bundle (already downloaded & decrypted) as a new local
+ * drive. The bundle format is identical for share-manifest imports and
+ * chat attachment imports, so both flows call this helper.
+ *
+ * @param bundleData - Raw bundle bytes (JSON, optionally gzipped by ACT)
+ * @param opts.cacheKey - sessionStorage key so repeated imports of the
+ *                       same share reuse the already-created drive
+ * @param opts.displayName - Name shown to the user in the drive list
+ */
+export async function applyDocumentBundle(
+  bundleData: Uint8Array,
+  opts: { cacheKey: string; displayName: string },
+): Promise<{ success: boolean; driveId?: string; imported: string[]; error?: string }> {
+  const ph = (globalThis as any).window?.ph;
+  const reactorClient = ph?.reactorClient;
+  if (!reactorClient) {
+    return { success: false, imported: [], error: "Reactor not available." };
+  }
+
+  const { addDrive } = await import("@powerhousedao/reactor-browser");
+
+  let bundleRaw: any;
+  try {
+    bundleRaw = JSON.parse(new TextDecoder().decode(bundleData));
+  } catch (err) {
+    return {
+      success: false,
+      imported: [],
+      error: `Bundle not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  if (!bundleRaw.documents) {
+    return { success: false, imported: [], error: "Bundle missing documents array (stale format)." };
+  }
+
+  const docs: any[] = bundleRaw.documents;
+  const bundleFolders: Record<string, { name: string; parentFolder?: string }> = bundleRaw.folders ?? {};
+  const bundlePreferredEditor: string | undefined = bundleRaw.preferredEditor;
+  const bundleDocFolders: Record<string, string> = bundleRaw.docFolders ?? {};
+
+  // Reuse an existing import drive if we've processed this share before
+  let localDriveId: string | undefined;
+  try {
+    const cached = sessionStorage.getItem(opts.cacheKey);
+    if (cached) {
+      await reactorClient.get(cached);
+      localDriveId = cached;
+    }
+  } catch { /* fall through to create */ }
+
+  if (!localDriveId) {
+    try {
+      const d = await addDrive({ global: { name: opts.displayName } }, bundlePreferredEditor);
+      localDriveId = d?.header?.id;
+      if (!localDriveId) {
+        return { success: false, imported: [], error: "Failed to create drive." };
+      }
+      sessionStorage.setItem(opts.cacheKey, localDriveId);
+      await new Promise((r) => setTimeout(r, 500));
+    } catch (err) {
+      return {
+        success: false,
+        imported: [],
+        error: `Failed to create drive: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  }
+
+  const imported: string[] = [];
+  const origToLocal = new Map<string, string>();
+
+  for (const docBundle of docs) {
+    const { documentId: origDocId, documentType, name: docName, operations: rawOps } = docBundle;
+    const opsArray = Array.isArray(rawOps) ? rawOps : [rawOps];
+
+    const userOps = opsArray
+      .filter((op: any) => {
+        const scope = op.operation?.action?.scope ?? op.context?.scope ?? op.action?.scope ?? op.scope ?? "global";
+        return scope === "global";
+      })
+      .map((op: any) => {
+        const action = op.operation?.action ?? op.action ?? op;
+        if (action.timestampUtcMs && typeof action.timestampUtcMs === "number") {
+          action.timestampUtcMs = new Date(action.timestampUtcMs).toISOString();
+        }
+        if (action.context?.signer) {
+          delete action.context;
+        }
+        return action;
+      });
+
+    try {
+      const docModelModule = await reactorClient.getDocumentModelModule(documentType);
+      if (!docModelModule) {
+        console.warn(`[SwarmPlugin] Unknown doc type: ${documentType}`);
+        continue;
+      }
+      const initialState = docModelModule.utils.createState();
+      const newDocId = crypto.randomUUID();
+      const shellDoc = {
+        header: {
+          id: newDocId,
+          documentType,
+          name: docName || origDocId,
+          slug: newDocId,
+          branch: "main",
+          createdAtUtcIso: new Date().toISOString(),
+          lastModifiedAtUtcIso: new Date().toISOString(),
+          revision: { global: 0 },
+          sig: { publicKey: "", nonce: "" },
+        },
+        state: initialState,
+        initialState,
+        operations: { global: [], local: [] },
+      };
+
+      await reactorClient.createDocumentInDrive(localDriveId, shellDoc);
+      if (userOps.length > 0) {
+        await reactorClient.execute(newDocId, "main", userOps);
+      }
+      imported.push(newDocId);
+      origToLocal.set(origDocId, newDocId);
+    } catch (err) {
+      console.warn(`[SwarmPlugin] Failed to import "${docName}":`, err instanceof Error ? err.message : err);
+    }
+  }
+
+  // Restore folder structure when bundle carries one
+  if (Object.keys(bundleFolders).length > 0 && localDriveId) {
+    await new Promise((r) => setTimeout(r, 1000));
+    try {
+      await reactorClient.get(localDriveId);
+      const docMoves = Object.entries(bundleDocFolders)
+        .map(([origId, folderId]) => ({ docId: origToLocal.get(origId)!, targetFolder: folderId }))
+        .filter((m) => m.docId);
+      await restoreFolderStructure(reactorClient, localDriveId, bundleFolders, docMoves);
+    } catch (err) {
+      console.warn(`[SwarmPlugin] Could not restore import folders:`, err instanceof Error ? err.message : err);
+    }
+  }
+
+  return { success: true, driveId: localDriveId, imported };
+}
+
 export async function importFromUser(
   client: SwarmClient,
   senderSignerAddress: string,

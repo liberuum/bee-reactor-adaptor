@@ -13,6 +13,7 @@ import { ConversationList } from "./conversation-list.js";
 import { MessageItem, groupMessages } from "./message-bubble.js";
 import { MessageInput } from "./message-input.js";
 import { FilesTab } from "./files-tab.js";
+import { DocumentSharePicker } from "./document-share-picker.js";
 import type { ChatSession } from "./types.js";
 
 const ACCENT = "#2563eb";
@@ -36,8 +37,11 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
     openConversation,
     sendMessage,
     sendFile,
+    shareDocuments,
     loadOlderHistory,
   } = useChat();
+
+  const [sharePickerOpen, setSharePickerOpen] = useState(false);
 
   const [tab, setTab] = useState<Tab>("messages");
 
@@ -136,6 +140,7 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
                   <MessageInput
                     onSend={sendMessage}
                     onSendFile={sendFile}
+                    onShareDocument={() => setSharePickerOpen(true)}
                     peerLabel={peerLabel}
                     isSending={isSending}
                     disabled={!!uploadingFile}
@@ -150,6 +155,14 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
           )}
         </main>
       </div>
+      <DocumentSharePicker
+        isOpen={sharePickerOpen && !!activePeer}
+        peerLabel={peerLabel}
+        onClose={() => setSharePickerOpen(false)}
+        onShare={(driveId, driveName, docIds, text) =>
+          shareDocuments(driveId, driveName, docIds, text)
+        }
+      />
     </PanelShell>
   );
 }

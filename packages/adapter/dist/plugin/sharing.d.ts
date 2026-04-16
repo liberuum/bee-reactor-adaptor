@@ -12,6 +12,25 @@ export declare function shareDocumentsWithUser(client: SwarmClient, docIds: stri
     shared: number;
     error?: string;
 }>;
+/**
+ * Apply a share bundle (already downloaded & decrypted) as a new local
+ * drive. The bundle format is identical for share-manifest imports and
+ * chat attachment imports, so both flows call this helper.
+ *
+ * @param bundleData - Raw bundle bytes (JSON, optionally gzipped by ACT)
+ * @param opts.cacheKey - sessionStorage key so repeated imports of the
+ *                       same share reuse the already-created drive
+ * @param opts.displayName - Name shown to the user in the drive list
+ */
+export declare function applyDocumentBundle(bundleData: Uint8Array, opts: {
+    cacheKey: string;
+    displayName: string;
+}): Promise<{
+    success: boolean;
+    driveId?: string;
+    imported: string[];
+    error?: string;
+}>;
 export declare function importFromUser(client: SwarmClient, senderSignerAddress: string): Promise<{
     success: boolean;
     imported: string[];

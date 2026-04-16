@@ -279,6 +279,53 @@ export class ChatManager {
   }
 
   /**
+   * Import a document-share attachment into the local reactor.
+   *
+   * Downloads the ACT-protected bundle using the attachment's references,
+   * then creates a new drive (or reuses a cached one from a prior import
+   * of the same share) and replays all operations.
+   *
+   * Idempotent: the sessionStorage cache key includes the shareReference,
+   * so repeated imports of the same attachment reuse the existing drive.
+   */
+  async importDocumentShare(
+    attachment: DocumentShareAttachment,
+  ): Promise<{ success: boolean; driveId?: string; imported: string[]; error?: string }> {
+    const { applyDocumentBundle } = await import("../plugin/sharing.js");
+
+    // Swarm chunks can take a few seconds to propagate after upload; retry
+    // a few times before giving up (matches legacy import flow timing).
+    const retryDelays = [0, 2000, 5000];
+    let bundleData: Uint8Array | null = null;
+    let lastErr: unknown;
+    for (const delay of retryDelays) {
+      if (delay) await new Promise((r) => setTimeout(r, delay));
+      try {
+        bundleData = await this.client.downloadSharedData(
+          attachment.shareReference,
+          attachment.publisherBeeNodePubKey,
+          attachment.actHistoryAddress,
+        );
+        break;
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    if (!bundleData) {
+      return {
+        success: false,
+        imported: [],
+        error: `Download failed: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`,
+      };
+    }
+
+    return applyDocumentBundle(bundleData, {
+      cacheKey: `swarm:importChatShare:${attachment.shareReference}`,
+      displayName: `${attachment.driveName} (shared)`,
+    });
+  }
+
+  /**
    * Share a raw file (image, audio, video, PDF, etc.) inline in chat.
    *
    * The file is uploaded to Swarm with ACT protection. For images,

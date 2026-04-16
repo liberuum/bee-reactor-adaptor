@@ -391,6 +391,37 @@ export function useChat() {
     }
   }, [addMessage, refreshConversations]);
 
+  const shareDocuments = useCallback(
+    async (driveId: string, driveName: string, docIds: string[], text?: string) => {
+      const manager = getManager();
+      const peer = activePeerRef.current;
+      if (!manager || !peer) return;
+      if (docIds.length === 0) {
+        setError("No documents selected to share.");
+        return;
+      }
+      setIsSending(true);
+      try {
+        const session = manager.getSession(peer);
+        if (!session) throw new Error("No active session");
+        const caption =
+          text && text.trim().length > 0
+            ? text.trim()
+            : `Shared ${docIds.length} document${docIds.length !== 1 ? "s" : ""} from "${driveName}"`;
+        const msg = await manager.shareDocumentInChat(session, caption, docIds, driveId, driveName);
+        addMessage(peer, msg);
+        refreshConversations();
+        manager.queueMessageForHistory(session, msg);
+      } catch (err) {
+        console.error("[Chat] Document share failed:", err);
+        setError(err instanceof Error ? err.message : "Failed to share documents");
+      } finally {
+        setIsSending(false);
+      }
+    },
+    [addMessage, refreshConversations],
+  );
+
   const goBack = useCallback(() => {
     setView("conversations");
     setActivePeer(null);
@@ -414,6 +445,7 @@ export function useChat() {
     openConversation,
     sendMessage,
     sendFile,
+    shareDocuments,
     loadOlderHistory,
     goBack,
   };

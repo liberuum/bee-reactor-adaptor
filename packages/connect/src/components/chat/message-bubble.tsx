@@ -923,6 +923,53 @@ function Lightbox({
 }
 
 function DocumentShareCard({ share }: { share: DocumentShareAttachment }) {
+  // Cache key mirrors ChatManager.importDocumentShare — lets us detect
+  // whether this share has already been imported in this browser session.
+  const cacheKey = `swarm:importChatShare:${share.shareReference}`;
+  const [importedDriveId, setImportedDriveId] = useState<string | null>(() => {
+    try {
+      return sessionStorage.getItem(cacheKey);
+    } catch { return null; }
+  });
+  const [status, setStatus] = useState<"idle" | "importing" | "error">("idle");
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const handleImport = async () => {
+    const manager = (globalThis as any).window?.ph?.swarm?.chat?.manager;
+    if (!manager) {
+      setStatus("error");
+      setErrorMsg("Chat not initialized");
+      return;
+    }
+    setStatus("importing");
+    setErrorMsg(null);
+    try {
+      const result = await manager.importDocumentShare(share);
+      if (result.success && result.driveId) {
+        setImportedDriveId(result.driveId);
+        setStatus("idle");
+      } else {
+        setStatus("error");
+        setErrorMsg(result.error ?? "Import failed");
+      }
+    } catch (err) {
+      setStatus("error");
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleOpen = async () => {
+    if (!importedDriveId) return;
+    try {
+      const reactorBrowser = await import("@powerhousedao/reactor-browser");
+      const reactorClient = (globalThis as any).window?.ph?.reactorClient;
+      const drive = await reactorClient?.get(importedDriveId);
+      if (drive) reactorBrowser.setSelectedDrive(drive);
+    } catch (err) {
+      console.warn("[Chat] Could not open imported drive:", err);
+    }
+  };
+
   return (
     <div className="max-w-[420px] overflow-hidden rounded border border-gray-200 bg-white">
       <div className="flex">
@@ -938,6 +985,9 @@ function DocumentShareCard({ share }: { share: DocumentShareAttachment }) {
           </div>
           <div className="mt-0.5 text-[11px] text-gray-400">
             {share.documents.length} document{share.documents.length !== 1 ? "s" : ""}
+            {importedDriveId && (
+              <span className="ml-1 text-emerald-600">· imported</span>
+            )}
           </div>
         </div>
       </div>
@@ -955,16 +1005,42 @@ function DocumentShareCard({ share }: { share: DocumentShareAttachment }) {
           )}
         </div>
       )}
-      <button
-        type="button"
-        className="w-full border-t border-gray-100 bg-white px-3 py-1.5 text-[11px] font-semibold hover:bg-gray-50"
-        style={{ color: ACCENT }}
-        onClick={() => {
-          console.log("[Chat] Open shared docs:", share.documents.map(d => d.id));
-        }}
-      >
-        Open in Connect
-      </button>
+      {status === "error" && errorMsg && (
+        <div className="border-t border-red-100 bg-red-50 px-3 py-1.5 text-[11px] text-red-700">
+          {errorMsg}
+        </div>
+      )}
+      <div className="flex border-t border-gray-100 bg-white">
+        {importedDriveId ? (
+          <button
+            type="button"
+            onClick={handleOpen}
+            className="flex-1 px-3 py-1.5 text-[11px] font-semibold hover:bg-gray-50"
+            style={{ color: ACCENT }}
+          >
+            Open drive
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={handleImport}
+            disabled={status === "importing"}
+            className="flex flex-1 items-center justify-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold disabled:opacity-60 hover:bg-gray-50"
+            style={{ color: ACCENT }}
+          >
+            {status === "importing" ? (
+              <>
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="animate-spin">
+                  <circle cx="12" cy="12" r="10" strokeDasharray="32" strokeDashoffset="8" />
+                </svg>
+                Importing…
+              </>
+            ) : (
+              "Import into my drives"
+            )}
+          </button>
+        )}
+      </div>
     </div>
   );
 }
