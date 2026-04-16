@@ -719,7 +719,7 @@ function ThreadDropZone({
               Drop to send to {peerLabel || "peer"}
             </p>
             <p className="mt-1 text-xs text-blue-700/80">
-              Uploaded to Swarm · ACT-encrypted · max 50 MB
+              Uploaded to Swarm · ACT-encrypted · max 200 MB
             </p>
           </div>
         </div>

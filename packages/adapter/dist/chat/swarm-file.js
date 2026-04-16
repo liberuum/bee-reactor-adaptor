@@ -1,6 +1,6 @@
 import { getFileCategory, INLINE_RENDERABLE } from "./types.js";
-/** Maximum file size for inline chat sharing (50 MB) */
-const MAX_FILE_SIZE = 50 * 1024 * 1024;
+/** Maximum file size for inline chat sharing (200 MB) */
+const MAX_FILE_SIZE = 200 * 1024 * 1024;
 /** Maximum thumbnail dimension (pixels) */
 const THUMBNAIL_MAX_DIM = 200;
 /** JPEG quality for thumbnails */
@@ -80,19 +80,23 @@ export class SwarmFile {
         };
     }
     /**
-     * Download an ACT-protected file from Swarm.
-     *
-     * The Bee node handles ECDH decryption transparently.
+     * Download a file from Swarm. ACT-wrapped if `actHistoryAddress` and
+     * `publisherBeeNodePubKey` are set (Bee handles ECDH decryption
+     * transparently); otherwise a plain /bzz/ download — used for external
+     * hashes pasted into chat that were uploaded outside the chat flow.
      *
      * @param attachment - FileAttachment from a chat message
      * @returns File data as Uint8Array
      */
     async download(attachment) {
-        return this.client.downloadFile(attachment.reference, {
-            actPublisher: attachment.publisherBeeNodePubKey,
-            actHistoryAddress: attachment.actHistoryAddress,
-            skipDecryption: true, // ACT handles decryption
-        });
+        if (attachment.actHistoryAddress && attachment.publisherBeeNodePubKey) {
+            return this.client.downloadFile(attachment.reference, {
+                actPublisher: attachment.publisherBeeNodePubKey,
+                actHistoryAddress: attachment.actHistoryAddress,
+                skipDecryption: true, // ACT handles decryption
+            });
+        }
+        return this.client.downloadFile(attachment.reference);
     }
     /**
      * Download just the thumbnail for chat preview.
@@ -102,11 +106,14 @@ export class SwarmFile {
         if (!attachment.thumbnailReference)
             return null;
         try {
-            return await this.client.downloadFile(attachment.thumbnailReference, {
-                actPublisher: attachment.publisherBeeNodePubKey,
-                actHistoryAddress: attachment.actHistoryAddress,
-                skipDecryption: true,
-            });
+            if (attachment.actHistoryAddress && attachment.publisherBeeNodePubKey) {
+                return await this.client.downloadFile(attachment.thumbnailReference, {
+                    actPublisher: attachment.publisherBeeNodePubKey,
+                    actHistoryAddress: attachment.actHistoryAddress,
+                    skipDecryption: true,
+                });
+            }
+            return await this.client.downloadFile(attachment.thumbnailReference);
         }
         catch {
             return null;

@@ -74,6 +74,20 @@ export function MessageItem({
 }
 
 function MessageBody({ message }: { message: ChatMessage }) {
+  // Detect Swarm references embedded in the message text (bzz:// URIs,
+  // gateway URLs, bare hashes) so externally-uploaded files pasted into
+  // chat render inline previews just like ACT-uploaded attachments.
+  // Dedupe so a ref repeated in text doesn't render twice.
+  const detectedRefs = React.useMemo(() => {
+    if (!message.text) return [] as DetectedSwarmRef[];
+    const refs = detectSwarmRefs(message.text);
+    // Exclude the attachment's reference (if any) to avoid duplicate rendering
+    const attachmentRef = message.attachment && "reference" in message.attachment
+      ? message.attachment.reference
+      : undefined;
+    return refs.filter((r) => r.reference !== attachmentRef);
+  }, [message.text, message.attachment]);
+
   return (
     <>
       {message.text && (
@@ -91,8 +105,133 @@ function MessageBody({ message }: { message: ChatMessage }) {
           )}
         </div>
       )}
+      {detectedRefs.map((r) => (
+        <div key={r.reference} className="mt-1.5">
+          <SwarmLinkPreview hint={r} />
+        </div>
+      ))}
     </>
   );
+}
+
+// ─── External Swarm-link preview (hashes pasted into chat) ─────
+
+type DetectedSwarmRef = {
+  reference: string;
+  /** Filename hint extracted from the URL path (e.g. /bzz/<ref>/video.mp4) */
+  fileName?: string;
+};
+
+// Match three patterns with unambiguous prefixes only:
+//   bzz://<64hex>[/path]
+//   https://<host>/bzz/<64hex>[/path]
+//   http://<host>/bzz/<64hex>[/path]
+// A bare "/bzz/<hex>" anywhere in text would cause too many false positives
+// (e.g. accidental substrings in filenames), so we require an explicit scheme.
+const SWARM_REF_RE =
+  /(?:bzz:\/\/|https?:\/\/[^\s"'<>]+?\/bzz\/)([0-9a-f]{64})(?:\/([^\s"'<>]+))?/gi;
+
+function detectSwarmRefs(text: string): DetectedSwarmRef[] {
+  const out: DetectedSwarmRef[] = [];
+  const seen = new Set<string>();
+  let m: RegExpExecArray | null;
+  SWARM_REF_RE.lastIndex = 0;
+  while ((m = SWARM_REF_RE.exec(text)) !== null) {
+    const reference = m[1].toLowerCase();
+    if (seen.has(reference)) continue;
+    seen.add(reference);
+    const rawPath = m[2];
+    const fileName = rawPath ? decodeURIComponent(rawPath.split("/").pop() ?? "") : undefined;
+    out.push({ reference, fileName });
+  }
+  return out;
+}
+
+function SwarmLinkPreview({ hint }: { hint: DetectedSwarmRef }) {
+  const [meta, setMeta] = useState<
+    | { status: "loading" }
+    | { status: "ready"; mimeType: string; sizeBytes: number; fileName: string }
+    | { status: "error"; message: string }
+  >({ status: "loading" });
+
+  React.useEffect(() => {
+    let cancelled = false;
+    const manager = (globalThis as any).window?.ph?.swarm?.chat?.manager;
+    if (!manager) {
+      setMeta({ status: "error", message: "Chat not initialized" });
+      return;
+    }
+    manager
+      .probeSwarmReference(hint.reference)
+      .then((probe: { mimeType: string; sizeBytes: number; fileName?: string }) => {
+        if (cancelled) return;
+        const fileName =
+          hint.fileName ||
+          probe.fileName ||
+          `${hint.reference.slice(0, 8)}.${guessExtension(probe.mimeType)}`;
+        setMeta({ status: "ready", mimeType: probe.mimeType, sizeBytes: probe.sizeBytes, fileName });
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setMeta({ status: "error", message: err instanceof Error ? err.message : String(err) });
+      });
+    return () => { cancelled = true; };
+  }, [hint.reference]);
+
+  if (meta.status === "loading") {
+    return (
+      <div className="flex max-w-[420px] items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-[12px] text-gray-500">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="animate-spin">
+          <circle cx="12" cy="12" r="10" strokeDasharray="32" strokeDashoffset="8" />
+        </svg>
+        Probing Swarm link…
+      </div>
+    );
+  }
+
+  if (meta.status === "error") {
+    return (
+      <div className="max-w-[420px] rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] text-amber-800">
+        <div className="font-semibold">Swarm link unavailable</div>
+        <div className="mt-0.5 font-mono text-[10px] text-amber-700">{hint.reference.slice(0, 12)}…</div>
+        <div className="mt-0.5 text-[11px] text-amber-700">{meta.message}</div>
+      </div>
+    );
+  }
+
+  // Construct a FileAttachment with no ACT fields — SwarmFile.download will
+  // fall through to a plain /bzz/ fetch. The rendering layer treats this
+  // identically to a chat-uploaded file.
+  const pseudoAttachment: FileAttachment = {
+    kind: "file",
+    reference: hint.reference,
+    fileName: meta.fileName,
+    mimeType: meta.mimeType,
+    sizeBytes: meta.sizeBytes,
+  };
+
+  return (
+    <div>
+      <div className="mb-0.5 inline-flex items-center gap-1 rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-gray-500">
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71" />
+          <path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71" />
+        </svg>
+        Swarm link · public
+      </div>
+      <FileAttachmentCard file={pseudoAttachment} />
+    </div>
+  );
+}
+
+function guessExtension(mime: string): string {
+  if (mime.startsWith("image/")) return mime.split("/")[1] || "img";
+  if (mime.startsWith("video/")) return mime.split("/")[1] || "mp4";
+  if (mime.startsWith("audio/")) return mime.split("/")[1] || "audio";
+  if (mime === "application/pdf") return "pdf";
+  if (mime === "application/json") return "json";
+  if (mime.startsWith("text/")) return mime.split("/")[1] || "txt";
+  return "bin";
 }
 
 function FileAttachmentCard({ file }: { file: FileAttachment }) {

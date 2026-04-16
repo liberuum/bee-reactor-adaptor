@@ -347,12 +347,13 @@ export function useChat() {
     const peer = activePeerRef.current;
     if (!manager || !peer) return;
 
-    // Client-side size guard — the adapter enforces 50 MB too, but failing
-    // in the browser first avoids a multi-second grantee + upload round-trip.
-    const MAX_BYTES = 50 * 1024 * 1024;
+    // Client-side size guard — the adapter enforces the same cap too, but
+    // failing in the browser first avoids a multi-second grantee + upload
+    // round-trip for obviously-too-large files.
+    const MAX_BYTES = 200 * 1024 * 1024;
     if (file.size > MAX_BYTES) {
       setError(
-        `"${file.name}" is ${(file.size / 1024 / 1024).toFixed(1)} MB — max 50 MB for chat file sharing.`,
+        `"${file.name}" is ${(file.size / 1024 / 1024).toFixed(1)} MB — max 200 MB for chat file sharing.`,
       );
       return;
     }

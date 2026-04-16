@@ -26,6 +26,9 @@ export declare class ChatManager {
      *  the same chunk arrives via multiple channels (broadcast + direct PSS,
      *  or Bee node re-serving cached chunks). Trimmed periodically. */
     private readonly seenMessageIds;
+    /** Metadata cache for external Swarm references probed via HEAD /bzz/.
+     *  Keyed by hex reference. Content is immutable so cache is never invalidated. */
+    private readonly probeCache;
     constructor(client: SwarmClient, bee: Bee, batchId: string, myAddress: string);
     /**
      * Start a chat session with a peer.
@@ -83,6 +86,18 @@ export declare class ChatManager {
     downloadAttachment(attachment: import("./types.js").FileAttachment, opts?: {
         thumbnail?: boolean;
     }): Promise<Blob>;
+    /**
+     * Probe a Swarm reference via HEAD /bzz/<ref>/ to discover its MIME type
+     * and size. Used to render previews for external (non-ACT) hashes pasted
+     * into chat messages as bzz:// or /bzz/ URLs.
+     *
+     * Results are cached per-reference since the metadata is immutable.
+     */
+    probeSwarmReference(reference: string): Promise<{
+        mimeType: string;
+        sizeBytes: number;
+        fileName?: string;
+    }>;
     /**
      * Send a typing indicator to a peer.
      */

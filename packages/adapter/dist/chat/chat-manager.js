@@ -15,6 +15,9 @@ export class ChatManager {
      *  the same chunk arrives via multiple channels (broadcast + direct PSS,
      *  or Bee node re-serving cached chunks). Trimmed periodically. */
     seenMessageIds = new Set();
+    /** Metadata cache for external Swarm references probed via HEAD /bzz/.
+     *  Keyed by hex reference. Content is immutable so cache is never invalidated. */
+    probeCache = new Map();
     constructor(client, bee, batchId, myAddress) {
         this.client = client;
         this.myAddress = myAddress;
@@ -225,6 +228,36 @@ export class ChatManager {
             ? "image/jpeg"
             : attachment.mimeType;
         return new Blob([data], { type: mime });
+    }
+    /**
+     * Probe a Swarm reference via HEAD /bzz/<ref>/ to discover its MIME type
+     * and size. Used to render previews for external (non-ACT) hashes pasted
+     * into chat messages as bzz:// or /bzz/ URLs.
+     *
+     * Results are cached per-reference since the metadata is immutable.
+     */
+    async probeSwarmReference(reference) {
+        const cached = this.probeCache.get(reference);
+        if (cached)
+            return cached;
+        const beeUrl = this.client.bee?.url;
+        if (!beeUrl)
+            throw new Error("Bee URL unavailable");
+        const res = await fetch(`${beeUrl}/bzz/${reference}/`, { method: "HEAD" });
+        if (!res.ok) {
+            throw new Error(`Probe failed for ${reference.slice(0, 10)}…: ${res.status}`);
+        }
+        const mimeType = (res.headers.get("content-type") ?? "application/octet-stream")
+            .split(";")[0]
+            .trim();
+        const sizeBytes = Number(res.headers.get("content-length") ?? 0);
+        // Content-Disposition: attachment; filename="foo.mp4"
+        const disp = res.headers.get("content-disposition") ?? "";
+        const match = disp.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i);
+        const fileName = match?.[1];
+        const result = { mimeType, sizeBytes, fileName };
+        this.probeCache.set(reference, result);
+        return result;
     }
     // ─── Notifications ───────────────────────────────────────────
     /**

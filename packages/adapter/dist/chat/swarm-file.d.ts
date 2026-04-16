@@ -39,9 +39,10 @@ export declare class SwarmFile {
      */
     upload(file: Uint8Array | ArrayBuffer, fileName: string, mimeType: string, recipientBeeNodePubKey: string): Promise<SwarmFileUploadResult>;
     /**
-     * Download an ACT-protected file from Swarm.
-     *
-     * The Bee node handles ECDH decryption transparently.
+     * Download a file from Swarm. ACT-wrapped if `actHistoryAddress` and
+     * `publisherBeeNodePubKey` are set (Bee handles ECDH decryption
+     * transparently); otherwise a plain /bzz/ download — used for external
+     * hashes pasted into chat that were uploaded outside the chat flow.
      *
      * @param attachment - FileAttachment from a chat message
      * @returns File data as Uint8Array

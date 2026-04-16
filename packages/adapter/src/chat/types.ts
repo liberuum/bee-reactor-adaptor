@@ -43,11 +43,15 @@ export interface FileAttachment {
   mimeType: string;
   /** File size in bytes */
   sizeBytes: number;
-  /** ACT-protected Swarm reference to the file content */
+  /** Swarm reference to the file content */
   reference: string;
-  actHistoryAddress: string;
-  publisherBeeNodePubKey: string;
-  /** Optional thumbnail reference for images/videos (small preview, also ACT-protected) */
+  /** ACT history address — present for chat-uploaded files.
+   *  Absent means the content is publicly-addressable (no ACT wrapping). */
+  actHistoryAddress?: string;
+  /** Publisher's Bee node public key — required pairing for ACT decryption.
+   *  Absent means no ACT wrapping (plain /bzz/ download). */
+  publisherBeeNodePubKey?: string;
+  /** Optional thumbnail reference for images/videos (small preview) */
   thumbnailReference?: string;
 }
 
