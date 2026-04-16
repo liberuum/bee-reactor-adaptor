@@ -14,6 +14,59 @@ import { toast } from "../../../../../services/toast.js";
 
 type StampStatus = NonNullable<SwarmUiSnapshot["stampStatus"]>;
 
+/**
+ * Pull the real error out of a bee-js / axios failure.
+ * bee-js wraps axios, so the Bee node's response body usually lives at
+ * `err.response.data` (often with `{ code, message, reason }`) or in the
+ * axios error's `message` as "Request failed with status code 500".
+ */
+function extractBeeError(err: unknown): { message: string; hint?: string } {
+  const anyErr = err as any;
+  // bee-js BeeResponseError exposes status/responseBody directly on the
+  // error instance. Axios-style errors nest under response.{status,data}.
+  const status = anyErr?.status ?? anyErr?.response?.status;
+  const body = anyErr?.responseBody ?? anyErr?.response?.data;
+  const bodyMessage =
+    (typeof body === "string" && body) ||
+    body?.message ||
+    body?.reason ||
+    body?.error ||
+    (anyErr instanceof Error ? anyErr.message : undefined) ||
+    String(err);
+
+  const lower = String(bodyMessage).toLowerCase();
+
+  let hint: string | undefined;
+  if (status === 500 || lower.includes("500")) {
+    if (lower.includes("insufficient") && lower.includes("bzz")) {
+      hint = "Bee node wallet has insufficient xBZZ — fund it and retry.";
+    } else if (lower.includes("insufficient") && lower.includes("dai")) {
+      hint = "Bee node wallet has insufficient xDAI for gas — fund it and retry.";
+    } else if (lower.includes("nonce") || lower.includes("pending")) {
+      hint = "A previous stamp transaction is still confirming on Gnosis Chain. Wait ~1 min and retry.";
+    } else if (lower.includes("price") || lower.includes("amount is less")) {
+      hint = "The network price changed since you picked a duration. Reselect the duration to get a fresh quote.";
+    } else if (lower.includes("chain") || lower.includes("rpc") || lower.includes("dial")) {
+      hint = "Bee can't reach its Gnosis Chain RPC right now. Check Bee logs and retry.";
+    } else if (lower.includes("cannot topup batch") || lower.includes("cannot create batch") || lower.includes("cannot dilute")) {
+      // Outer Bee wrapper; real cause is behind DEBUG verbosity. Most common
+      // source in practice is the Gnosis RPC timing out (public endpoints like
+      // publicnode.com throttle under load).
+      hint = "The Gnosis Chain RPC your Bee node uses is slow or timing out. " +
+        "Enable `verbosity: debug` in Bee to see the underlying error, or switch " +
+        "`blockchain-rpc-endpoint` to a more reliable provider " +
+        "(e.g. https://rpc.gnosischain.com, https://rpc.ankr.com/gnosis) and restart Bee.";
+    } else {
+      hint = "Bee returned 500. Enable `verbosity: debug` in Bee and check `docker logs bee --tail 200` for the underlying error.";
+    }
+  }
+
+  return {
+    message: bodyMessage,
+    hint,
+  };
+}
+
 export function StorageSection({
   stamp,
   client,
@@ -71,9 +124,36 @@ export function StorageSection({
     if (!client || !selectedDuration) return;
     setTopUpBusy(true);
     try {
+      // Re-fetch the live chain price right before submitting so we never send
+      // a stale amount. Chain price changes slowly, but in a long-open Settings
+      // panel the cached `stampOptions.pricePerBlock` can drift.
+      let amount = selectedDuration.amount;
+      try {
+        setTopUpStep("Checking current network price...");
+        const beeUrl = (window as any).ph?.swarm?.beeUrl;
+        if (beeUrl) {
+          const res = await fetch(`${beeUrl}/chainstate`);
+          if (res.ok) {
+            const chain = (await res.json()) as { currentPrice: number };
+            const livePrice = BigInt(chain.currentPrice);
+            const days = BigInt(selectedDuration.days);
+            // 17280 blocks/day × 2x safety multiplier (matches adapter init.ts)
+            const liveAmount = days * 17280n * livePrice * 2n;
+            if (liveAmount > BigInt(amount)) {
+              console.log(
+                `[SwarmPlugin] Using live price ${livePrice} PLUR/block (was ${stampOptions?.pricePerBlock ?? "unknown"}): amount ${amount} → ${liveAmount}`,
+              );
+              amount = liveAmount.toString();
+            }
+          }
+        }
+      } catch (priceErr) {
+        console.warn("[SwarmPlugin] Live price fetch failed, using cached amount:", priceErr);
+      }
+
       setTopUpStep("Submitting transaction to Gnosis Chain...");
       toast("Submitting top-up transaction...", { type: "connect-success" });
-      await client.topUpStamp(selectedDuration.amount);
+      await client.topUpStamp(amount);
 
       setTopUpStep("Transaction submitted. Waiting for confirmation...");
       toast(`Top-up submitted \u2014 waiting for blockchain confirmation...`, { type: "connect-success" });
@@ -105,12 +185,9 @@ export function StorageSection({
       setTopUpStep("Refreshing stamp status...");
       if (refreshStamp) await refreshStamp();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Top up failed";
-      if (msg.includes("insufficient") || msg.includes("500")) {
-        showStatus(false, "Bee node wallet has insufficient xBZZ. Fund it first.");
-      } else {
-        showStatus(false, `Top up failed: ${msg}`);
-      }
+      const { message, hint } = extractBeeError(err);
+      console.error("[SwarmPlugin] Top up failed:", err);
+      showStatus(false, hint ? `Top up failed: ${hint} (Bee: ${message})` : `Top up failed: ${message}`);
     } finally {
       setTopUpBusy(false);
       setTopUpStep(null);
@@ -152,12 +229,9 @@ export function StorageSection({
       setExpandStep("Refreshing stamp status...");
       if (refreshStamp) await refreshStamp();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Expand failed";
-      if (msg.includes("500") || msg.includes("insufficient")) {
-        showStatus(false, "Expand failed \u2014 check Bee node wallet balance and logs.");
-      } else {
-        showStatus(false, `Expand failed: ${msg}`);
-      }
+      const { message, hint } = extractBeeError(err);
+      console.error("[SwarmPlugin] Expand failed:", err);
+      showStatus(false, hint ? `Expand failed: ${hint} (Bee: ${message})` : `Expand failed: ${message}`);
     } finally {
       setExpandBusy(false);
       setExpandStep(null);
@@ -553,13 +627,42 @@ function NewStampInline({
   const handleCreate = async () => {
     if (!client) return;
     const depth = newSize ?? 22;
-    const amount = newDuration?.amount ?? "414720000";
+    const days = newDuration?.days ?? 7;
     setCreateBusy(true);
     try {
       const sizeLabel =
         stampOptions?.sizeOptions.find((s) => s.depth === depth)?.label ?? `depth ${depth}`;
-      const durLabel = newDuration ? `~${newDuration.days} days` : "~7 days";
+      const durLabel = `~${days} days`;
       const mutLabel = newImmutable ? "immutable" : "mutable";
+
+      // Always recompute the amount from live chain price right before creation
+      // so the first-time setup flow can't send a stale figure.
+      let amount = newDuration?.amount ?? "";
+      try {
+        setCreateStep("Checking current network price...");
+        const beeUrl = (window as any).ph?.swarm?.beeUrl;
+        if (beeUrl) {
+          const res = await fetch(`${beeUrl}/chainstate`);
+          if (res.ok) {
+            const chain = (await res.json()) as { currentPrice: number };
+            const livePrice = BigInt(chain.currentPrice);
+            // 17280 blocks/day × 2x safety multiplier (matches adapter init.ts)
+            const liveAmount = BigInt(days) * 17280n * livePrice * 2n;
+            if (!amount || liveAmount > BigInt(amount)) {
+              console.log(
+                `[SwarmPlugin] Create: live price ${livePrice}, amount ${amount || "(none)"} → ${liveAmount}`,
+              );
+              amount = liveAmount.toString();
+            }
+          }
+        }
+      } catch (priceErr) {
+        console.warn("[SwarmPlugin] Live price fetch failed on create:", priceErr);
+      }
+      if (!amount) {
+        showStatus(false, "Could not determine stamp cost — network price unavailable.");
+        return;
+      }
 
       setCreateStep("Submitting stamp creation to Gnosis Chain...");
       toast("Creating stamp...", { type: "connect-success" });
@@ -578,13 +681,10 @@ function NewStampInline({
       setOpen(false);
       toast(`New stamp ready (${sizeLabel}, ${durLabel}, ${mutLabel})!`, { type: "connect-success" });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Stamp creation failed";
-      toast(msg, { type: "connect-warning" });
-      if (msg.includes("insufficient") || msg.includes("500")) {
-        showStatus(false, "Stamp creation failed \u2014 Bee node wallet needs more xBZZ.");
-      } else {
-        showStatus(false, `Stamp creation failed: ${msg}`);
-      }
+      const { message, hint } = extractBeeError(err);
+      console.error("[SwarmPlugin] Stamp creation failed:", err);
+      toast(message, { type: "connect-warning" });
+      showStatus(false, hint ? `Stamp creation failed: ${hint} (Bee: ${message})` : `Stamp creation failed: ${message}`);
     } finally {
       setCreateBusy(false);
       setCreateStep(null);
@@ -638,7 +738,15 @@ function NewStampInline({
                 const opts = stampOptions?.durationOptions ?? [];
                 const opt = opts.find((o) => o.days === days);
                 if (opt) setNewDuration({ days: opt.days, amount: opt.amount });
-                else setNewDuration({ days, amount: String(BigInt(days) * 17280n * 24000n) });
+                else {
+                  // Fallback: compute from live chain price if the adapter hasn't
+                  // prepopulated an option. 17280 blocks/day (5s Gnosis blocks),
+                  // 2x safety multiplier to clear Bee's 24h-minimum check.
+                  const price = BigInt(stampOptions?.pricePerBlock ?? 0);
+                  if (price > 0n) {
+                    setNewDuration({ days, amount: String(BigInt(days) * 17280n * price * 2n) });
+                  }
+                }
               }}
             >
               <option value="">Select duration...</option>
@@ -795,13 +903,39 @@ export function CreateStampSection({
   const handleCreateStamp = async () => {
     if (!client) return;
     const depth = selectedSize ?? 22;
-    const amount = selectedDuration?.amount ?? "414720000";
+    const days = selectedDuration?.days ?? 7;
     setCreateBusy(true);
     try {
       const sizeLabel =
         stampOptions?.sizeOptions.find((s) => s.depth === depth)?.label ?? `depth ${depth}`;
-      const durLabel = selectedDuration ? `~${selectedDuration.days} days` : "~7 days";
+      const durLabel = `~${days} days`;
       const mutLabel = stampImmutable ? "immutable" : "mutable";
+
+      let amount = selectedDuration?.amount ?? "";
+      try {
+        setCreateStep("Checking current network price...");
+        const beeUrl = (window as any).ph?.swarm?.beeUrl;
+        if (beeUrl) {
+          const res = await fetch(`${beeUrl}/chainstate`);
+          if (res.ok) {
+            const chain = (await res.json()) as { currentPrice: number };
+            const livePrice = BigInt(chain.currentPrice);
+            const liveAmount = BigInt(days) * 17280n * livePrice * 2n;
+            if (!amount || liveAmount > BigInt(amount)) {
+              console.log(
+                `[SwarmPlugin] Create: live price ${livePrice}, amount ${amount || "(none)"} → ${liveAmount}`,
+              );
+              amount = liveAmount.toString();
+            }
+          }
+        }
+      } catch (priceErr) {
+        console.warn("[SwarmPlugin] Live price fetch failed on create:", priceErr);
+      }
+      if (!amount) {
+        showStatus(false, "Could not determine stamp cost — network price unavailable.");
+        return;
+      }
 
       setCreateStep("Submitting stamp creation to Gnosis Chain...");
       toast("Creating stamp...", { type: "connect-success" });
@@ -819,13 +953,10 @@ export function CreateStampSection({
       }
       toast(`Stamp ready (${sizeLabel}, ${durLabel}, ${mutLabel})!`, { type: "connect-success" });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Stamp creation failed";
-      toast(msg, { type: "connect-warning" });
-      if (msg.includes("insufficient") || msg.includes("500")) {
-        showStatus(false, "Stamp creation failed \u2014 Bee node wallet needs xBZZ. Fund it first.");
-      } else {
-        showStatus(false, `Stamp creation failed: ${msg}`);
-      }
+      const { message, hint } = extractBeeError(err);
+      console.error("[SwarmPlugin] Stamp creation failed:", err);
+      toast(message, { type: "connect-warning" });
+      showStatus(false, hint ? `Stamp creation failed: ${hint} (Bee: ${message})` : `Stamp creation failed: ${message}`);
     } finally {
       setCreateBusy(false);
       setCreateStep(null);
@@ -872,7 +1003,15 @@ export function CreateStampSection({
               const opts = stampOptions?.durationOptions ?? [];
               const opt = opts.find((o) => o.days === days);
               if (opt) setSelectedDuration({ days: opt.days, amount: opt.amount });
-              else setSelectedDuration({ days, amount: String(BigInt(days) * 17280n * 24000n) });
+              else {
+                // Fallback: compute from live chain price if the adapter hasn't
+                // prepopulated an option. 17280 blocks/day (5s Gnosis blocks),
+                // 2x safety multiplier to clear Bee's 24h-minimum check.
+                const price = BigInt(stampOptions?.pricePerBlock ?? 0);
+                if (price > 0n) {
+                  setSelectedDuration({ days, amount: String(BigInt(days) * 17280n * price * 2n) });
+                }
+              }
             }}
           >
             <option value="">Select duration...</option>
