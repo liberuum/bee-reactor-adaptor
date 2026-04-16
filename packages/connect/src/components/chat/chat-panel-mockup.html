@@ -1,0 +1,768 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Connect Chat — UI mockup (Swarm settings style)</title>
+  <style>
+    :root {
+      --border: #f3f4f6;
+      --border-strong: #e5e7eb;
+      --bg-page: #f9fafb;
+      --bg-sidebar: #ffffff;
+      --bg-main: #f9fafb;
+      --bg-card: #ffffff;
+      --text-primary: #111827;
+      --text-secondary: #6b7280;
+      --text-muted: #9ca3af;
+      --accent: #2563eb;
+      --accent-hover: #1d4ed8;
+      --green-online: #22c55e;
+      --radius-lg: 8px;
+      --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: var(--font);
+      background: var(--bg-page);
+      color: var(--text-primary);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .banner {
+      flex-shrink: 0;
+      padding: 10px 16px;
+      background: #eff6ff;
+      border-bottom: 1px solid #bfdbfe;
+      font-size: 12px;
+      color: #1e40af;
+    }
+
+    .banner strong {
+      color: #1e3a8a;
+    }
+
+    /* Full-height chat strip; in Connect this attaches beside the real app sidebar */
+    .app-frame {
+      flex: 1;
+      display: flex;
+      min-height: 0;
+    }
+
+    .shell {
+      flex: 1;
+      display: flex;
+      min-width: 0;
+      border-left: 0;
+    }
+
+    /* DM list — settings-style sections */
+    .sidebar {
+      width: 280px;
+      background: var(--bg-sidebar);
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      border-right: 1px solid var(--border-strong);
+    }
+
+    .sidebar-inner {
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      flex: 1;
+      min-height: 0;
+    }
+
+    .section-title {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-muted);
+      margin: 0 0 8px;
+    }
+
+    .card {
+      border-radius: var(--radius-lg);
+      border: 1px solid var(--border);
+      background: var(--bg-card);
+      padding: 12px;
+    }
+
+    .btn-primary {
+      width: 100%;
+      border: none;
+      border-radius: 6px;
+      background: var(--accent);
+      color: #fff;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 8px 12px;
+      cursor: pointer;
+    }
+
+    .btn-primary:hover {
+      background: var(--accent-hover);
+    }
+
+    .btn-ghost {
+      width: 100%;
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--text-secondary);
+      font-size: 12px;
+      font-weight: 500;
+      padding: 8px 12px;
+      cursor: pointer;
+    }
+
+    .btn-ghost:hover {
+      background: #f9fafb;
+    }
+
+    .input-fake {
+      width: 100%;
+      padding: 8px 10px;
+      border-radius: 6px;
+      border: 1px solid var(--border-strong);
+      background: #fff;
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+
+    .sidebar-scroll {
+      flex: 1;
+      overflow-y: auto;
+      margin: 0 -4px;
+      padding: 0 4px;
+    }
+
+    .conv-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 10px;
+      border-radius: var(--radius-lg);
+      cursor: default;
+      margin-bottom: 4px;
+      border: 1px solid transparent;
+    }
+
+    .conv-item:hover {
+      background: #f9fafb;
+    }
+
+    .conv-item.active {
+      background: #eff6ff;
+      border-color: #bfdbfe;
+    }
+
+    .avatar {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      background: #e5e7eb;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      position: relative;
+    }
+
+    .avatar.sm {
+      width: 36px;
+      height: 36px;
+      font-size: 13px;
+    }
+
+    .online-dot {
+      position: absolute;
+      bottom: 0;
+      right: 0;
+      width: 10px;
+      height: 10px;
+      background: var(--green-online);
+      border: 2px solid #fff;
+      border-radius: 50%;
+    }
+
+    .conv-meta {
+      min-width: 0;
+      flex: 1;
+    }
+
+    .conv-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-primary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .conv-preview {
+      font-size: 12px;
+      color: var(--text-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-top: 2px;
+    }
+
+    .conv-time {
+      font-size: 11px;
+      color: var(--text-muted);
+      flex-shrink: 0;
+    }
+
+    /* Main thread */
+    .main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      background: var(--bg-main);
+    }
+
+    .thread-header {
+      flex-shrink: 0;
+      padding: 12px 20px;
+      background: #fff;
+      border-bottom: 1px solid var(--border-strong);
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+    }
+
+    .thread-title-block {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .thread-title {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--text-primary);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .badge-muted {
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      padding: 2px 8px;
+      border-radius: 4px;
+      background: #f3f4f6;
+      color: var(--text-secondary);
+    }
+
+    .thread-sub {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: 4px;
+      font-family: ui-monospace, monospace;
+    }
+
+    .tabs {
+      flex-shrink: 0;
+      display: flex;
+      gap: 0;
+      padding: 0 20px;
+      background: #fff;
+      border-bottom: 1px solid var(--border-strong);
+    }
+
+    .tab {
+      padding: 12px 4px;
+      margin-right: 20px;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-muted);
+      border: none;
+      background: none;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1px;
+    }
+
+    .tab:hover {
+      color: var(--text-secondary);
+    }
+
+    .tab.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+
+    .tab-panel {
+      flex: 1;
+      min-height: 0;
+      display: none;
+      flex-direction: column;
+    }
+
+    .tab-panel.active {
+      display: flex;
+    }
+
+    .messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px;
+    }
+
+    .date-divider {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin: 20px 0;
+    }
+
+    .date-divider::before,
+    .date-divider::after {
+      content: "";
+      flex: 1;
+      height: 1px;
+      background: var(--border-strong);
+    }
+
+    .date-divider span {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .msg-row {
+      display: flex;
+      justify-content: flex-start;
+      margin-bottom: 12px;
+    }
+
+    .msg-row.own {
+      justify-content: flex-end;
+    }
+
+    .bubble {
+      max-width: min(520px, 85%);
+      border-radius: var(--radius-lg);
+      padding: 10px 14px;
+    }
+
+    .bubble.peer {
+      background: #fff;
+      border: 1px solid var(--border);
+      box-shadow: 0 1px 2px rgb(0 0 0 / 0.04);
+    }
+
+    .bubble.own {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .bubble-meta {
+      font-size: 11px;
+      margin-bottom: 6px;
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .bubble.peer .bubble-meta {
+      color: var(--text-secondary);
+    }
+
+    .bubble.own .bubble-meta {
+      color: rgb(255 255 255 / 0.85);
+    }
+
+    .bubble-author {
+      font-weight: 600;
+      font-size: 13px;
+      color: var(--text-primary);
+    }
+
+    .bubble.own .bubble-author {
+      color: #fff;
+    }
+
+    .bubble-text {
+      font-size: 14px;
+      line-height: 1.5;
+      margin: 0;
+    }
+
+    .bubble.peer .bubble-text {
+      color: #374151;
+    }
+
+    .attachment-inline {
+      margin-top: 10px;
+      border-radius: 6px;
+      border: 1px solid var(--border-strong);
+      overflow: hidden;
+      background: #f9fafb;
+    }
+
+    .bubble.own .attachment-inline {
+      border-color: rgb(255 255 255 / 0.35);
+      background: rgb(255 255 255 / 0.12);
+    }
+
+    .attachment-inline .thumb {
+      height: 100px;
+      background: linear-gradient(135deg, #e5e7eb, #f3f4f6);
+    }
+
+    .attachment-inline .cap {
+      padding: 8px 10px;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .bubble.own .attachment-inline .cap {
+      color: rgb(255 255 255 / 0.9);
+    }
+
+    /* Files tab */
+    .files-section {
+      padding: 16px 20px 20px;
+      flex: 1;
+      overflow-y: auto;
+    }
+
+    .files-section h3 {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-muted);
+      margin: 0 0 10px;
+    }
+
+    .files-toolbar {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+    }
+
+    .files-toolbar select,
+    .files-toolbar input {
+      padding: 6px 10px;
+      border-radius: 6px;
+      border: 1px solid var(--border-strong);
+      background: #fff;
+      color: var(--text-secondary);
+      font-size: 13px;
+    }
+
+    .files-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 12px;
+    }
+
+    .file-card {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      background: #fff;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      box-shadow: 0 1px 2px rgb(0 0 0 / 0.04);
+    }
+
+    .file-icon {
+      width: 40px;
+      height: 44px;
+      border-radius: 6px;
+      background: var(--accent);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      font-weight: 800;
+      color: white;
+    }
+
+    .file-name {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-primary);
+      word-break: break-all;
+    }
+
+    .file-meta {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    /* Composer */
+    .composer-wrap {
+      flex-shrink: 0;
+      padding: 16px 20px 20px;
+      background: #fff;
+      border-top: 1px solid var(--border-strong);
+    }
+
+    .composer-wrap.hidden-for-files {
+      display: none;
+    }
+
+    .composer {
+      border-radius: var(--radius-lg);
+      border: 1px solid var(--border-strong);
+      background: #f9fafb;
+      padding: 10px 12px;
+    }
+
+    .composer-tools {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 8px;
+    }
+
+    .composer-tools button {
+      width: 32px;
+      height: 32px;
+      border: none;
+      border-radius: 6px;
+      background: #fff;
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      cursor: default;
+    }
+
+    .composer-tools button:hover {
+      background: #f3f4f6;
+    }
+
+    .composer-input {
+      width: 100%;
+      min-height: 40px;
+      border: none;
+      background: transparent;
+      color: var(--text-muted);
+      font-size: 14px;
+      resize: none;
+      outline: none;
+      font-family: inherit;
+    }
+
+    .composer-hint {
+      margin-top: 8px;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    @media (max-width: 768px) {
+      .sidebar {
+        width: 240px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="banner">
+    <strong>Static mockup only</strong> — aligns with Swarm settings in Connect (light panels, gray borders, blue accent). In the app, this panel sits beside the existing Connect sidebar (not shown here). <strong>Direct messages only</strong>. Use <strong>Files</strong> for everything shared in this DM.
+  </div>
+
+  <div class="app-frame">
+    <div class="shell">
+      <aside class="sidebar" aria-label="Direct messages">
+        <div class="sidebar-inner">
+          <div>
+            <h2 class="section-title">Direct messages</h2>
+            <div class="card">
+              <button type="button" class="btn-primary">New conversation</button>
+              <p style="margin:10px 0 0;font-size:11px;color:var(--text-muted);line-height:1.4;">
+                Mockup: opens inline field to paste a Swarm ID (same pattern as settings forms).
+              </p>
+            </div>
+          </div>
+          <div class="input-fake" role="search">Search people…</div>
+          <div class="sidebar-scroll">
+            <div class="conv-item active">
+              <div class="avatar">AK<span class="online-dot"></span></div>
+              <div class="conv-meta">
+                <div class="conv-title">alice.eth</div>
+                <div class="conv-preview">Sounds good — I&rsquo;ll upload the spec…</div>
+              </div>
+              <div class="conv-time">2m</div>
+            </div>
+            <div class="conv-item">
+              <div class="avatar">BM</div>
+              <div class="conv-meta">
+                <div class="conv-title">bob.manifest</div>
+                <div class="conv-preview">You: here&rsquo;s the batch id</div>
+              </div>
+              <div class="conv-time">1h</div>
+            </div>
+            <div class="conv-item">
+              <div class="avatar">CW</div>
+              <div class="conv-meta">
+                <div class="conv-title">charlie.wallet</div>
+                <div class="conv-preview">Thanks for the receipt PDF</div>
+              </div>
+              <div class="conv-time">Wed</div>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <main class="main" aria-label="Conversation">
+        <header class="thread-header">
+          <div class="thread-title-block">
+            <div class="thread-title">
+              alice.eth
+              <span class="badge-muted">PSS · Swarm</span>
+            </div>
+            <div class="thread-sub">0x71C7656a8909a0d1c9f2a9A2f · Encrypted direct message</div>
+          </div>
+        </header>
+
+        <div class="tabs" role="tablist">
+          <button type="button" class="tab active" role="tab" aria-selected="true" data-tab="messages">Messages</button>
+          <button type="button" class="tab" role="tab" aria-selected="false" data-tab="files">Files</button>
+        </div>
+
+        <section id="panel-messages" class="tab-panel active" role="tabpanel" aria-hidden="false">
+          <div class="messages">
+            <div class="date-divider"><span>April 15, 2026</span></div>
+
+            <div class="msg-row">
+              <div class="bubble peer">
+                <div class="bubble-meta">
+                  <span class="bubble-author">alice.eth</span>
+                  <span>10:12</span>
+                </div>
+                <p class="bubble-text">Hey — can you review the drive manifest before I pin it? I&rsquo;ll drop the JSON below.</p>
+                <div class="attachment-inline">
+                  <div class="thumb" aria-hidden="true"></div>
+                  <div class="cap">drive-manifest-v3.json · 24 KB · shared in chat</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="date-divider"><span>Today</span></div>
+
+            <div class="msg-row own">
+              <div class="bubble own">
+                <div class="bubble-meta">
+                  <span class="bubble-author">You</span>
+                  <span>09:41</span>
+                </div>
+                <p class="bubble-text">On it. If validation fails I&rsquo;ll reply with line numbers.</p>
+              </div>
+            </div>
+
+            <div class="msg-row">
+              <div class="bubble peer">
+                <div class="bubble-meta">
+                  <span class="bubble-author">alice.eth</span>
+                  <span>09:44</span>
+                </div>
+                <p class="bubble-text">Uploaded the spec — it&rsquo;s in the Files tab with the rest of our attachments.</p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="panel-files" class="tab-panel" role="tabpanel" aria-hidden="true">
+          <div class="files-section">
+            <h3>All files in this conversation</h3>
+            <div class="files-toolbar">
+              <select aria-label="Filter file type">
+                <option>All types</option>
+                <option>Documents</option>
+                <option>Images</option>
+              </select>
+              <input type="search" placeholder="Search by name…" style="flex:1;min-width:160px;max-width:320px;" />
+            </div>
+            <div class="files-grid">
+              <div class="file-card">
+                <div class="file-icon">JSON</div>
+                <div class="file-name">drive-manifest-v3.json</div>
+                <div class="file-meta">24 KB · alice.eth · Apr 15</div>
+              </div>
+              <div class="file-card">
+                <div class="file-icon" style="background:#16a34a;">PNG</div>
+                <div class="file-name">topology-diagram.png</div>
+                <div class="file-meta">182 KB · You · Apr 14</div>
+              </div>
+              <div class="file-card">
+                <div class="file-icon" style="background:#ca8a04;">PDF</div>
+                <div class="file-name">stamp-top-up-receipt.pdf</div>
+                <div class="file-meta">56 KB · You · Apr 12</div>
+              </div>
+              <div class="file-card">
+                <div class="file-icon" style="background:#7c3aed;">DOC</div>
+                <div class="file-name">spec-notes.docx</div>
+                <div class="file-meta">alice.eth · Apr 10</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <div id="composer" class="composer-wrap">
+          <div class="composer">
+            <div class="composer-tools">
+              <button type="button" title="Attach file">+</button>
+            </div>
+            <textarea class="composer-input" rows="1" readonly placeholder="Message alice.eth…" aria-label="Message input"></textarea>
+          </div>
+          <p class="composer-hint">Composer shows on Messages; hidden on Files in this mockup (toggle tabs to compare).</p>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      var tabs = document.querySelectorAll(".tab");
+      var panelMessages = document.getElementById("panel-messages");
+      var panelFiles = document.getElementById("panel-files");
+      var composer = document.getElementById("composer");
+      tabs.forEach(function (tab) {
+        tab.addEventListener("click", function () {
+          var id = tab.getAttribute("data-tab");
+          tabs.forEach(function (t) {
+            t.classList.toggle("active", t === tab);
+            t.setAttribute("aria-selected", t === tab ? "true" : "false");
+          });
+          var showMessages = id === "messages";
+          panelMessages.classList.toggle("active", showMessages);
+          panelFiles.classList.toggle("active", !showMessages);
+          panelMessages.setAttribute("aria-hidden", showMessages ? "false" : "true");
+          panelFiles.setAttribute("aria-hidden", showMessages ? "true" : "false");
+          if (composer) {
+            composer.classList.toggle("hidden-for-files", !showMessages);
+          }
+        });
+      });
+    })();
+  </script>
+</body>
+</html>
