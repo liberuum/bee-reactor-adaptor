@@ -106,6 +106,16 @@ export async function clearSwarmStorage(
     return err instanceof Error ? err.message : String(err);
   };
 
+  // Recognizer for the most common "nothing works" Bee-side failure.
+  const isBatchNotFound = (err: unknown): boolean => {
+    const anyErr = err as any;
+    const status = anyErr?.status ?? anyErr?.response?.status;
+    const bodyStr = typeof anyErr?.responseBody === "string"
+      ? anyErr.responseBody
+      : JSON.stringify(anyErr?.responseBody ?? "");
+    return status === 404 && /batch with id not found/i.test(bodyStr);
+  };
+
   let currentManifest = null;
   try {
     currentManifest = await swarmClient.readUserManifest(ownerAddress);
@@ -170,6 +180,12 @@ export async function clearSwarmStorage(
         "[SwarmPlugin] clearSwarmStorage: untracked updateUserManifest also failed:",
         describeErr(err2),
       );
+      if (isBatchNotFound(err2) || isBatchNotFound(err)) {
+        throw new Error(
+          "Your postage stamp has expired or is unavailable on this Bee node. " +
+          "Go to Settings → Swarm Storage and create or top up a stamp before clearing.",
+        );
+      }
       throw err2;
     }
   }
