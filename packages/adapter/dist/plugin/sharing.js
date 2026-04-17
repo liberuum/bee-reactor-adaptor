@@ -54,9 +54,124 @@ export async function publishPublicProfile(client, ethAddress, swarmPublicKey) {
     await client.publishPublicProfile(signerAddress, profile);
     console.log(`[SwarmPlugin] Published public profile (signer: ${signerAddress.slice(0, 10)}...)`);
 }
-// ═══════════════════════════════════════════════════════════════
-// Share Documents
-// ═══════════════════════════════════════════════════════════════
+/**
+ * Collect ops + metadata for a set of docs within a single drive and
+ * package them into the canonical share bundle shape. Used by both
+ * `shareDocumentsWithUser` (settings → share manifest) and
+ * `shareDocumentInChat` (chat → attachment). Returns null when none of
+ * the requested docs have any ops to share.
+ *
+ * Doc name resolution prefers `window.ph.swarm.userManifest.documents`
+ * and falls back to the on-chain docId — matching the settings flow so
+ * the chat recipient sees "my new doc" instead of a UUID.
+ */
+export async function buildDriveShareBundle(client, driveId, docIds) {
+    const ph = globalThis.window?.ph;
+    const userManifest = ph?.swarm?.userManifest;
+    const reactorClient = ph?.reactorClient;
+    const preparedDocs = [];
+    for (const docId of docIds) {
+        try {
+            const manifest = await client.readManifest(docId);
+            if (!manifest || manifest.operationBatches.length === 0) {
+                console.warn(`[SwarmPlugin] Doc ${docId.slice(0, 8)} has no ops on Swarm, skipping`);
+                continue;
+            }
+            const allOps = [];
+            for (const batch of manifest.operationBatches) {
+                try {
+                    const data = await client.downloadData(batch.reference);
+                    const ops = JSON.parse(new TextDecoder().decode(data));
+                    allOps.push(...(Array.isArray(ops) ? ops : [ops]));
+                }
+                catch (err) {
+                    console.warn(`[SwarmPlugin] Failed batch ${batch.reference.slice(0, 8)}:`, err instanceof Error ? err.message : err);
+                }
+            }
+            if (allOps.length === 0)
+                continue;
+            const docEntry = userManifest?.documents?.[docId];
+            preparedDocs.push({
+                docId,
+                ops: allOps,
+                docType: manifest.documentType,
+                docName: docEntry?.name ?? docId,
+            });
+        }
+        catch (err) {
+            console.warn(`[SwarmPlugin] Failed to prepare doc ${docId.slice(0, 8)}:`, err instanceof Error ? err.message : err);
+        }
+    }
+    if (preparedDocs.length === 0)
+        return null;
+    // Resolve drive name (userManifest → reactor → "Shared Drive")
+    let driveName = userManifest?.drives?.[driveId]?.name ?? "";
+    if (!driveName || driveName === driveId) {
+        try {
+            if (reactorClient && driveId !== "_default") {
+                const driveDoc = await reactorClient.get(driveId);
+                driveName = driveDoc?.state?.global?.name ?? "";
+            }
+        }
+        catch { /* best effort */ }
+    }
+    if (!driveName || driveName === driveId)
+        driveName = "Shared Drive";
+    // Folder structure: only carry folders that contain shared docs, plus
+    // their parent chain (so nested hierarchies stay intact on import).
+    const sharedDocIds = new Set(preparedDocs.map((d) => d.docId));
+    let folders;
+    let docFolders;
+    let preferredEditor;
+    try {
+        const dm = await client.readDriveManifest(driveId);
+        preferredEditor = dm?.preferredEditor;
+        if (dm?.folders && Object.keys(dm.folders).length > 0) {
+            const dfMap = {};
+            const usedFolderIds = new Set();
+            for (const [docId, docEntry] of Object.entries(dm.documents)) {
+                if (sharedDocIds.has(docId) && docEntry.parentFolder) {
+                    dfMap[docId] = docEntry.parentFolder;
+                    usedFolderIds.add(docEntry.parentFolder);
+                }
+            }
+            const allFolders = {};
+            for (const folderId of usedFolderIds) {
+                let current = folderId;
+                while (current && dm.folders[current] && !allFolders[current]) {
+                    allFolders[current] = dm.folders[current];
+                    current = dm.folders[current].parentFolder;
+                }
+            }
+            if (Object.keys(allFolders).length > 0) {
+                folders = allFolders;
+                docFolders = dfMap;
+            }
+        }
+    }
+    catch { /* drive manifest missing is fine — just ship without folders */ }
+    const bundle = {
+        documents: preparedDocs.map((d) => ({
+            documentId: d.docId,
+            documentType: d.docType,
+            name: d.docName,
+            operations: d.ops,
+        })),
+        ...(folders ? { folders } : {}),
+        ...(docFolders ? { docFolders } : {}),
+        ...(preferredEditor ? { preferredEditor } : {}),
+    };
+    return {
+        bundle,
+        driveName,
+        docs: preparedDocs.map((d) => ({
+            documentId: d.docId,
+            documentType: d.docType,
+            name: d.docName,
+            operationCount: d.ops.length,
+        })),
+    };
+}
 export async function shareDocumentsWithUser(client, docIds, recipientSignerAddress) {
     try {
         const mySignerAddress = client.getOwnerAddress();
@@ -64,46 +179,16 @@ export async function shareDocumentsWithUser(client, docIds, recipientSignerAddr
         // SwarmChannel handles flushing via SyncManager outbox — no manual flush needed.
         const ph = globalThis.window?.ph;
         const userManifest = ph?.swarm?.userManifest;
-        const reactorClient = ph?.reactorClient;
-        // Group docs by drive, bundle all ops per drive into ONE upload
-        const docsByDrive = new Map();
+        // Group docIds by their owning drive (resolved from the user manifest)
+        // so we can build one bundle per drive. Matches the legacy shape that
+        // the import side has been happy with.
+        const docIdsByDrive = new Map();
         for (const docId of docIds) {
-            try {
-                const manifest = await client.readManifest(docId);
-                if (!manifest || manifest.operationBatches.length === 0) {
-                    console.warn(`[SwarmPlugin] Doc ${docId.slice(0, 8)} has no ops on Swarm, skipping`);
-                    continue;
-                }
-                const allOps = [];
-                for (const batch of manifest.operationBatches) {
-                    try {
-                        const data = await client.downloadData(batch.reference);
-                        const ops = JSON.parse(new TextDecoder().decode(data));
-                        allOps.push(...(Array.isArray(ops) ? ops : [ops]));
-                    }
-                    catch (err) {
-                        console.warn(`[SwarmPlugin] Failed batch ${batch.reference.slice(0, 8)}:`, err instanceof Error ? err.message : err);
-                    }
-                }
-                if (allOps.length === 0)
-                    continue;
-                const docEntry = userManifest?.documents?.[docId];
-                const driveId = docEntry?.driveId ?? "_default";
-                if (!docsByDrive.has(driveId))
-                    docsByDrive.set(driveId, []);
-                docsByDrive.get(driveId).push({
-                    docId,
-                    ops: allOps,
-                    docType: manifest.documentType,
-                    docName: docEntry?.name ?? docId,
-                });
-            }
-            catch (err) {
-                console.warn(`[SwarmPlugin] Failed to prepare doc ${docId.slice(0, 8)}:`, err instanceof Error ? err.message : err);
-            }
-        }
-        if (docsByDrive.size === 0) {
-            return { success: false, shared: 0, error: "No documents could be shared." };
+            const docEntry = userManifest?.documents?.[docId];
+            const driveId = docEntry?.driveId ?? "_default";
+            const bucket = docIdsByDrive.get(driveId) ?? [];
+            bucket.push(docId);
+            docIdsByDrive.set(driveId, bucket);
         }
         // Resolve recipient's Bee node public key for ACT grant
         const recipientProfile = await client.readPublicProfile(recipientSignerAddress);
@@ -113,78 +198,29 @@ export async function shareDocumentsWithUser(client, docIds, recipientSignerAddr
         const recipientBeeNodePubKey = recipientProfile.beeNodePublicKey;
         // Get our own Bee node public key (stored in share manifest for recipient to download)
         const myBeeNodePubKey = await client.getBeeNodePublicKey();
-        // Build share entries — ONE bundle per drive
         const shareEntries = [];
         let totalDocs = 0;
-        for (const [driveId, docs] of docsByDrive) {
-            // Resolve drive name
-            let driveName = userManifest?.drives?.[driveId]?.name ?? "";
-            if (!driveName || driveName === driveId) {
-                try {
-                    if (reactorClient && driveId !== "_default") {
-                        const driveDoc = await reactorClient.get(driveId);
-                        driveName = driveDoc?.state?.global?.name ?? "";
-                    }
-                }
-                catch { /* best effort */ }
-            }
-            if (!driveName || driveName === driveId)
-                driveName = "Shared Drive";
-            // Include folder structure from drive manifest (only for docs being shared)
-            const sharedDocIds = new Set(docs.map((d) => d.docId));
-            let folderInfo;
-            const dm = await client.readDriveManifest(driveId);
-            if (dm?.folders && Object.keys(dm.folders).length > 0) {
-                const docFolders = {};
-                const usedFolderIds = new Set();
-                for (const [docId, docEntry] of Object.entries(dm.documents)) {
-                    if (sharedDocIds.has(docId) && docEntry.parentFolder) {
-                        docFolders[docId] = docEntry.parentFolder;
-                        usedFolderIds.add(docEntry.parentFolder);
-                    }
-                }
-                // Include parent chain for nested folders
-                const allFolders = {};
-                for (const folderId of usedFolderIds) {
-                    let current = folderId;
-                    while (current && dm.folders[current] && !allFolders[current]) {
-                        allFolders[current] = dm.folders[current];
-                        current = dm.folders[current].parentFolder;
-                    }
-                }
-                if (Object.keys(allFolders).length > 0) {
-                    folderInfo = { folders: allFolders, docFolders };
-                }
-            }
-            // Bundle ALL docs' ops for this drive into ONE upload
-            const bundle = {
-                documents: docs.map((d) => ({
-                    documentId: d.docId,
-                    documentType: d.docType,
-                    name: d.docName,
-                    operations: d.ops,
-                })),
-                ...(folderInfo ? { folders: folderInfo.folders, docFolders: folderInfo.docFolders } : {}),
-                ...(dm?.preferredEditor ? { preferredEditor: dm.preferredEditor } : {}),
-            };
-            const shareResult = await client.uploadSharedData(JSON.stringify(bundle), recipientBeeNodePubKey);
+        for (const [driveId, driveDocIds] of docIdsByDrive) {
+            const built = await buildDriveShareBundle(client, driveId, driveDocIds);
+            if (!built)
+                continue;
+            const shareResult = await client.uploadSharedData(JSON.stringify(built.bundle), recipientBeeNodePubKey);
             shareEntries.push({
                 driveId,
-                driveName,
+                driveName: built.driveName,
                 reference: shareResult.reference,
                 actHistoryAddress: shareResult.actHistoryAddress,
                 actGranteeRef: shareResult.actGranteeRef,
                 publisherBeeNodePubKey: myBeeNodePubKey,
-                documents: docs.map((d) => ({
-                    documentId: d.docId,
-                    documentType: d.docType,
-                    name: d.docName,
-                    operationCount: d.ops.length,
-                })),
+                documents: built.docs,
                 sharedAt: new Date().toISOString(),
             });
-            totalDocs += docs.length;
-            console.log(`[SwarmPlugin] Bundled ${docs.length} doc(s) for drive "${driveName}" (${docs.reduce((s, d) => s + d.ops.length, 0)} total ops)`);
+            totalDocs += built.docs.length;
+            const totalOps = built.docs.reduce((s, d) => s + d.operationCount, 0);
+            console.log(`[SwarmPlugin] Bundled ${built.docs.length} doc(s) for drive "${built.driveName}" (${totalOps} total ops)`);
+        }
+        if (shareEntries.length === 0) {
+            return { success: false, shared: 0, error: "No documents could be shared." };
         }
         // Write ONE clean share manifest (v2 = ACT-protected)
         const shareManifest = {

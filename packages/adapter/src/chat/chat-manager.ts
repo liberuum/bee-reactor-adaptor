@@ -346,25 +346,32 @@ export class ChatManager {
     driveId: string,
     driveName: string,
   ): Promise<ChatMessage> {
-    // Use the existing ACT sharing infrastructure
-    const bundle = await this.buildShareBundle(docIds);
-    if (!bundle) {
+    // Use the same bundle builder as the settings-share path so the
+    // recipient gets proper doc names (not UUIDs), full operation
+    // history, folder structure, and preferredEditor — instead of a
+    // minimal documents-array that produced empty docs on import.
+    const { buildDriveShareBundle } = await import("../plugin/sharing.js");
+    const built = await buildDriveShareBundle(this.client, driveId, docIds);
+    if (!built) {
       throw new Error("No documents to share — all docs empty or missing.");
     }
 
     const shareResult = await this.client.uploadSharedData(
-      JSON.stringify(bundle.data),
+      JSON.stringify(built.bundle),
       session.peerBeeNodePubKey,
     );
 
     const attachment: ChatAttachment = {
       kind: "document-share",
       driveId,
-      driveName,
+      // Prefer the bundle-resolved drive name over whatever the caller
+      // passed — matches what the settings flow shows and keeps the
+      // attachment card consistent with the actual drive.
+      driveName: built.driveName || driveName,
       shareReference: shareResult.reference,
       actHistoryAddress: shareResult.actHistoryAddress,
       publisherBeeNodePubKey: await this.client.getBeeNodePublicKey(),
-      documents: bundle.docs.map(d => ({
+      documents: built.docs.map((d) => ({
         id: d.documentId,
         name: d.name,
         type: d.documentType,
@@ -721,39 +728,4 @@ export class ChatManager {
     }
   }
 
-  private async buildShareBundle(docIds: string[]): Promise<{
-    data: { documents: Array<{ documentId: string; documentType: string; name: string; operations: unknown[] }> };
-    docs: Array<{ documentId: string; documentType: string; name: string }>;
-  } | null> {
-    const documents: Array<{ documentId: string; documentType: string; name: string; operations: unknown[] }> = [];
-
-    for (const docId of docIds) {
-      try {
-        const manifest = await this.client.readManifest(docId);
-        if (!manifest || manifest.operationBatches.length === 0) continue;
-
-        const allOps: unknown[] = [];
-        for (const batch of manifest.operationBatches) {
-          const data = await this.client.downloadData(batch.reference);
-          const ops = JSON.parse(new TextDecoder().decode(data));
-          allOps.push(...(Array.isArray(ops) ? ops : [ops]));
-        }
-
-        documents.push({
-          documentId: docId,
-          documentType: manifest.documentType,
-          name: docId, // Caller can override with display name
-          operations: allOps,
-        });
-      } catch {
-        // Skip docs that can't be read
-      }
-    }
-
-    if (documents.length === 0) return null;
-    return {
-      data: { documents },
-      docs: documents.map(d => ({ documentId: d.documentId, documentType: d.documentType, name: d.name })),
-    };
-  }
 }

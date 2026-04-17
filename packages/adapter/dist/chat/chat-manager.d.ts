@@ -182,6 +182,5 @@ export declare class ChatManager {
     shutdown(): void;
     private emit;
     private markSeen;
-    private buildShareBundle;
 }
 //# sourceMappingURL=chat-manager.d.ts.map
