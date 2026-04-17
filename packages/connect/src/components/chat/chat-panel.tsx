@@ -45,11 +45,13 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
 
   const [tab, setTab] = useState<Tab>("messages");
 
-  // Get my Swarm signer address, normalized
+  // Get my Swarm signer address, normalized. Deliberately prefer the
+  // Bee client's signer address — signerEntry.ownerAddress is the ETH
+  // wallet address (wrong for chat routing).
   const ph = (globalThis as any).window?.ph;
   const myAddress = (
-    ph?.swarm?.signerEntry?.ownerAddress
-    ?? ph?.swarm?.client?.getOwnerAddress?.()
+    ph?.swarm?.client?.getOwnerAddress?.()
+    ?? ph?.swarm?.signerEntry?.swarmAddress
     ?? ""
   ).toLowerCase();
 

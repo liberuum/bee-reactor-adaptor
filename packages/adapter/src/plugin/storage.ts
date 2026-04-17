@@ -77,9 +77,18 @@ export async function clearSwarmStorage(
     } catch { /* best effort */ }
   }
 
-  const currentManifest = await swarmClient.readUserManifest(ownerAddress);
+  let currentManifest = null;
+  try {
+    currentManifest = await swarmClient.readUserManifest(ownerAddress);
+  } catch (err) {
+    console.warn(
+      "[SwarmPlugin] clearSwarmStorage: readUserManifest failed:",
+      err instanceof Error ? err.message : err,
+    );
+  }
 
-  // Clear each drive manifest feed
+  // Clear each drive manifest feed (best-effort per drive — keep going
+  // if one fails, so one bad feed doesn't block clearing the rest).
   if (currentManifest?.drives) {
     for (const driveId of Object.keys(currentManifest.drives)) {
       try {
@@ -89,11 +98,19 @@ export async function clearSwarmStorage(
           documents: {},
           updatedAt: new Date().toISOString(),
         });
-      } catch { /* best effort */ }
+      } catch (err) {
+        console.warn(
+          `[SwarmPlugin] clearSwarmStorage: clearDriveManifest(${driveId.slice(0, 8)}) failed:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
     }
   }
 
-  // Write empty user manifest with tracked upload for deterministic confirmation.
+  // Write empty user manifest. Try tracked first; if createTag / the
+  // tracked write itself 404s (some Bee setups disable or restrict the
+  // tag endpoints), retry once without tracking rather than hand a raw
+  // axios error to the UI.
   const emptyManifest = {
     address: currentManifest?.address ?? ownerAddress,
     beeNodePublicKey: currentManifest?.beeNodePublicKey,
@@ -102,23 +119,39 @@ export async function clearSwarmStorage(
     stamps: currentManifest?.stamps ?? {},
     updatedAt: new Date().toISOString(),
   };
-  const { tagUid } = await swarmClient.updateUserManifest(
-    ownerAddress,
-    emptyManifest as any,
-    { tracked: true },
-  );
+  let tagUid: number | undefined;
+  try {
+    const result = await swarmClient.updateUserManifest(
+      ownerAddress,
+      emptyManifest as any,
+      { tracked: true },
+    );
+    tagUid = result.tagUid;
+  } catch (err) {
+    console.warn(
+      "[SwarmPlugin] clearSwarmStorage: tracked updateUserManifest failed, retrying without tracking:",
+      err instanceof Error ? err.message : err,
+    );
+    await swarmClient.updateUserManifest(ownerAddress, emptyManifest as any);
+  }
 
-  // Wait for the upload to be confirmed on the network via tag API,
-  // then verify the feed reads back the empty manifest.
+  // Tag API is a nice-to-have for propagation confirmation. If it fails
+  // (404 on /tags/{uid} — happens on some Bee setups), that's not a
+  // reason to fail the whole clear: the manifest has already been
+  // written above.
   if (tagUid) {
     console.log("[SwarmPlugin] Waiting for empty manifest data to propagate...");
     try {
       await swarmClient.waitForConfirmation(tagUid, 30_000, 1_000);
       console.log("[SwarmPlugin] Data confirmed — verifying feed pointer...");
-    } catch {
-      console.warn("[SwarmPlugin] Data propagation timed out");
+    } catch (err) {
+      console.warn(
+        "[SwarmPlugin] Propagation wait skipped:",
+        err instanceof Error ? err.message : err,
+      );
     }
   }
+
   // Clear UI cache
   const ph = (globalThis as any).window?.ph;
   if (ph?.swarm) {

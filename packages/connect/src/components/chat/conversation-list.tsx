@@ -8,9 +8,14 @@ import type { ConversationSummary } from "./types.js";
 const ACCENT = "#2563eb";
 
 function getMySwarmId(): string {
+  // Use the Swarm SIGNER address (derived from the wallet signature over
+  // the origin), NOT the Ethereum wallet address. Chat history feeds and
+  // public-profile feeds are keyed by the Swarm signer — copying the
+  // wallet address here leaves peers unable to look us up (they hit
+  // "No Swarm profile found for 0x…").
   const ph = (globalThis as any).window?.ph;
-  return ph?.swarm?.signerEntry?.ownerAddress
-    ?? ph?.swarm?.client?.getOwnerAddress?.()
+  return ph?.swarm?.client?.getOwnerAddress?.()
+    ?? ph?.swarm?.signerEntry?.swarmAddress
     ?? "";
 }
 

@@ -12,9 +12,13 @@ function getManager(): any | null {
 }
 
 function getMyAddress(): string {
+  // Swarm SIGNER address (used for routing chat messages + history feeds),
+  // NOT the Ethereum wallet address. signerEntry.ownerAddress is actually
+  // the ETH wallet address; the real Swarm address comes from the Bee
+  // client's signer.
   const ph = (globalThis as any).window?.ph;
-  return ph?.swarm?.signerEntry?.ownerAddress
-    ?? ph?.swarm?.client?.getOwnerAddress?.()
+  return ph?.swarm?.client?.getOwnerAddress?.()
+    ?? ph?.swarm?.signerEntry?.swarmAddress
     ?? "";
 }
 
