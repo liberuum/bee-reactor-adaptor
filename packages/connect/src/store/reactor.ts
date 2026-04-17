@@ -360,18 +360,34 @@ export async function createReactor(localPackage?: DocumentModelLib) {
         return "";
       }).filter(Boolean);
 
-      // If no local drives, check Swarm user manifest for recovery.
-      let driveIds = localDriveIds;
-      if (driveIds.length === 0 && swarmState.client) {
+      // Always merge local drives with drives recorded in the Swarm user
+      // manifest, so a partial recovery (user has some drives locally but
+      // is missing others that exist on Swarm from another browser) still
+      // discovers the Swarm-only ones.
+      let swarmOnlyDriveIds: string[] = [];
+      let driveIds = [...localDriveIds];
+      if (swarmState.client) {
         try {
           const userManifest = await swarmState.client.readUserManifest(
             (window.ph as any)?.renown?.user?.address ?? "",
           );
           if (userManifest?.drives) {
-            driveIds = Object.keys(userManifest.drives);
-            if (driveIds.length > 0) {
-              console.log(`[SwarmChannel] No local drives, found ${driveIds.length} on Swarm:`, driveIds.map((id: string) => id.slice(0, 8)));
+            const localSet = new Set(localDriveIds);
+            swarmOnlyDriveIds = Object.keys(userManifest.drives).filter(
+              (id) => !localSet.has(id),
+            );
+            if (localDriveIds.length === 0 && swarmOnlyDriveIds.length > 0) {
+              console.log(
+                `[SwarmChannel] No local drives, found ${swarmOnlyDriveIds.length} on Swarm:`,
+                swarmOnlyDriveIds.map((id: string) => id.slice(0, 8)),
+              );
+            } else if (swarmOnlyDriveIds.length > 0) {
+              console.log(
+                `[SwarmChannel] ${localDriveIds.length} local, ${swarmOnlyDriveIds.length} Swarm-only drives to recover:`,
+                swarmOnlyDriveIds.map((id: string) => id.slice(0, 8)),
+              );
             }
+            driveIds = [...localDriveIds, ...swarmOnlyDriveIds];
           }
         } catch {
           // No user manifest on Swarm — truly fresh start
@@ -432,12 +448,20 @@ export async function createReactor(localPackage?: DocumentModelLib) {
       if (registered > 0) {
         console.log(`[SwarmChannel] Registered ${registered} new Swarm remote(s):`, driveIds.map((id: string) => id.slice(0, 8)));
 
-        // If this was a recovery (drives from Swarm, not local), trigger one pull.
+        // Trigger recovery pull for any drives that exist on Swarm but NOT
+        // locally — this covers both the "no local drives" fresh-install
+        // case and the "some drives here, others on Swarm" partial case.
         const phAny = window.ph as any;
-        if (localDriveIds.length === 0 && !phAny?._skipSwarmRecovery) {
-          console.log("[SwarmChannel] Recovery mode — triggering inbox pull");
+        if (swarmOnlyDriveIds.length > 0 && !phAny?._skipSwarmRecovery) {
+          console.log(
+            `[SwarmChannel] Recovery mode — pulling ${swarmOnlyDriveIds.length} Swarm-only drive(s)`,
+          );
+          const swarmOnlySet = new Set(
+            swarmOnlyDriveIds.map((id) => `swarm:${id}`),
+          );
           const remotes = sm.list();
           for (const remote of remotes) {
+            if (!swarmOnlySet.has(remote.name)) continue;
             if ((remote.channel as any)?.pullFromSwarm) {
               (remote.channel as any).pullFromSwarm().catch(() => {});
             }
