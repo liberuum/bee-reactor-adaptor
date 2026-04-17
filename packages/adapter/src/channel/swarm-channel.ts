@@ -460,7 +460,18 @@ export class SwarmChannel implements IChannel {
       ? docId
       : this.findParentDriveId(docId);
 
-    if (driveId) {
+    // When a drive is being deleted, the reactor pushes a DELETE_DOCUMENT
+    // op for the drive. The connect-side delete handler (reactor.ts) has
+    // already fired its cleanup (clearDriveManifest + removeDriveFromUserManifest)
+    // by this point — running updateDriveAndUserManifests here would RACE with
+    // that cleanup and silently re-add the drive back into both manifests
+    // (confirmed in live logs). Skip the manifest update entirely for
+    // DELETE_DOCUMENT pushes of drive docs.
+    const isDriveDelete =
+      docType === "powerhouse/document-drive" &&
+      ops.some((op: any) => op.operation?.action?.type === "DELETE_DOCUMENT");
+
+    if (driveId && !isDriveDelete) {
       // Retry manifest update up to 2 times — manifest must be updated for
       // recovery to discover documents. Without it, ops are on Swarm but
       // unreachable during recovery.
@@ -672,6 +683,9 @@ export class SwarmChannel implements IChannel {
     // Discover docs from user manifest + drive manifests
     const docIds = new Set<string>();
     const docMeta = new Map<string, { documentType: string; scope: string }>();
+    // Parent-of-child-doc map so we can skip orphans when their parent
+    // drive turns out to have a DELETE_DOCUMENT in its history.
+    const childToDrive = new Map<string, string>();
 
     // Direct documents in user manifest
     for (const [docId, entry] of Object.entries(userManifest.documents ?? {}) as Array<[string, any]>) {
@@ -695,6 +709,7 @@ export class SwarmChannel implements IChannel {
               documentType: entry.documentType ?? "unknown",
               scope: "global",
             });
+            childToDrive.set(docId, driveId);
           }
         }
       } catch { /* drive manifest not available */ }
@@ -774,9 +789,24 @@ export class SwarmChannel implements IChannel {
     }
     const orderedDocIds = [...driveIds, ...childDocIds];
 
+    // Drives we've found to be deleted during this pull. Their child docs
+    // are skipped so we don't try to apply ADD_FILE / edit ops to a
+    // document that no longer exists (the reactor throws DocumentDeletedError
+    // and dead-letters every op otherwise).
+    const skippedDeletedDrives = new Set<string>();
+
     let newOpsCount = 0;
 
     for (const docId of orderedDocIds) {
+      // Orphan child of a drive we just decided to skip — don't pull it.
+      const parentDrive = childToDrive.get(docId);
+      if (parentDrive && skippedDeletedDrives.has(parentDrive)) {
+        this.logger.warn(
+          `[SwarmChannel] Skipping orphan child ${docId.slice(0, 8)} (parent drive ${parentDrive.slice(0, 8)} was deleted)`,
+        );
+        continue;
+      }
+
       try {
         const manifest = await client.readManifest(docId);
         if (!manifest || manifest.operationBatches.length === 0) continue;
@@ -866,6 +896,36 @@ export class SwarmChannel implements IChannel {
         this.logger.info(
           `[SwarmChannel] Pull doc ${docId.slice(0, 8)} (${docMeta.get(docId)?.documentType ?? "?"}): ${scopeSummary}`,
         );
+
+        // Self-heal: if a drive's document-scope history ends with DELETE_DOCUMENT,
+        // it was deleted in another session but the user manifest entry was never
+        // cleaned up (pre-1802479 behavior, or a race at delete time). Skip the
+        // drive entirely — no ops added to inbox — and clean up the manifest so
+        // future reloads don't try again.
+        const docTypeForId = docMeta.get(docId)?.documentType;
+        if (docTypeForId === "powerhouse/document-drive") {
+          const docScopeOps = byScope.get("document") ?? [];
+          const hasDelete = docScopeOps.some(
+            (op: any) => op.operation?.action?.type === "DELETE_DOCUMENT",
+          );
+          if (hasDelete) {
+            this.logger.warn(
+              `[SwarmChannel] Skipping deleted drive ${docId.slice(0, 8)} — running one-time cleanup`,
+            );
+            skippedDeletedDrives.add(docId);
+            try {
+              const { removeDriveFromUserManifest, clearDriveManifest } =
+                await import("./manifest-manager.js");
+              await clearDriveManifest(client, docId);
+              await removeDriveFromUserManifest(client, ownerAddress, docId);
+            } catch (err) {
+              this.logger.warn(
+                `[SwarmChannel] Cleanup failed for deleted drive ${docId.slice(0, 8)}: ${err instanceof Error ? err.message : err}`,
+              );
+            }
+            continue;
+          }
+        }
 
         for (const scope of scopeOrder) {
           const scopeOps = byScope.get(scope);
