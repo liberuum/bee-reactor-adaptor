@@ -119,14 +119,20 @@ export function useChat() {
     const myAddr = getMyAddress().toLowerCase();
     const manager = getManager();
 
-    // Collect all peers from both sessions and stored messages
+    // Collect all peers from both sessions and stored messages.
+    // Skip our own address — a prior bug could self-record us as a peer
+    // via the broadcast-topic echo; defensive filter so stale localStorage
+    // or manifest entries don't resurface an "I'm talking to myself" card.
     const allPeers = new Set<string>();
+    const isSelf = (addr: string) => addr.toLowerCase() === myAddr;
     if (manager) {
       const sessions = manager.listSessions() as ChatSession[];
-      sessions.forEach((s: ChatSession) => allPeers.add(s.peerAddress));
+      sessions.forEach((s: ChatSession) => {
+        if (!isSelf(s.peerAddress)) allPeers.add(s.peerAddress);
+      });
     }
     for (const peer of messagesRef.current.keys()) {
-      allPeers.add(peer);
+      if (!isSelf(peer)) allPeers.add(peer);
     }
 
     const summaries: ConversationSummary[] = [...allPeers].map((peerAddr) => {
@@ -337,33 +343,68 @@ export function useChat() {
     setActivePeer(peerAddress);
     setView("thread");
     setIsOpeningConversation(true);
+    // Mark as read IMMEDIATELY on click — don't wait for startSession to
+    // resolve (can be 1-3s on first open). Otherwise the sidebar unread
+    // badge lingers while the user is already looking at the thread, and
+    // if startSession throws the badge never clears at all.
+    markRead(peerAddress);
+    refreshConversations();
 
     try {
       const session = await manager.startSession(peerAddress, { skipGsoc: true });
       setIsOpeningConversation(false);
-      markRead(peerAddress);
-      refreshConversations();
 
       // Hydrate latest page from Swarm feeds (both parties) — non-blocking.
       // Use an epoch counter so a stale hydration that resolves after the
       // user switched conversations doesn't clobber the spinner / pagination
       // state of the newly active thread.
       const epoch = ++hydrationEpochRef.current;
+      // Capture BEFORE the async pull — if the bucket is empty now, this is
+      // a fresh-browser recovery and we want to auto-paginate back to the
+      // beginning of history. On re-opens we already have everything locally
+      // and should respect the 3-page default to stay fast.
+      const wasEmptyLocally =
+        (messagesRef.current.get(peerAddress) ?? []).length === 0;
       setIsHydrating(true);
       setHasMoreHistory(false);
       (async () => {
         try {
           const loaded = await manager.loadHistoryLatest(session, 3);
-          cursorsRef.current.set(peerAddress, loaded.cursor);
+          let cursor = loaded.cursor;
+          let hasMore = loaded.hasMore;
+          cursorsRef.current.set(peerAddress, cursor);
 
           if (loaded.messages.length === 0) {
             console.log(`[Chat] No history found on feeds for ${peerAddress.slice(0, 10)}`);
           } else {
             mergeMessages(peerAddress, loaded.messages);
-            console.log(`[Chat] Hydrated ${loaded.messages.length} msg(s) from feeds (hasMore=${loaded.hasMore})`);
+            console.log(`[Chat] Hydrated ${loaded.messages.length} msg(s) from feeds (hasMore=${hasMore})`);
           }
 
-          if (hydrationEpochRef.current === epoch) setHasMoreHistory(loaded.hasMore);
+          // Fresh-browser recovery: walk the rest of history automatically
+          // so the user sees the full conversation on first open. Bounded
+          // by MAX_AUTO_PAGES to cap worst-case cost on very long threads
+          // (remaining older pages stay available via scroll-to-load-more).
+          if (wasEmptyLocally && hasMore) {
+            const MAX_AUTO_PAGES = 50;
+            let pagesPulled = 0;
+            while (hasMore && pagesPulled < MAX_AUTO_PAGES) {
+              if (hydrationEpochRef.current !== epoch) return;
+              const more = await manager.loadHistoryOlder(session, cursor, 5);
+              pagesPulled++;
+              cursor = more.cursor;
+              hasMore = more.hasMore;
+              cursorsRef.current.set(peerAddress, cursor);
+              if (more.messages.length > 0) mergeMessages(peerAddress, more.messages);
+            }
+            if (pagesPulled > 0) {
+              console.log(
+                `[Chat] Auto-paginated ${pagesPulled} older batch(es) on fresh-browser recovery`,
+              );
+            }
+          }
+
+          if (hydrationEpochRef.current === epoch) setHasMoreHistory(hasMore);
         } catch (err) {
           console.warn("[Chat] History hydration failed:", err);
         } finally {

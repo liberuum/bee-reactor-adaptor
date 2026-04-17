@@ -112,14 +112,22 @@ export class ChatHistory {
 
   /**
    * Load the latest N pages from a feed owner.
-   * Returns messages (newest-last) + cursor for loading older.
+   *
+   * The feed TOPIC is always the sorted-pair topic derived from (my, peer) —
+   * symmetric, same on both sides. Only the feed OWNER differs: my own feed
+   * is owned by me (stores messages I sent), peer's feed is owned by peer
+   * (stores messages they sent). A previous version of this function used
+   * `historyTopic(myAddress, feedOwner)` which produced a self-self topic
+   * when reading my own feed, so recovery always 404'd on it — writes went
+   * to the pair topic, reads looked up a different topic that never existed.
    */
   async loadLatestPages(
     feedOwner: string,
+    peerAddress: string,
     publisherBeeNodePubKey: string,
     pageCount: number,
   ): Promise<{ messages: ChatMessage[]; cursor: FeedCursor }> {
-    const topic = Topic.fromString(historyTopic(this.myAddress, feedOwner));
+    const topic = Topic.fromString(historyTopic(this.myAddress, peerAddress));
     const ownerNormalized = feedOwner.replace(/^0x/i, "").toLowerCase();
 
     // Step 1: Get the latest feed index
@@ -137,6 +145,7 @@ export class ChatHistory {
    */
   async loadOlderPages(
     feedOwner: string,
+    peerAddress: string,
     publisherBeeNodePubKey: string,
     cursor: FeedCursor,
     pageCount: number,
@@ -144,7 +153,7 @@ export class ChatHistory {
     if (cursor.nextIndex === null) {
       return { messages: [], cursor: { nextIndex: null } };
     }
-    const topic = Topic.fromString(historyTopic(this.myAddress, feedOwner));
+    const topic = Topic.fromString(historyTopic(this.myAddress, peerAddress));
     const ownerNormalized = feedOwner.replace(/^0x/i, "").toLowerCase();
     return this.loadPages(topic, ownerNormalized, publisherBeeNodePubKey, cursor.nextIndex, pageCount);
   }
@@ -160,8 +169,8 @@ export class ChatHistory {
     pageCount: number,
   ): Promise<LoadedHistory> {
     const [mine, peer] = await Promise.all([
-      this.loadLatestPages(this.myAddress, myBeeNodePubKey, pageCount),
-      this.loadLatestPages(peerAddress, peerBeeNodePubKey, pageCount),
+      this.loadLatestPages(this.myAddress, peerAddress, myBeeNodePubKey, pageCount),
+      this.loadLatestPages(peerAddress, peerAddress, peerBeeNodePubKey, pageCount),
     ]);
 
     const merged = this.mergeAndSort([...mine.messages, ...peer.messages]);
@@ -183,8 +192,8 @@ export class ChatHistory {
     pageCount: number,
   ): Promise<LoadedHistory> {
     const [mine, peer] = await Promise.all([
-      this.loadOlderPages(this.myAddress, myBeeNodePubKey, cursor.mine, pageCount),
-      this.loadOlderPages(peerAddress, peerBeeNodePubKey, cursor.peer, pageCount),
+      this.loadOlderPages(this.myAddress, peerAddress, myBeeNodePubKey, cursor.mine, pageCount),
+      this.loadOlderPages(peerAddress, peerAddress, peerBeeNodePubKey, cursor.peer, pageCount),
     ]);
 
     const merged = this.mergeAndSort([...mine.messages, ...peer.messages]);
@@ -223,12 +232,24 @@ export class ChatHistory {
     let loaded = 0;
 
     while (loaded < pageCount && currentIndex >= 0) {
+      // Two distinct failure modes here — treating them the same way is
+      // what caused recovery to stall on bad pages:
+      //   1) downloadReference throws → feed boundary reached (no index
+      //      at or below currentIndex exists). Correct to break.
+      //   2) downloadFile throws → feed index exists but the /bzz chunk
+      //      isn't retrievable (sender hasn't propagated, ACT grant
+      //      missing, 2.7.x Bee can't fetch yet). Skip the page and keep
+      //      walking — older pages may still be retrievable.
+      let ref: string;
       try {
         const feedIndex = FeedIndex.fromBigInt(BigInt(currentIndex));
         const result = await reader.downloadReference({ index: feedIndex });
-        const ref = result.reference.toHex();
+        ref = result.reference.toHex();
+      } catch {
+        break; // case 1 — feed boundary
+      }
 
-        // Download page via /bzz (ACT-aware)
+      try {
         const data = await this.client.downloadFile(ref, {
           actPublisher: publisherBeeNodePubKey,
           skipDecryption: true,
@@ -239,8 +260,7 @@ export class ChatHistory {
         }
         loaded++;
       } catch {
-        // Index doesn't exist — stop
-        break;
+        // case 2 — page unavailable, don't count it but keep walking
       }
       currentIndex--;
     }

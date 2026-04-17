@@ -8,6 +8,107 @@ import { installEventHandlers, emitSwarmEvent } from "./events.js";
 const FEED_TOPIC_PREFIX = "ph:v2";
 /** Idempotency guard — prevents double-init on HMR or duplicate processor registration */
 let initPromise;
+/**
+ * (Re)build the ChatManager and wire it onto window.ph.swarm.chat.
+ *
+ * Called from both the initial plugin init and from reconnect (Bee URL
+ * change). Without the reconnect call the chat panel shows "Chat is not
+ * ready yet" after a URL switch because ph.swarm is overwritten by
+ * freshPlugin.start() and ph.swarm.chat is never re-populated, even
+ * though the underlying SwarmClient is healthy.
+ */
+async function initChatManager(beeUrl, plugin, stampBatchId) {
+    const phAfterStart = globalThis.window?.ph;
+    const swarmClient = phAfterStart?.swarm?.client;
+    if (!swarmClient || !plugin.getSignerEntry())
+        return;
+    try {
+        // Shutdown any previous ChatManager to prevent duplicate PSS subscriptions.
+        // Happens on reconnect, Bee URL change, or HMR.
+        const prevChat = phAfterStart?.swarm?.chat?.manager;
+        if (prevChat && typeof prevChat.shutdown === "function") {
+            try {
+                prevChat.shutdown();
+                console.log("[SwarmPlugin] Old ChatManager shut down");
+            }
+            catch (err) {
+                console.warn("[SwarmPlugin] Old ChatManager shutdown failed:", err);
+            }
+        }
+        const { Bee } = await import("@ethersphere/bee-js");
+        const bee = new Bee(beeUrl);
+        const ownerAddress = swarmClient.getOwnerAddress();
+        const chatManager = new ChatManager(swarmClient, bee, stampBatchId, ownerAddress);
+        if (phAfterStart.swarm) {
+            phAfterStart.swarm.chat = { manager: chatManager };
+        }
+        // Persist incoming messages to localStorage at the plugin level.
+        // This runs even when the chat panel is CLOSED, so the unread badge
+        // on the sidebar can reflect new messages, and history survives
+        // across app restarts.
+        chatManager.onMessage((msg) => {
+            console.log(`[Chat] Message from ${msg.from.slice(0, 10)}: ${msg.text.slice(0, 50)}`);
+            try {
+                const raw = localStorage.getItem("swarm:chatMessages");
+                const entries = raw ? JSON.parse(raw) : [];
+                const map = new Map(entries);
+                const peerKey = msg.from;
+                const existing = map.get(peerKey) ?? [];
+                if (existing.some((m) => m.id === msg.id))
+                    return;
+                const updated = [...existing, msg].slice(-100);
+                map.set(peerKey, updated);
+                localStorage.setItem("swarm:chatMessages", JSON.stringify([...map]));
+                window.dispatchEvent(new CustomEvent("swarm:chatMessages:updated"));
+            }
+            catch (err) {
+                console.warn("[Chat] Failed to persist message:", err instanceof Error ? err.message : err);
+            }
+        });
+        console.log("[SwarmPlugin] ChatManager initialized");
+        // Sync chat peers between localStorage and the Swarm user manifest.
+        try {
+            const raw = localStorage.getItem("swarm:chatMessages");
+            const localEntries = raw ? JSON.parse(raw) : [];
+            const localPeers = new Set(localEntries
+                .map(([peerAddress]) => peerAddress?.toLowerCase?.())
+                .filter((p) => typeof p === "string" && p.startsWith("0x")));
+            const { ensureChatPeerInUserManifest } = await import("../channel/manifest-manager.js");
+            let seeded = 0;
+            for (const peer of localPeers) {
+                try {
+                    await ensureChatPeerInUserManifest(swarmClient, ownerAddress, peer);
+                    seeded++;
+                }
+                catch { /* best effort per peer */ }
+            }
+            if (seeded > 0) {
+                console.log(`[SwarmPlugin] Seeded ${seeded} chat peer(s) into user manifest from localStorage`);
+            }
+            const remotePeers = await chatManager.listKnownChatPeers();
+            const toRecover = remotePeers.filter((p) => !localPeers.has(p.toLowerCase()));
+            if (toRecover.length > 0) {
+                const map = new Map(localEntries);
+                for (const peer of toRecover) {
+                    if (!map.has(peer))
+                        map.set(peer, []);
+                }
+                try {
+                    localStorage.setItem("swarm:chatMessages", JSON.stringify([...map]));
+                    window.dispatchEvent(new CustomEvent("swarm:chatMessages:updated"));
+                }
+                catch { /* localStorage full or unavailable */ }
+                console.log(`[SwarmPlugin] Recovered ${toRecover.length} chat peer(s) from user manifest`);
+            }
+        }
+        catch (err) {
+            console.warn("[SwarmPlugin] Chat-peer sync failed:", err instanceof Error ? err.message : err);
+        }
+    }
+    catch (err) {
+        console.warn("[SwarmPlugin] ChatManager init failed:", err instanceof Error ? err.message : err);
+    }
+}
 // ═══════════════════════════════════════════════════════════════
 // Processor Builder (the single export consumed by index.ts)
 // ═══════════════════════════════════════════════════════════════
@@ -303,109 +404,7 @@ export async function initSwarmPlugin() {
     // plugin.start() overwrites ph.swarm — apply all our custom fields
     applySwarmExtensions(globalThis.window?.ph, isDevMode);
     // Initialize ChatManager (PSS + GSOC + ACT history)
-    const phAfterStart = globalThis.window?.ph;
-    const swarmClient = phAfterStart?.swarm?.client;
-    if (swarmClient && plugin.getSignerEntry()) {
-        try {
-            // Shutdown any previous ChatManager to prevent duplicate PSS subscriptions.
-            // Happens when the plugin re-initializes (reconnect, Bee URL change, HMR).
-            const prevChat = phAfterStart?.swarm?.chat?.manager;
-            if (prevChat && typeof prevChat.shutdown === "function") {
-                try {
-                    prevChat.shutdown();
-                    console.log("[SwarmPlugin] Old ChatManager shut down");
-                }
-                catch (err) {
-                    console.warn("[SwarmPlugin] Old ChatManager shutdown failed:", err);
-                }
-            }
-            const { Bee } = await import("@ethersphere/bee-js");
-            const bee = new Bee(state.beeUrl);
-            const ownerAddress = swarmClient.getOwnerAddress();
-            const chatManager = new ChatManager(swarmClient, bee, usableStamp.batchID, ownerAddress);
-            if (phAfterStart.swarm) {
-                phAfterStart.swarm.chat = {
-                    manager: chatManager,
-                };
-            }
-            // Persist incoming messages to localStorage at the plugin level.
-            // This runs even when the chat panel is CLOSED, so the unread badge
-            // on the sidebar can reflect new messages, and history survives
-            // across app restarts.
-            chatManager.onMessage((msg) => {
-                console.log(`[Chat] Message from ${msg.from.slice(0, 10)}: ${msg.text.slice(0, 50)}`);
-                try {
-                    const raw = localStorage.getItem("swarm:chatMessages");
-                    const entries = raw ? JSON.parse(raw) : [];
-                    const map = new Map(entries);
-                    const peerKey = msg.from; // conversations are keyed by peer address
-                    const existing = map.get(peerKey) ?? [];
-                    // Dedupe by message ID
-                    if (existing.some((m) => m.id === msg.id))
-                        return;
-                    const updated = [...existing, msg].slice(-100); // keep last 100
-                    map.set(peerKey, updated);
-                    localStorage.setItem("swarm:chatMessages", JSON.stringify([...map]));
-                    window.dispatchEvent(new CustomEvent("swarm:chatMessages:updated"));
-                }
-                catch (err) {
-                    console.warn("[Chat] Failed to persist message:", err instanceof Error ? err.message : err);
-                }
-            });
-            console.log("[SwarmPlugin] ChatManager initialized");
-            // Sync chat peers between localStorage (local conversations) and
-            // the Swarm user manifest (cross-browser recovery). Runs on EVERY
-            // plugin init regardless of whether the chat panel is opened —
-            // previously this logic only ran from use-chat.ts's subscribe hook,
-            // so a user who never clicked the chat icon on their main browser
-            // never had their peers persisted, and a fresh browser had to open
-            // chat before seeing any conversations.
-            try {
-                const raw = localStorage.getItem("swarm:chatMessages");
-                const localEntries = raw ? JSON.parse(raw) : [];
-                const localPeers = new Set(localEntries
-                    .map(([peerAddress]) => peerAddress?.toLowerCase?.())
-                    .filter((p) => typeof p === "string" && p.startsWith("0x")));
-                const { ensureChatPeerInUserManifest } = await import("../channel/manifest-manager.js");
-                // (1) Push any local peers up to the Swarm manifest.
-                let seeded = 0;
-                for (const peer of localPeers) {
-                    try {
-                        await ensureChatPeerInUserManifest(swarmClient, ownerAddress, peer);
-                        seeded++;
-                    }
-                    catch { /* best effort per peer */ }
-                }
-                if (seeded > 0) {
-                    console.log(`[SwarmPlugin] Seeded ${seeded} chat peer(s) into user manifest from localStorage`);
-                }
-                // (2) Pull any manifest-recorded peers that we don't have locally
-                // (fresh-browser recovery), write empty buckets to localStorage so
-                // the conversation list shows up as soon as the chat panel opens.
-                const remotePeers = await chatManager.listKnownChatPeers();
-                const toRecover = remotePeers.filter((p) => !localPeers.has(p.toLowerCase()));
-                if (toRecover.length > 0) {
-                    const map = new Map(localEntries);
-                    for (const peer of toRecover) {
-                        if (!map.has(peer))
-                            map.set(peer, []);
-                    }
-                    try {
-                        localStorage.setItem("swarm:chatMessages", JSON.stringify([...map]));
-                        window.dispatchEvent(new CustomEvent("swarm:chatMessages:updated"));
-                    }
-                    catch { /* localStorage full or unavailable */ }
-                    console.log(`[SwarmPlugin] Recovered ${toRecover.length} chat peer(s) from user manifest`);
-                }
-            }
-            catch (err) {
-                console.warn("[SwarmPlugin] Chat-peer sync failed:", err instanceof Error ? err.message : err);
-            }
-        }
-        catch (err) {
-            console.warn("[SwarmPlugin] ChatManager init failed:", err instanceof Error ? err.message : err);
-        }
-    }
+    await initChatManager(state.beeUrl, plugin, usableStamp.batchID);
     console.log("[SwarmPlugin] Initialized");
 }
 // ═══════════════════════════════════════════════════════════════
@@ -614,6 +613,10 @@ function applySwarmExtensions(ph, isDevMode) {
             applySwarmExtensions(ph, freshIsDevMode);
             if (ph.swarm)
                 ph.swarm.plugin = freshPlugin;
+            // Re-create the ChatManager against the new Bee/client — without this
+            // the chat panel stays on "Chat is not ready yet" after a URL switch
+            // because ph.swarm.chat was wiped by freshPlugin.start().
+            await initChatManager(state.beeUrl, freshPlugin, freshStamp.batchID);
             console.log("[SwarmPlugin] Reconnected successfully");
         }
         catch (err) {

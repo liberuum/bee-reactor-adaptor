@@ -119,26 +119,13 @@ export class SwarmClient {
       tag = created.uid;
     }
 
-    let result;
-    try {
-      result = await this.bee.uploadData(this.batchId, payload, {
-        act: options?.act,
-        actHistoryAddress: options?.actHistoryAddress,
-        redundancyLevel: options?.redundancyLevel,
-        tag,
-        deferred: options?.deferred,
-      });
-    } catch (err: any) {
-      // Diagnostic: the app has hit "batch with id not found" with a stamp
-      // that responds 201 when curled directly. Log the exact batchId the
-      // client is passing to bee-js so we can compare byte-for-byte.
-      if (err?.status === 404 || /batch with id not found/i.test(String(err?.responseBody ?? err?.message ?? ""))) {
-        console.warn(
-          `[SwarmClient] uploadData(/bytes) 404 with batchId=${JSON.stringify(this.batchId)} (type=${typeof this.batchId}, length=${(this.batchId as string)?.length})`,
-        );
-      }
-      throw err;
-    }
+    const result = await this.bee.uploadData(this.batchId, payload, {
+      act: options?.act,
+      actHistoryAddress: options?.actHistoryAddress,
+      redundancyLevel: options?.redundancyLevel,
+      tag,
+      deferred: options?.deferred,
+    });
     const historyRef = (result.historyAddress as any)?.value ?? result.historyAddress;
     return {
       reference: result.reference.toHex(),
@@ -218,6 +205,10 @@ export class SwarmClient {
       payload = await encrypt(data, this.encryptionKey);
     }
 
+    // Upload as a single file with fixed name "data.bin". Must be
+    // downloaded with that exact path — GET /bzz/{ref}/ without a path
+    // returns 404 since uploadFile (unlike uploadCollection) doesn't
+    // support indexDocument. downloadFile below always passes "data.bin".
     const result = await this.bee.uploadFile(this.batchId, payload, "data.bin", {
       act: options?.act,
       actHistoryAddress: options?.actHistoryAddress,
@@ -246,7 +237,11 @@ export class SwarmClient {
       skipDecryption?: boolean;
     },
   ): Promise<Uint8Array> {
-    const result = await this.bee.downloadFile(reference, "", {
+    // Pass "data.bin" as path so manifests without an explicit
+    // indexDocument (older uploads from before the fix) still resolve.
+    // New uploads set indexDocument so either path works, but this keeps
+    // us backwards-compatible with data already on Swarm.
+    const result = await this.bee.downloadFile(reference, "data.bin", {
       actPublisher: options?.actPublisher,
       actHistoryAddress: options?.actHistoryAddress,
       actTimestamp: options?.actTimestamp,

@@ -32,6 +32,13 @@ export class ChatManager {
         // subscribe to the direct topic so we receive their messages.
         this.pss.subscribeAll({
             onMessage: (message) => {
+                // Ignore our own broadcast pings. The broadcast topic is shared by
+                // everyone, so our outgoing "here's a new conversation from me"
+                // ping can echo back through our own Bee node. Without this guard
+                // the echo would create a session with ourselves as peer and the
+                // conversation list would show our own Swarm ID as an entry.
+                if (message.from.toLowerCase() === this.myAddress.toLowerCase())
+                    return;
                 // Deduplicate SYNCHRONOUSLY. Bee may re-serve the same cached chunk
                 // multiple times in rapid succession; if we wait until after the
                 // async startSession to mark it seen, parallel deliveries all race
@@ -86,7 +93,14 @@ export class ChatManager {
             peerAddress: peerSignerAddress,
             peerOverlay: profile.overlayAddress,
             peerBeeNodePubKey: profile.beeNodePublicKey,
-            peerDisplayName: profile.ethAddress,
+            // Leaving peerDisplayName unset — the UI falls back to the Swarm
+            // signer address (peerAddress) which is what users actually copy
+            // from "Your Swarm ID" and paste into "New conversation". Using
+            // profile.ethAddress here caused the list card to show the peer's
+            // wallet while the thread header showed the signer — two different
+            // 0x… addresses for the same person, confusing on sight. If we
+            // want a friendlier label (ENS resolve, pet name) later, set it
+            // here to that resolved value — never the raw ethAddress.
             pssTopic: chatTopic(this.myAddress, peerSignerAddress),
             historyTopic: historyTopic(this.myAddress, peerSignerAddress),
             ready: false,
@@ -146,7 +160,13 @@ export class ChatManager {
         try {
             const manifest = await this.client.readUserManifest(this.myAddress);
             const peers = manifest?.chatPeers ?? [];
-            return peers.map((p) => p.toLowerCase());
+            const myAddr = this.myAddress.toLowerCase();
+            // Filter out our own address if a prior bug (pre-broadcast-echo-guard)
+            // recorded it as a peer. Keeps the conversation list clean without
+            // requiring users to manually purge their manifest.
+            return peers
+                .map((p) => p.toLowerCase())
+                .filter((p) => p !== myAddr);
         }
         catch (err) {
             console.warn("[Chat] Could not read known chat peers:", err instanceof Error ? err.message : err);

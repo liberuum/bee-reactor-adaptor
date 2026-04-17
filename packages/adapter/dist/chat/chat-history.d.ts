@@ -38,16 +38,23 @@ export declare class ChatHistory {
     writePage(peerAddress: string, messages: ChatMessage[], peerBeeNodePubKey: string): Promise<void>;
     /**
      * Load the latest N pages from a feed owner.
-     * Returns messages (newest-last) + cursor for loading older.
+     *
+     * The feed TOPIC is always the sorted-pair topic derived from (my, peer) —
+     * symmetric, same on both sides. Only the feed OWNER differs: my own feed
+     * is owned by me (stores messages I sent), peer's feed is owned by peer
+     * (stores messages they sent). A previous version of this function used
+     * `historyTopic(myAddress, feedOwner)` which produced a self-self topic
+     * when reading my own feed, so recovery always 404'd on it — writes went
+     * to the pair topic, reads looked up a different topic that never existed.
      */
-    loadLatestPages(feedOwner: string, publisherBeeNodePubKey: string, pageCount: number): Promise<{
+    loadLatestPages(feedOwner: string, peerAddress: string, publisherBeeNodePubKey: string, pageCount: number): Promise<{
         messages: ChatMessage[];
         cursor: FeedCursor;
     }>;
     /**
      * Load older pages starting from a cursor (continuation from previous load).
      */
-    loadOlderPages(feedOwner: string, publisherBeeNodePubKey: string, cursor: FeedCursor, pageCount: number): Promise<{
+    loadOlderPages(feedOwner: string, peerAddress: string, publisherBeeNodePubKey: string, cursor: FeedCursor, pageCount: number): Promise<{
         messages: ChatMessage[];
         cursor: FeedCursor;
     }>;
