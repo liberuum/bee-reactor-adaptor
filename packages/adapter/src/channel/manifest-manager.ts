@@ -71,6 +71,8 @@ async function readUserManifestCached(
 /**
  * Persist the user manifest to Swarm AND update our in-process cache so
  * the next queued call reads the fresh value instead of Swarm's stale one.
+ * Also syncs the UI cache at window.ph.swarm.userManifest so the Settings
+ * panel (which reads that cache directly) reflects adds/removes immediately.
  */
 async function writeUserManifestAndCache(
   client: SwarmClient,
@@ -79,6 +81,19 @@ async function writeUserManifestAndCache(
 ): Promise<void> {
   await client.updateUserManifest(ownerAddress, manifest);
   userManifestCache.set(ownerAddress.toLowerCase(), manifest);
+  // Sync the Settings UI cache. Hydration populates this once on startup
+  // but never prunes it — without this sync, Settings → Swarm Storage
+  // keeps showing drives we just removed.
+  try {
+    const ph = (globalThis as any).window?.ph;
+    if (ph?.swarm) {
+      ph.swarm.userManifest = {
+        ...manifest,
+        // Preserve any UI-only fields that hydration tacked on
+        driveManifests: ph.swarm.userManifest?.driveManifests,
+      };
+    }
+  } catch { /* best effort — not running in a browser */ }
 }
 
 function enqueueUserManifestWrite<T>(
