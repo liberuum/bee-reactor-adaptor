@@ -336,6 +336,12 @@ export async function createReactor(localPackage?: DocumentModelLib) {
     }
     clearInterval(pollSwarmEvents);
 
+    // Set of driveIds we've already triggered a recovery pull for in this
+    // browser session — guards the retry loop from re-firing pulls every
+    // 3s for the same drive (the pull itself is idempotent via
+    // processedBatches, but re-running is wasteful and noisy).
+    const pulledRecoveryDrives = new Set<string>();
+
     // Define registerSwarmRemotes before event handlers that reference it.
     // Register Swarm remotes for drives — includes Swarm discovery + recovery.
     const registerSwarmRemotes = async () => {
@@ -442,34 +448,36 @@ export async function createReactor(localPackage?: DocumentModelLib) {
         }
       }
 
-      // Only log + trigger recovery when we actually register NEW remotes.
-      // New drives created mid-session are handled by the drive-change
-      // "created" event listener (subscribe on line ~222), not this loop.
       if (registered > 0) {
         console.log(`[SwarmChannel] Registered ${registered} new Swarm remote(s):`, driveIds.map((id: string) => id.slice(0, 8)));
+      }
 
-        // Trigger recovery pull for any drives that exist on Swarm but NOT
-        // locally — this covers both the "no local drives" fresh-install
-        // case and the "some drives here, others on Swarm" partial case.
-        const phAny = window.ph as any;
-        if (swarmOnlyDriveIds.length > 0 && !phAny?._skipSwarmRecovery) {
-          console.log(
-            `[SwarmChannel] Recovery mode — pulling ${swarmOnlyDriveIds.length} Swarm-only drive(s)`,
-          );
-          const swarmOnlySet = new Set(
-            swarmOnlyDriveIds.map((id) => `swarm:${id}`),
-          );
-          const remotes = sm.list();
-          for (const remote of remotes) {
-            if (!swarmOnlySet.has(remote.name)) continue;
-            if ((remote.channel as any)?.pullFromSwarm) {
-              (remote.channel as any).pullFromSwarm().catch(() => {});
-            }
+      // Trigger recovery pull for every Swarm-only drive regardless of
+      // whether we just registered it fresh or the remote was already
+      // persisted in sync_remotes from a prior session. A persisted
+      // remote whose local drive was wiped (e.g. user cleared PGlite,
+      // or the ops were never fully applied) still needs its inbox
+      // pulled to re-materialize the drive in the reactor. Guarded by
+      // pulledRecoveryDrives so the 3s retry loop doesn't re-fire pulls.
+      const phAny = window.ph as any;
+      const needPull = swarmOnlyDriveIds.filter((id) => !pulledRecoveryDrives.has(id));
+      if (needPull.length > 0 && !phAny?._skipSwarmRecovery) {
+        console.log(
+          `[SwarmChannel] Recovery mode — pulling ${needPull.length} Swarm-only drive(s):`,
+          needPull.map((id) => id.slice(0, 8)),
+        );
+        const swarmOnlySet = new Set(needPull.map((id) => `swarm:${id}`));
+        const remotes = sm.list();
+        for (const remote of remotes) {
+          if (!swarmOnlySet.has(remote.name)) continue;
+          if ((remote.channel as any)?.pullFromSwarm) {
+            (remote.channel as any).pullFromSwarm().catch(() => {});
           }
-        } else if (phAny?._skipSwarmRecovery) {
-          console.log("[SwarmChannel] Skipping recovery — storage was just cleared");
-          phAny._skipSwarmRecovery = false;
         }
+        for (const id of needPull) pulledRecoveryDrives.add(id);
+      } else if (phAny?._skipSwarmRecovery) {
+        console.log("[SwarmChannel] Skipping recovery — storage was just cleared");
+        phAny._skipSwarmRecovery = false;
       }
 
       // "Done" when every discovered drive is accounted for (registered or
