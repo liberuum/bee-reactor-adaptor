@@ -623,22 +623,37 @@ export class SwarmChannel implements IChannel {
    * re-downloading and re-applying the same operations.
    */
   async pullFromSwarm(): Promise<boolean> {
-    if (this.isShutdown || !this.swarmClient) return false;
+    if (this.isShutdown || !this.swarmClient) {
+      this.logger.warn(
+        `[SwarmChannel] pullFromSwarm early-exit: isShutdown=${this.isShutdown} swarmClient=${!!this.swarmClient}`,
+      );
+      return false;
+    }
 
     this.recoveryInProgress = true;
 
     const client = this.swarmClient;
     const ownerAddress = this.config.ownerAddress;
+    this.logger.info(
+      `[SwarmChannel] pullFromSwarm start for ${this.remoteName} (owner=${ownerAddress.slice(0, 10)})`,
+    );
 
     // Read user manifest to discover documents
     let userManifest: any;
     try {
       userManifest = await client.readUserManifest(ownerAddress);
-    } catch {
-      // User manifest not found — nothing to pull
+    } catch (err) {
+      this.logger.warn(
+        `[SwarmChannel] pullFromSwarm: readUserManifest threw: ${err instanceof Error ? err.message : err}`,
+      );
       return false;
     }
-    if (!userManifest) return false;
+    if (!userManifest) {
+      this.logger.warn(
+        `[SwarmChannel] pullFromSwarm: user manifest is null for owner=${ownerAddress.slice(0, 10)}`,
+      );
+      return false;
+    }
 
     // Discover docs from user manifest + drive manifests
     const docIds = new Set<string>();
@@ -671,7 +686,16 @@ export class SwarmChannel implements IChannel {
       } catch { /* drive manifest not available */ }
     }
 
-    if (docIds.size === 0) return false;
+    if (docIds.size === 0) {
+      this.logger.warn(
+        `[SwarmChannel] pullFromSwarm: no docs in user manifest (drives=${Object.keys(userManifest.drives ?? {}).length}, docs=${Object.keys(userManifest.documents ?? {}).length})`,
+      );
+      return false;
+    }
+
+    this.logger.info(
+      `[SwarmChannel] pullFromSwarm found ${docIds.size} doc(s) in manifest: ${[...docIds].map((id) => id.slice(0, 8)).join(", ")}`,
+    );
 
     // Filter out documents that already exist in the local reactor.
     // The outbox handles pushing local ops to Swarm — the inbox should
@@ -711,7 +735,12 @@ export class SwarmChannel implements IChannel {
       }
     }
 
-    if (docIds.size === 0) return false;
+    if (docIds.size === 0) {
+      this.logger.warn(
+        `[SwarmChannel] pullFromSwarm: all docs filtered out as local-present (nothing to recover)`,
+      );
+      return false;
+    }
 
     this.logger.info(
       `[SwarmChannel] Recovery: ${docIds.size} docs to pull: ${[...docIds].map(id => id.slice(0, 8)).join(", ")}`,
