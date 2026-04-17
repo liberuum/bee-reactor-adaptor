@@ -13,7 +13,7 @@
 import type { SwarmClient } from "../swarm-client.js";
 /**
  * Ensure the user manifest contains a drive entry.
- * Creates or updates the entry. Debounced writes via the SwarmClient.
+ * Serialized per-owner so concurrent drives can't race on the manifest.
  */
 export declare function ensureDriveInUserManifest(client: SwarmClient, ownerAddress: string, driveId: string, driveName: string, preferredEditor?: string): Promise<void>;
 /**

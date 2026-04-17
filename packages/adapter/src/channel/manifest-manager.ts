@@ -24,8 +24,42 @@ import type {
 // ═══════════════════════════════════════════════════════════════
 
 /**
+ * Per-owner promise chain used to serialize user-manifest read-modify-writes.
+ *
+ * Without this, two SwarmChannels pushing concurrently (e.g. two drives each
+ * finishing their first push around the same time) would both read the same
+ * old manifest, each append their own drive, and each write — the second
+ * write clobbers the first, silently dropping a drive from the manifest.
+ * Recovery in another browser then only sees one drive.
+ *
+ * This mutex only guards against same-process races. True cross-browser
+ * writes to the same owner's feed are still last-writer-wins, but that's a
+ * different problem — for a single wallet used in one browser at a time,
+ * this fix is sufficient.
+ */
+const userManifestWriteChains = new Map<string, Promise<unknown>>();
+
+function enqueueUserManifestWrite<T>(
+  ownerAddress: string,
+  op: () => Promise<T>,
+): Promise<T> {
+  const key = ownerAddress.toLowerCase();
+  const prev = userManifestWriteChains.get(key) ?? Promise.resolve();
+  const next = prev.catch(() => { /* swallow prior error to keep chain alive */ }).then(op);
+  // Keep the tail reference so subsequent enqueues chain onto this one
+  userManifestWriteChains.set(key, next);
+  // Clear the entry once this tail settles so the map doesn't grow
+  next.finally(() => {
+    if (userManifestWriteChains.get(key) === next) {
+      userManifestWriteChains.delete(key);
+    }
+  }).catch(() => { /* unhandled rejections are surfaced by the returned promise */ });
+  return next;
+}
+
+/**
  * Ensure the user manifest contains a drive entry.
- * Creates or updates the entry. Debounced writes via the SwarmClient.
+ * Serialized per-owner so concurrent drives can't race on the manifest.
  */
 export async function ensureDriveInUserManifest(
   client: SwarmClient,
@@ -34,44 +68,49 @@ export async function ensureDriveInUserManifest(
   driveName: string,
   preferredEditor?: string,
 ): Promise<void> {
-  let manifest = await client.readUserManifest(ownerAddress);
-  if (!manifest) {
-    manifest = {
-      address: ownerAddress,
-      documents: {},
-      drives: {},
-      stamps: {},
-      updatedAt: new Date().toISOString(),
+  return enqueueUserManifestWrite(ownerAddress, async () => {
+    // Re-read fresh INSIDE the critical section so that if another queued
+    // write landed between when this call was made and when the mutex
+    // unlocked, we merge on top of the latest state instead of stale.
+    let manifest = await client.readUserManifest(ownerAddress);
+    if (!manifest) {
+      manifest = {
+        address: ownerAddress,
+        documents: {},
+        drives: {},
+        stamps: {},
+        updatedAt: new Date().toISOString(),
+      };
+    }
+
+    const existing = manifest.drives[driveId];
+    const now = new Date().toISOString();
+
+    if (existing && existing.name === driveName && existing.preferredEditor === preferredEditor) {
+      // Already up to date — skip write, keep queue moving fast
+      return;
+    }
+
+    manifest.drives[driveId] = {
+      name: driveName || existing?.name || driveId,
+      documentIds: existing?.documentIds ?? [],
+      preferredEditor: preferredEditor ?? existing?.preferredEditor,
+      lastUpdated: now,
     };
-  }
 
-  const existing = manifest.drives[driveId];
-  const now = new Date().toISOString();
+    // Also add the drive as a "document" entry (for Settings UI compatibility)
+    manifest.documents[driveId] = {
+      documentType: "powerhouse/document-drive",
+      name: driveName,
+      driveId: "",
+      lastUpdated: now,
+    };
 
-  if (existing && existing.name === driveName && existing.preferredEditor === preferredEditor) {
-    // Already up to date
-    return;
-  }
+    manifest.updatedAt = now;
 
-  manifest.drives[driveId] = {
-    name: driveName || existing?.name || driveId,
-    documentIds: existing?.documentIds ?? [],
-    preferredEditor: preferredEditor ?? existing?.preferredEditor,
-    lastUpdated: now,
-  };
-
-  // Also add the drive as a "document" entry (for Settings UI compatibility)
-  manifest.documents[driveId] = {
-    documentType: "powerhouse/document-drive",
-    name: driveName,
-    driveId: "",
-    lastUpdated: now,
-  };
-
-  manifest.updatedAt = now;
-
-  await client.updateUserManifest(ownerAddress, manifest);
-  console.log(`[ManifestManager] User manifest updated: drive "${driveName}" (${driveId.slice(0, 8)})`);
+    await client.updateUserManifest(ownerAddress, manifest);
+    console.log(`[ManifestManager] User manifest updated: drive "${driveName}" (${driveId.slice(0, 8)}), total drives: ${Object.keys(manifest.drives).length}`);
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════
