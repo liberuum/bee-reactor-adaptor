@@ -353,6 +353,54 @@ export async function initSwarmPlugin() {
                 }
             });
             console.log("[SwarmPlugin] ChatManager initialized");
+            // Sync chat peers between localStorage (local conversations) and
+            // the Swarm user manifest (cross-browser recovery). Runs on EVERY
+            // plugin init regardless of whether the chat panel is opened —
+            // previously this logic only ran from use-chat.ts's subscribe hook,
+            // so a user who never clicked the chat icon on their main browser
+            // never had their peers persisted, and a fresh browser had to open
+            // chat before seeing any conversations.
+            try {
+                const raw = localStorage.getItem("swarm:chatMessages");
+                const localEntries = raw ? JSON.parse(raw) : [];
+                const localPeers = new Set(localEntries
+                    .map(([peerAddress]) => peerAddress?.toLowerCase?.())
+                    .filter((p) => typeof p === "string" && p.startsWith("0x")));
+                const { ensureChatPeerInUserManifest } = await import("../channel/manifest-manager.js");
+                // (1) Push any local peers up to the Swarm manifest.
+                let seeded = 0;
+                for (const peer of localPeers) {
+                    try {
+                        await ensureChatPeerInUserManifest(swarmClient, ownerAddress, peer);
+                        seeded++;
+                    }
+                    catch { /* best effort per peer */ }
+                }
+                if (seeded > 0) {
+                    console.log(`[SwarmPlugin] Seeded ${seeded} chat peer(s) into user manifest from localStorage`);
+                }
+                // (2) Pull any manifest-recorded peers that we don't have locally
+                // (fresh-browser recovery), write empty buckets to localStorage so
+                // the conversation list shows up as soon as the chat panel opens.
+                const remotePeers = await chatManager.listKnownChatPeers();
+                const toRecover = remotePeers.filter((p) => !localPeers.has(p.toLowerCase()));
+                if (toRecover.length > 0) {
+                    const map = new Map(localEntries);
+                    for (const peer of toRecover) {
+                        if (!map.has(peer))
+                            map.set(peer, []);
+                    }
+                    try {
+                        localStorage.setItem("swarm:chatMessages", JSON.stringify([...map]));
+                        window.dispatchEvent(new CustomEvent("swarm:chatMessages:updated"));
+                    }
+                    catch { /* localStorage full or unavailable */ }
+                    console.log(`[SwarmPlugin] Recovered ${toRecover.length} chat peer(s) from user manifest`);
+                }
+            }
+            catch (err) {
+                console.warn("[SwarmPlugin] Chat-peer sync failed:", err instanceof Error ? err.message : err);
+            }
         }
         catch (err) {
             console.warn("[SwarmPlugin] ChatManager init failed:", err instanceof Error ? err.message : err);
