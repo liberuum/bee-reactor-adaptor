@@ -16,6 +16,40 @@
  * this fix is sufficient.
  */
 const userManifestWriteChains = new Map();
+/**
+ * In-memory cache of the last-written user manifest per owner. Swarm feeds
+ * are eventually consistent — a feed read immediately after a feed write can
+ * still return the pre-write payload. Without this cache, serialized
+ * read-modify-writes would all read the same stale manifest and undo each
+ * other's changes (confirmed in live logs where two deleted drives both
+ * kept re-logging `remaining drives: 1`).
+ *
+ * The mutex guarantees these entries are only updated by the single call
+ * that's currently in the critical section.
+ */
+const userManifestCache = new Map();
+/**
+ * Read the user manifest, preferring our in-process cache from the last
+ * successful write. Falls back to Swarm when no cache entry exists.
+ */
+async function readUserManifestCached(client, ownerAddress) {
+    const key = ownerAddress.toLowerCase();
+    const cached = userManifestCache.get(key);
+    if (cached)
+        return cached;
+    const remote = await client.readUserManifest(ownerAddress);
+    if (remote)
+        userManifestCache.set(key, remote);
+    return remote;
+}
+/**
+ * Persist the user manifest to Swarm AND update our in-process cache so
+ * the next queued call reads the fresh value instead of Swarm's stale one.
+ */
+async function writeUserManifestAndCache(client, ownerAddress, manifest) {
+    await client.updateUserManifest(ownerAddress, manifest);
+    userManifestCache.set(ownerAddress.toLowerCase(), manifest);
+}
 function enqueueUserManifestWrite(ownerAddress, op) {
     const key = ownerAddress.toLowerCase();
     const prev = userManifestWriteChains.get(key) ?? Promise.resolve();
@@ -39,7 +73,7 @@ export async function ensureDriveInUserManifest(client, ownerAddress, driveId, d
         // Re-read fresh INSIDE the critical section so that if another queued
         // write landed between when this call was made and when the mutex
         // unlocked, we merge on top of the latest state instead of stale.
-        let manifest = await client.readUserManifest(ownerAddress);
+        let manifest = await readUserManifestCached(client, ownerAddress);
         if (!manifest) {
             manifest = {
                 address: ownerAddress,
@@ -69,7 +103,7 @@ export async function ensureDriveInUserManifest(client, ownerAddress, driveId, d
             lastUpdated: now,
         };
         manifest.updatedAt = now;
-        await client.updateUserManifest(ownerAddress, manifest);
+        await writeUserManifestAndCache(client, ownerAddress, manifest);
         console.log(`[ManifestManager] User manifest updated: drive "${driveName}" (${driveId.slice(0, 8)}), total drives: ${Object.keys(manifest.drives).length}`);
     });
 }
@@ -86,7 +120,7 @@ export async function ensureDriveInUserManifest(client, ownerAddress, driveId, d
  */
 export async function removeDriveFromUserManifest(client, ownerAddress, driveId) {
     return enqueueUserManifestWrite(ownerAddress, async () => {
-        const manifest = await client.readUserManifest(ownerAddress);
+        const manifest = await readUserManifestCached(client, ownerAddress);
         if (!manifest)
             return;
         const hadDrive = driveId in (manifest.drives ?? {});
@@ -98,7 +132,7 @@ export async function removeDriveFromUserManifest(client, ownerAddress, driveId)
         if (manifest.documents)
             delete manifest.documents[driveId];
         manifest.updatedAt = new Date().toISOString();
-        await client.updateUserManifest(ownerAddress, manifest);
+        await writeUserManifestAndCache(client, ownerAddress, manifest);
         console.log(`[ManifestManager] User manifest: drive "${driveId.slice(0, 8)}" removed, remaining drives: ${Object.keys(manifest.drives ?? {}).length}`);
     });
 }
@@ -135,7 +169,7 @@ export async function clearDriveManifest(client, driveId) {
 export async function ensureChatPeerInUserManifest(client, ownerAddress, peerAddress) {
     const normalizedPeer = peerAddress.toLowerCase();
     return enqueueUserManifestWrite(ownerAddress, async () => {
-        let manifest = await client.readUserManifest(ownerAddress);
+        let manifest = await readUserManifestCached(client, ownerAddress);
         if (!manifest) {
             manifest = {
                 address: ownerAddress,
@@ -152,7 +186,7 @@ export async function ensureChatPeerInUserManifest(client, ownerAddress, peerAdd
             return;
         manifest.chatPeers = [...existing, normalizedPeer];
         manifest.updatedAt = new Date().toISOString();
-        await client.updateUserManifest(ownerAddress, manifest);
+        await writeUserManifestAndCache(client, ownerAddress, manifest);
         console.log(`[ManifestManager] Chat peer added: ${normalizedPeer.slice(0, 10)}, total peers: ${manifest.chatPeers.length}`);
     });
 }
