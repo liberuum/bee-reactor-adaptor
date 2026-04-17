@@ -273,15 +273,8 @@ export class SwarmChannel {
         const endIndex = ops[ops.length - 1]?.operation?.index ?? 0;
         const scope = ops[0]?.context?.scope ?? "global";
         const branch = ops[0]?.context?.branch ?? "main";
-        // Diagnostic: log what action types are being pushed per doc/scope.
-        // Lets us see (e.g.) that a drive's ADD_FILE is actually leaving the
-        // main browser; recovery misses that previously looked like pull bugs
-        // were often "the push never happened".
-        const actionTypes = ops
-            .map((o) => o.operation?.action?.type ?? "?")
-            .slice(0, 5)
-            .join(",");
-        this.logger.info(`[SwarmChannel] Push ${docId.slice(0, 8)} scope=${scope} idx=${startIndex}-${endIndex} ops=[${actionTypes}${ops.length > 5 ? "…" : ""}]`);
+        // Verbose diagnostic for debugging push issues — per-op action types.
+        this.logger.verbose(`[SwarmChannel] Push ${docId.slice(0, 8)} scope=${scope} idx=${startIndex}-${endIndex} ops=${ops.length}`);
         // Serialize manifest read-modify-write per document.
         // Without this, concurrent pushes for the same doc race:
         // both read manifest with N batches, both append → write N+1,
@@ -469,27 +462,23 @@ export class SwarmChannel {
      * re-downloading and re-applying the same operations.
      */
     async pullFromSwarm() {
-        if (this.isShutdown) {
-            this.logger.warn(`[SwarmChannel] pullFromSwarm early-exit: isShutdown`);
+        if (this.isShutdown)
             return false;
-        }
         // Channels load from the reactor's persisted sync_remotes on startup —
         // that can happen BEFORE the SwarmPlugin populates window.ph.swarm.client,
         // in which case init()'s resolveSwarmClient() found nothing and this.swarmClient
         // is still null. Re-resolve lazily now that the plugin has had time to
-        // initialize. Matches the pattern handleOutboxAdded already uses.
+        // initialize.
         if (!this.swarmClient) {
             this.resolveSwarmClient();
             if (!this.swarmClient) {
-                this.logger.warn(`[SwarmChannel] pullFromSwarm early-exit: swarmClient still unresolved — window.ph.swarm.client not set yet`);
+                this.logger.warn(`[SwarmChannel] pullFromSwarm: swarmClient unresolved, skipping`);
                 return false;
             }
-            this.logger.info(`[SwarmChannel] Lazily resolved swarmClient in pullFromSwarm`);
         }
         this.recoveryInProgress = true;
         const client = this.swarmClient;
         const ownerAddress = this.config.ownerAddress;
-        this.logger.info(`[SwarmChannel] pullFromSwarm start for ${this.remoteName} (owner=${ownerAddress.slice(0, 10)})`);
         // Read user manifest to discover documents
         let userManifest;
         try {
@@ -499,30 +488,21 @@ export class SwarmChannel {
             this.logger.warn(`[SwarmChannel] pullFromSwarm: readUserManifest threw: ${err instanceof Error ? err.message : err}`);
             return false;
         }
-        if (!userManifest) {
-            this.logger.warn(`[SwarmChannel] pullFromSwarm: user manifest is null for owner=${ownerAddress.slice(0, 10)}`);
+        if (!userManifest)
             return false;
-        }
-        // Discover docs from user manifest + drive manifests
+        // Each SwarmChannel represents ONE drive. Restrict the pull to that
+        // drive + its own children so two concurrent channels don't both
+        // process the entire user manifest (the old behavior caused every
+        // cleanup / pull log to fire N times, once per Swarm-only remote).
+        const myDriveId = this.findDriveIdForThisRemote();
         const docIds = new Set();
         const docMeta = new Map();
-        // Parent-of-child-doc map so we can skip orphans when their parent
-        // drive turns out to have a DELETE_DOCUMENT in its history.
         const childToDrive = new Map();
-        // Direct documents in user manifest
-        for (const [docId, entry] of Object.entries(userManifest.documents ?? {})) {
-            docIds.add(docId);
-            docMeta.set(docId, {
-                documentType: entry.documentType ?? "unknown",
-                scope: "global",
-            });
-        }
-        // Drive manifests (contains docs grouped by drive)
-        for (const [driveId] of Object.entries(userManifest.drives ?? {})) {
-            docIds.add(driveId);
-            docMeta.set(driveId, { documentType: "powerhouse/document-drive", scope: "global" });
+        if (myDriveId && userManifest.drives?.[myDriveId]) {
+            docIds.add(myDriveId);
+            docMeta.set(myDriveId, { documentType: "powerhouse/document-drive", scope: "global" });
             try {
-                const dm = await client.readDriveManifest(driveId);
+                const dm = await client.readDriveManifest(myDriveId);
                 if (dm?.documents) {
                     for (const [docId, entry] of Object.entries(dm.documents)) {
                         docIds.add(docId);
@@ -530,17 +510,14 @@ export class SwarmChannel {
                             documentType: entry.documentType ?? "unknown",
                             scope: "global",
                         });
-                        childToDrive.set(docId, driveId);
+                        childToDrive.set(docId, myDriveId);
                     }
                 }
             }
             catch { /* drive manifest not available */ }
         }
-        if (docIds.size === 0) {
-            this.logger.warn(`[SwarmChannel] pullFromSwarm: no docs in user manifest (drives=${Object.keys(userManifest.drives ?? {}).length}, docs=${Object.keys(userManifest.documents ?? {}).length})`);
+        if (docIds.size === 0)
             return false;
-        }
-        this.logger.info(`[SwarmChannel] pullFromSwarm found ${docIds.size} doc(s) in manifest: ${[...docIds].map((id) => id.slice(0, 8)).join(", ")}`);
         // Filter out documents that already exist in the local reactor.
         // The outbox handles pushing local ops to Swarm — the inbox should
         // only pull ops for documents that need recovery (don't exist locally).
@@ -610,7 +587,7 @@ export class SwarmChannel {
             // Orphan child of a drive we just decided to skip — don't pull it.
             const parentDrive = childToDrive.get(docId);
             if (parentDrive && skippedDeletedDrives.has(parentDrive)) {
-                this.logger.warn(`[SwarmChannel] Skipping orphan child ${docId.slice(0, 8)} (parent drive ${parentDrive.slice(0, 8)} was deleted)`);
+                this.logger.verbose(`[SwarmChannel] Skipping orphan child ${docId.slice(0, 8)} (parent drive ${parentDrive.slice(0, 8)} was deleted)`);
                 continue;
             }
             try {
@@ -680,20 +657,12 @@ export class SwarmChannel {
                 // Process "document" scope first (creates the document), then others
                 const scopeOrder = ["document", ...Array.from(byScope.keys()).filter(s => s !== "document")];
                 const branch = allOps[0]?.context?.branch ?? "main";
-                // Diagnostic: summarize what's in each scope so recovery problems
-                // (missing ADD_FILE, ops stuck in wrong scope, etc.) are visible
-                // without having to instrument a live session.
+                // Verbose scope summary — there when debugging, out of the way
+                // in steady state.
                 const scopeSummary = scopeOrder
-                    .map((s) => {
-                    const ops = byScope.get(s) ?? [];
-                    const actionTypes = ops
-                        .map((o) => o.operation?.action?.type ?? "?")
-                        .slice(0, 5)
-                        .join(",");
-                    return `${s}=${ops.length}${ops.length > 0 ? `[${actionTypes}${ops.length > 5 ? "…" : ""}]` : ""}`;
-                })
+                    .map((s) => `${s}=${(byScope.get(s) ?? []).length}`)
                     .join(" ");
-                this.logger.info(`[SwarmChannel] Pull doc ${docId.slice(0, 8)} (${docMeta.get(docId)?.documentType ?? "?"}): ${scopeSummary}`);
+                this.logger.verbose(`[SwarmChannel] Pull doc ${docId.slice(0, 8)} (${docMeta.get(docId)?.documentType ?? "?"}): ${scopeSummary}`);
                 // Self-heal: if a drive's document-scope history ends with DELETE_DOCUMENT,
                 // it was deleted in another session but the user manifest entry was never
                 // cleaned up (pre-1802479 behavior, or a race at delete time). Skip the
@@ -704,7 +673,7 @@ export class SwarmChannel {
                     const docScopeOps = byScope.get("document") ?? [];
                     const hasDelete = docScopeOps.some((op) => op.operation?.action?.type === "DELETE_DOCUMENT");
                     if (hasDelete) {
-                        this.logger.warn(`[SwarmChannel] Skipping deleted drive ${docId.slice(0, 8)} — running one-time cleanup`);
+                        this.logger.info(`[SwarmChannel] Deleted drive ${docId.slice(0, 8)} detected — running one-time cleanup`);
                         skippedDeletedDrives.add(docId);
                         try {
                             const { removeDriveFromUserManifest, clearDriveManifest } = await import("./manifest-manager.js");
@@ -787,6 +756,17 @@ export class SwarmChannel {
         const match = collectionId.match(/^drive\.main\.(.+)$/);
         if (match)
             return match[1];
+        return null;
+    }
+    /**
+     * Drive id owned by this channel. remoteName is always "swarm:{driveId}"
+     * for the adapter, so we can extract directly without consulting the
+     * reactor state.
+     */
+    findDriveIdForThisRemote() {
+        if (this.remoteName.startsWith("swarm:")) {
+            return this.remoteName.slice("swarm:".length);
+        }
         return null;
     }
     resolveSwarmClient() {

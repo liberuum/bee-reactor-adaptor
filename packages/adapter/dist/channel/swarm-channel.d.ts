@@ -102,6 +102,12 @@ export declare class SwarmChannel implements IChannel {
      * or falls back to querying the reactor for the drive that contains this doc.
      */
     private findParentDriveId;
+    /**
+     * Drive id owned by this channel. remoteName is always "swarm:{driveId}"
+     * for the adapter, so we can extract directly without consulting the
+     * reactor state.
+     */
+    private findDriveIdForThisRemote;
     private resolveSwarmClient;
     private checkBeeHealth;
     private persistInboxCursor;
