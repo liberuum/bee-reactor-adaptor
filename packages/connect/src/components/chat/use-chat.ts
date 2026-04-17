@@ -200,10 +200,29 @@ export function useChat() {
         // each peer with no local record kicks off a lazy session start.
         void (async () => {
           try {
+            // ── Seed Swarm's chatPeers list from any local conversations
+            // we already know about (existing chats from before the manifest-
+            // based recovery landed). Idempotent: startSession records the
+            // peer in the manifest via ensureChatPeerInUserManifest, which
+            // short-circuits if the entry already exists.
+            const locallyKnown = [...messagesRef.current.keys()];
+            if (locallyKnown.length > 0) {
+              for (const peer of locallyKnown) {
+                try {
+                  if (!manager.getSession(peer)) {
+                    await manager.startSession(peer, { skipGsoc: true });
+                  }
+                } catch { /* best effort — peer profile may be missing */ }
+              }
+            }
+
             const peers: string[] = await manager.listKnownChatPeers();
-            if (peers.length === 0) return;
-            const locallyKnown = new Set(messagesRef.current.keys());
-            const toRecover = peers.filter((p) => !locallyKnown.has(p));
+            if (peers.length === 0) {
+              console.log(`[Chat UI] No chat peers recorded yet`);
+              return;
+            }
+            const locallyKnownSet = new Set(messagesRef.current.keys());
+            const toRecover = peers.filter((p) => !locallyKnownSet.has(p));
             if (toRecover.length === 0) {
               console.log(`[Chat UI] ${peers.length} known peers — all already local`);
               return;
