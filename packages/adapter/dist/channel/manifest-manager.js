@@ -117,19 +117,23 @@ export async function ensureChatPeerInUserManifest(client, ownerAddress, peerAdd
  *
  * Safe to call on every plugin init — reads are cheap, writes only
  * happen when an entry is missing or changed.
+ *
+ * Caller supplies the drive-listing and drive-read functions so the
+ * adapter can stay decoupled from `@powerhousedao/reactor-browser`'s
+ * module-level API (`getDrives(client)` vs a client method).
  */
-export async function reconcileUserManifestFromReactor(client, reactorClient, ownerAddress) {
+export async function reconcileUserManifestFromReactor(client, ownerAddress, listDrives, getDriveDoc) {
     let total = 0;
     let reconciled = 0;
     try {
-        const drives = await reactorClient.getDrives();
+        const drives = await listDrives();
         total = drives?.length ?? 0;
         for (const d of drives ?? []) {
-            const driveId = d?.header?.id ?? d?.id;
+            const driveId = d?.header?.id ?? d?.id ?? (typeof d === "string" ? d : undefined);
             if (!driveId)
                 continue;
             try {
-                const driveDoc = (await reactorClient.get(driveId));
+                const driveDoc = (await getDriveDoc(driveId));
                 const driveName = driveDoc?.state?.global?.name ?? driveId;
                 const preferredEditor = driveDoc?.header?.meta?.preferredEditor;
                 await ensureDriveInUserManifest(client, ownerAddress, driveId, driveName, preferredEditor);

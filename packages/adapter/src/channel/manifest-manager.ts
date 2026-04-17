@@ -166,25 +166,28 @@ export async function ensureChatPeerInUserManifest(
  *
  * Safe to call on every plugin init — reads are cheap, writes only
  * happen when an entry is missing or changed.
+ *
+ * Caller supplies the drive-listing and drive-read functions so the
+ * adapter can stay decoupled from `@powerhousedao/reactor-browser`'s
+ * module-level API (`getDrives(client)` vs a client method).
  */
 export async function reconcileUserManifestFromReactor(
   client: SwarmClient,
-  reactorClient: {
-    getDrives: () => Promise<unknown[]>;
-    get: (id: string) => Promise<unknown>;
-  },
   ownerAddress: string,
+  listDrives: () => Promise<unknown[]>,
+  getDriveDoc: (driveId: string) => Promise<unknown>,
 ): Promise<{ reconciled: number; total: number }> {
   let total = 0;
   let reconciled = 0;
   try {
-    const drives = await reactorClient.getDrives();
+    const drives = await listDrives();
     total = drives?.length ?? 0;
     for (const d of drives ?? []) {
-      const driveId: string | undefined = (d as any)?.header?.id ?? (d as any)?.id;
+      const driveId: string | undefined =
+        (d as any)?.header?.id ?? (d as any)?.id ?? (typeof d === "string" ? d : undefined);
       if (!driveId) continue;
       try {
-        const driveDoc = (await reactorClient.get(driveId)) as any;
+        const driveDoc = (await getDriveDoc(driveId)) as any;
         const driveName: string = driveDoc?.state?.global?.name ?? driveId;
         const preferredEditor: string | undefined = driveDoc?.header?.meta?.preferredEditor;
         await ensureDriveInUserManifest(client, ownerAddress, driveId, driveName, preferredEditor);

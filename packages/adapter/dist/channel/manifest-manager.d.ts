@@ -37,11 +37,12 @@ export declare function ensureChatPeerInUserManifest(client: SwarmClient, ownerA
  *
  * Safe to call on every plugin init — reads are cheap, writes only
  * happen when an entry is missing or changed.
+ *
+ * Caller supplies the drive-listing and drive-read functions so the
+ * adapter can stay decoupled from `@powerhousedao/reactor-browser`'s
+ * module-level API (`getDrives(client)` vs a client method).
  */
-export declare function reconcileUserManifestFromReactor(client: SwarmClient, reactorClient: {
-    getDrives: () => Promise<unknown[]>;
-    get: (id: string) => Promise<unknown>;
-}, ownerAddress: string): Promise<{
+export declare function reconcileUserManifestFromReactor(client: SwarmClient, ownerAddress: string, listDrives: () => Promise<unknown[]>, getDriveDoc: (driveId: string) => Promise<unknown>): Promise<{
     reconciled: number;
     total: number;
 }>;

@@ -417,8 +417,9 @@ export async function createReactor(localPackage?: DocumentModelLib) {
           );
           await reconcileUserManifestFromReactor(
             swarmState.client,
-            reactorClientModule.client,
             ownerAddr,
+            () => getDrives(reactorClientModule.client),
+            (driveId) => reactorClientModule.client.get(driveId),
           );
         } catch (err) {
           console.warn("[SwarmChannel] User manifest reconcile failed:", err);
