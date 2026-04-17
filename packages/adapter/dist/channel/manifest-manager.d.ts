@@ -26,6 +26,26 @@ export declare function ensureDriveInUserManifest(client: SwarmClient, ownerAddr
  */
 export declare function ensureChatPeerInUserManifest(client: SwarmClient, ownerAddress: string, peerAddress: string): Promise<void>;
 /**
+ * Reconcile the user manifest against the reactor's local drive list.
+ *
+ * Walks the reactor's drives and calls ensureDriveInUserManifest for each
+ * one. Heals user manifests that ended up partial due to prior
+ * concurrency bugs (pre-mutex), ensures brand-new drives that never
+ * pushed any ops still appear in the manifest for recovery, and is
+ * idempotent (the ensure-call short-circuits when an entry is already
+ * up to date).
+ *
+ * Safe to call on every plugin init — reads are cheap, writes only
+ * happen when an entry is missing or changed.
+ */
+export declare function reconcileUserManifestFromReactor(client: SwarmClient, reactorClient: {
+    getDrives: () => Promise<unknown[]>;
+    get: (id: string) => Promise<unknown>;
+}, ownerAddress: string): Promise<{
+    reconciled: number;
+    total: number;
+}>;
+/**
  * Update the drive manifest from the reactor's drive state.
  *
  * Extracts nodes (files + folders) from the drive document and writes

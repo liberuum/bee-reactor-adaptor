@@ -406,6 +406,25 @@ export async function createReactor(localPackage?: DocumentModelLib) {
         }
       }
 
+      // Reconcile the user manifest against local drives so any entries
+      // lost to prior race conditions (pre-mutex) are re-added, and so
+      // freshly-created drives that haven't pushed any ops yet still
+      // show up for recovery from another browser.
+      if (localDriveIds.length > 0) {
+        try {
+          const { reconcileUserManifestFromReactor } = await import(
+            "../../../adapter/src/channel/manifest-manager.js"
+          );
+          await reconcileUserManifestFromReactor(
+            swarmState.client,
+            reactorClientModule.client,
+            ownerAddr,
+          );
+        } catch (err) {
+          console.warn("[SwarmChannel] User manifest reconcile failed:", err);
+        }
+      }
+
       // Only log + trigger recovery when we actually register NEW remotes.
       // New drives created mid-session are handled by the drive-change
       // "created" event listener (subscribe on line ~222), not this loop.

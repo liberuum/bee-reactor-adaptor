@@ -154,6 +154,62 @@ export async function ensureChatPeerInUserManifest(
   });
 }
 
+/**
+ * Reconcile the user manifest against the reactor's local drive list.
+ *
+ * Walks the reactor's drives and calls ensureDriveInUserManifest for each
+ * one. Heals user manifests that ended up partial due to prior
+ * concurrency bugs (pre-mutex), ensures brand-new drives that never
+ * pushed any ops still appear in the manifest for recovery, and is
+ * idempotent (the ensure-call short-circuits when an entry is already
+ * up to date).
+ *
+ * Safe to call on every plugin init — reads are cheap, writes only
+ * happen when an entry is missing or changed.
+ */
+export async function reconcileUserManifestFromReactor(
+  client: SwarmClient,
+  reactorClient: {
+    getDrives: () => Promise<unknown[]>;
+    get: (id: string) => Promise<unknown>;
+  },
+  ownerAddress: string,
+): Promise<{ reconciled: number; total: number }> {
+  let total = 0;
+  let reconciled = 0;
+  try {
+    const drives = await reactorClient.getDrives();
+    total = drives?.length ?? 0;
+    for (const d of drives ?? []) {
+      const driveId: string | undefined = (d as any)?.header?.id ?? (d as any)?.id;
+      if (!driveId) continue;
+      try {
+        const driveDoc = (await reactorClient.get(driveId)) as any;
+        const driveName: string = driveDoc?.state?.global?.name ?? driveId;
+        const preferredEditor: string | undefined = driveDoc?.header?.meta?.preferredEditor;
+        await ensureDriveInUserManifest(client, ownerAddress, driveId, driveName, preferredEditor);
+        reconciled++;
+      } catch (err) {
+        console.warn(
+          `[ManifestManager] Could not reconcile drive ${driveId.slice(0, 8)}:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+  } catch (err) {
+    console.warn(
+      `[ManifestManager] Could not list local drives for reconcile:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
+  if (total > 0) {
+    console.log(
+      `[ManifestManager] Reconciled ${reconciled}/${total} local drives into user manifest`,
+    );
+  }
+  return { reconciled, total };
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Drive Manifest
 // ═══════════════════════════════════════════════════════════════
