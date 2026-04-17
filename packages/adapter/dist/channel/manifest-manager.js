@@ -74,6 +74,57 @@ export async function ensureDriveInUserManifest(client, ownerAddress, driveId, d
     });
 }
 /**
+ * Remove a drive entry from the user manifest.
+ *
+ * Called when the user deletes a drive in Connect — without this the
+ * deleted drive keeps appearing in Settings → Swarm (and gets replayed
+ * during recovery as a CREATE → DELETE sequence that leaves nothing
+ * visible).
+ *
+ * Serialized through the same per-owner mutex as add/update so a concurrent
+ * drive-push-then-delete can't race on the manifest.
+ */
+export async function removeDriveFromUserManifest(client, ownerAddress, driveId) {
+    return enqueueUserManifestWrite(ownerAddress, async () => {
+        const manifest = await client.readUserManifest(ownerAddress);
+        if (!manifest)
+            return;
+        const hadDrive = driveId in (manifest.drives ?? {});
+        const hadDoc = driveId in (manifest.documents ?? {});
+        if (!hadDrive && !hadDoc)
+            return;
+        if (manifest.drives)
+            delete manifest.drives[driveId];
+        if (manifest.documents)
+            delete manifest.documents[driveId];
+        manifest.updatedAt = new Date().toISOString();
+        await client.updateUserManifest(ownerAddress, manifest);
+        console.log(`[ManifestManager] User manifest: drive "${driveId.slice(0, 8)}" removed, remaining drives: ${Object.keys(manifest.drives ?? {}).length}`);
+    });
+}
+/**
+ * Overwrite a drive manifest feed with an empty payload so recovery on
+ * another browser doesn't discover documents for an already-deleted drive.
+ *
+ * Feed writes are append-only under the hood, so we can't truly "delete"
+ * the feed — but an empty manifest makes the drive manifest discovery
+ * code treat it as having no documents.
+ */
+export async function clearDriveManifest(client, driveId) {
+    try {
+        await client.updateDriveManifest(driveId, {
+            driveId,
+            name: "",
+            documents: {},
+            updatedAt: new Date().toISOString(),
+        });
+        console.log(`[ManifestManager] Drive manifest cleared: ${driveId.slice(0, 8)}`);
+    }
+    catch (err) {
+        console.warn(`[ManifestManager] Failed to clear drive manifest ${driveId.slice(0, 8)}:`, err instanceof Error ? err.message : err);
+    }
+}
+/**
  * Add a chat peer's signer address to the user manifest so the
  * conversation list can be reconstructed after a fresh install.
  *

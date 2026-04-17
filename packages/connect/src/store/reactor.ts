@@ -254,6 +254,67 @@ export async function createReactor(localPackage?: DocumentModelLib) {
         })();
       }
     }
+
+    // Clean up Swarm side when a drive is deleted in Connect:
+    //   - Remove the drive entry from the user manifest (so another
+    //     browser's recovery doesn't resurrect it).
+    //   - Clear the drive manifest feed so recovery finds no documents
+    //     for this drive even if it somehow re-registers.
+    //   - Shut down + unregister the per-drive SwarmChannel so it stops
+    //     pushing/pulling the deleted drive's ops.
+    if ((event as any).type === "deleted") {
+      const sm = reactorClientModule.reactorModule?.syncModule?.syncManager;
+      const swarmState = (window.ph as any)?.swarm;
+      const ownerAddr = (window.ph as any)?.renown?.user?.address ?? swarmState?.ownerAddress ?? "";
+      if (sm && swarmState?.client && ownerAddr) {
+        (async () => {
+          // Event payloads for "deleted" sometimes include the full doc,
+          // sometimes just an id in context. Grab whatever's there.
+          const ids: string[] = [];
+          for (const doc of docs) {
+            const id = doc?.header?.id ?? doc?.id;
+            if (id) ids.push(String(id));
+          }
+          const fromContext = (event as any).context?.childId ?? (event as any).context?.documentId;
+          if (fromContext) ids.push(String(fromContext));
+          if (ids.length === 0) return;
+
+          const {
+            removeDriveFromUserManifest,
+            clearDriveManifest,
+          } = await import(
+            "../../../adapter/src/channel/manifest-manager.js"
+          );
+
+          for (const driveId of ids) {
+            try {
+              await clearDriveManifest(swarmState.client, driveId);
+            } catch (err) {
+              console.warn(`[SwarmChannel] clearDriveManifest failed for ${driveId.slice(0, 8)}:`, err);
+            }
+            try {
+              await removeDriveFromUserManifest(swarmState.client, ownerAddr, driveId);
+            } catch (err) {
+              console.warn(`[SwarmChannel] removeDriveFromUserManifest failed for ${driveId.slice(0, 8)}:`, err);
+            }
+            const remoteName = `swarm:${driveId}`;
+            try {
+              const existing = sm.list().find((r: any) => r.name === remoteName);
+              if (existing) {
+                const ch = (existing as any).channel;
+                if (ch?.shutdown) {
+                  try { await ch.shutdown(); } catch { /* best effort */ }
+                }
+                await sm.remove(remoteName);
+                console.log(`[SwarmChannel] Removed remote for deleted drive ${driveId.slice(0, 8)}`);
+              }
+            } catch (err) {
+              console.warn(`[SwarmChannel] Failed to unregister remote for ${driveId.slice(0, 8)}:`, err);
+            }
+          }
+        })();
+      }
+    }
   });
 
   // Redirect when a currently-viewed document or drive is deleted remotely

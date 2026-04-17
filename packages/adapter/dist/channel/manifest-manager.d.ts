@@ -17,6 +17,27 @@ import type { SwarmClient } from "../swarm-client.js";
  */
 export declare function ensureDriveInUserManifest(client: SwarmClient, ownerAddress: string, driveId: string, driveName: string, preferredEditor?: string): Promise<void>;
 /**
+ * Remove a drive entry from the user manifest.
+ *
+ * Called when the user deletes a drive in Connect — without this the
+ * deleted drive keeps appearing in Settings → Swarm (and gets replayed
+ * during recovery as a CREATE → DELETE sequence that leaves nothing
+ * visible).
+ *
+ * Serialized through the same per-owner mutex as add/update so a concurrent
+ * drive-push-then-delete can't race on the manifest.
+ */
+export declare function removeDriveFromUserManifest(client: SwarmClient, ownerAddress: string, driveId: string): Promise<void>;
+/**
+ * Overwrite a drive manifest feed with an empty payload so recovery on
+ * another browser doesn't discover documents for an already-deleted drive.
+ *
+ * Feed writes are append-only under the hood, so we can't truly "delete"
+ * the feed — but an empty manifest makes the drive manifest discovery
+ * code treat it as having no documents.
+ */
+export declare function clearDriveManifest(client: SwarmClient, driveId: string): Promise<void>;
+/**
  * Add a chat peer's signer address to the user manifest so the
  * conversation list can be reconstructed after a fresh install.
  *
