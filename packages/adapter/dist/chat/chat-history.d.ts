@@ -4,7 +4,13 @@ import type { ChatMessage } from "./types.js";
  * Derive a deterministic feed topic for chat history.
  * Sorting ensures both parties use the same topic (but different owners).
  */
-export declare function historyTopic(addressA: string, addressB: string): string;
+export declare function historyTopic(addressA: string, addressB: string, chapter?: number): string;
+export declare function getMyChatChapter(): number;
+export declare function bumpMyChatChapter(): number;
+export declare function getPeerChatChapter(peerAddress: string): number;
+/** Record a chapter we learned from an incoming PSS message. Only ever
+ *  increases — we never move peer's chapter backwards. */
+export declare function recordPeerChatChapter(peerAddress: string, chapter: number): void;
 /** Cursor state for backward pagination per feed owner */
 export interface FeedCursor {
     /** Next feed index to load (decrements on each load). null = no more */

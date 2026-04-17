@@ -25,7 +25,7 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
     activePeer,
     messages,
     conversations,
-    isReady,
+    readiness,
     isSending,
     isHydrating,
     isOpeningConversation,
@@ -65,10 +65,23 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
     setTab("messages");
   }, [activePeer]);
 
-  if (!isReady) {
+  if (readiness === "waiting") {
+    // SwarmClient isn't up yet — the user's Bee / wallet / stamp setup
+    // is incomplete. Show the full checklist so they know what to fix.
     return (
       <PanelShell onClose={onClose}>
         <ChatRequirements />
+      </PanelShell>
+    );
+  }
+
+  if (readiness === "connecting") {
+    // SwarmClient is up but ChatManager hasn't mounted yet (typically
+    // ≤200ms after panel open on a healthy setup). Show a brief spinner
+    // instead of the scary "Chat is not ready" checklist.
+    return (
+      <PanelShell onClose={onClose}>
+        <ChatConnecting />
       </PanelShell>
     );
   }
@@ -494,6 +507,25 @@ function Acronym({
     >
       {children}
     </span>
+  );
+}
+
+/**
+ * Brief interstitial shown while the SwarmClient is up but the ChatManager
+ * hasn't finished initializing (typically ≤200ms). Deliberately small and
+ * undramatic — the user is on a working setup, we just need a tick.
+ */
+function ChatConnecting() {
+  return (
+    <div className="flex flex-1 items-center justify-center bg-gray-50">
+      <div className="flex flex-col items-center gap-3 text-gray-500">
+        <div
+          className="h-5 w-5 animate-spin rounded-full border-2 border-gray-200 border-t-blue-500"
+          aria-label="Loading"
+        />
+        <p className="text-xs">Connecting to chat…</p>
+      </div>
+    </div>
   );
 }
 

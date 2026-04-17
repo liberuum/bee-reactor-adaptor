@@ -130,9 +130,18 @@ export class PssMessenger {
             onError: (error) => {
                 handler.onError?.(error);
             },
-            onClose: () => { },
+            onClose: () => {
+                this.subscriptions.delete(broadcastTopic);
+            },
         });
-        return { cancel: () => sub.cancel() };
+        // Track the broadcast subscription so shutdown() cancels it too.
+        // Previously this subscription leaked on every ChatManager
+        // shutdown — cancel was only returned to the caller and never
+        // actually invoked, so HMR-reloaded ChatManagers kept receiving
+        // broadcast pings forever.
+        const subscription = { cancel: () => sub.cancel() };
+        this.subscriptions.set(broadcastTopic, subscription);
+        return subscription;
     }
     /**
      * Send an initial ping to a peer's broadcast topic.

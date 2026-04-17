@@ -32,7 +32,7 @@ const userManifestCache = new Map();
  * Read the user manifest, preferring our in-process cache from the last
  * successful write. Falls back to Swarm when no cache entry exists.
  */
-async function readUserManifestCached(client, ownerAddress) {
+export async function readUserManifestCached(client, ownerAddress) {
     const key = ownerAddress.toLowerCase();
     const cached = userManifestCache.get(key);
     if (cached)
@@ -204,6 +204,26 @@ export async function ensureChatPeerInUserManifest(client, ownerAddress, peerAdd
         manifest.updatedAt = new Date().toISOString();
         await writeUserManifestAndCache(client, ownerAddress, manifest);
         console.log(`[ManifestManager] Chat peer added: ${normalizedPeer.slice(0, 10)}, total peers: ${manifest.chatPeers.length}`);
+    });
+}
+/**
+ * Remove all chat peers from the user manifest. Used by the "Clear
+ * chats" action to wipe recovery hints from Swarm so a fresh browser
+ * starts with zero conversations. Does not touch drives, documents,
+ * stamps, or the chat history feeds themselves (feeds are append-only
+ * on Swarm; we simply stop advertising that they exist).
+ */
+export async function clearChatPeersInUserManifest(client, ownerAddress) {
+    return enqueueUserManifestWrite(ownerAddress, async () => {
+        const manifest = await readUserManifestCached(client, ownerAddress);
+        if (!manifest || !manifest.chatPeers || manifest.chatPeers.length === 0) {
+            return;
+        }
+        const removed = manifest.chatPeers.length;
+        manifest.chatPeers = [];
+        manifest.updatedAt = new Date().toISOString();
+        await writeUserManifestAndCache(client, ownerAddress, manifest);
+        console.log(`[ManifestManager] Cleared ${removed} chat peer(s) from user manifest`);
     });
 }
 /**

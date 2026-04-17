@@ -175,8 +175,81 @@ export function ConversationList({
             );
           })}
         </div>
+
+        <ClearChatsButton conversationCount={conversations.length} />
       </div>
     </aside>
+  );
+}
+
+/**
+ * Wipe all conversations: local caches + chatPeers in the user manifest.
+ * Two-step confirm to prevent accidental clicks. Shown disabled when the
+ * list is already empty so the button doesn't invite a useless op.
+ */
+function ClearChatsButton({ conversationCount }: { conversationCount: number }) {
+  const [confirming, setConfirming] = useState(false);
+  const [working, setWorking] = useState(false);
+
+  const handleClear = async () => {
+    const ph = (globalThis as any).window?.ph;
+    const fn = ph?.swarm?.clearChats;
+    if (typeof fn !== "function") {
+      console.warn("[Chat UI] clearChats not available on ph.swarm");
+      return;
+    }
+    setWorking(true);
+    try {
+      await fn();
+    } catch (err) {
+      console.warn("[Chat UI] clearChats failed:", err instanceof Error ? err.message : err);
+    } finally {
+      setWorking(false);
+      setConfirming(false);
+    }
+  };
+
+  const disabled = conversationCount === 0 && !confirming;
+
+  return (
+    <div className="mt-3 border-t border-gray-100 pt-3">
+      {!confirming ? (
+        <button
+          type="button"
+          onClick={() => setConfirming(true)}
+          disabled={disabled}
+          className="w-full rounded-md border border-gray-200 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-gray-500 transition-colors hover:border-red-200 hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-gray-200 disabled:hover:bg-white disabled:hover:text-gray-500"
+          title={disabled ? "No conversations to clear" : "Wipe all conversations from this browser and the user manifest"}
+        >
+          Clear all chats…
+        </button>
+      ) : (
+        <div className="space-y-1.5">
+          <p className="px-1 text-[10.5px] leading-snug text-gray-500">
+            Remove all conversations from this browser and your Swarm manifest?
+            Peers can still reach you with new messages.
+          </p>
+          <div className="flex gap-1.5">
+            <button
+              type="button"
+              onClick={handleClear}
+              disabled={working}
+              className="flex-1 rounded-md bg-red-600 py-1.5 text-[11px] font-semibold text-white transition-colors hover:bg-red-700 disabled:opacity-60"
+            >
+              {working ? "Clearing…" : "Yes, clear"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirming(false)}
+              disabled={working}
+              className="rounded-md border border-gray-200 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-gray-600 hover:bg-gray-50 disabled:opacity-60"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 

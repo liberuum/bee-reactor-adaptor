@@ -21,6 +21,11 @@ import { loadManifestIndex, clearSwarmStorage } from "./storage.js";
 import { populateUiCacheFromDrives } from "./hydration.js";
 import { publishPublicProfile, shareDocumentsWithUser, importFromUser } from "./sharing.js";
 import { installEventHandlers, emitSwarmEvent } from "./events.js";
+import {
+  ensureChatPeerInUserManifest,
+  clearChatPeersInUserManifest,
+} from "../channel/manifest-manager.js";
+import { bumpMyChatChapter } from "../chat/chat-history.js";
 
 const FEED_TOPIC_PREFIX = "ph:v2";
 
@@ -46,15 +51,26 @@ async function initChatManager(
   if (!swarmClient || !plugin.getSignerEntry()) return;
 
   try {
-    // Shutdown any previous ChatManager to prevent duplicate PSS subscriptions.
-    // Happens on reconnect, Bee URL change, or HMR.
-    const prevChat = phAfterStart?.swarm?.chat?.manager;
-    if (prevChat && typeof prevChat.shutdown === "function") {
-      try {
-        prevChat.shutdown();
-        console.log("[SwarmPlugin] Old ChatManager shut down");
-      } catch (err) {
-        console.warn("[SwarmPlugin] Old ChatManager shutdown failed:", err);
+    // Shutdown any previous ChatManager to prevent duplicate PSS
+    // subscriptions. We check TWO locations because plugin.start() can
+    // wipe ph.swarm wholesale, orphaning the manager we put there — and
+    // an orphaned manager keeps its broadcast-topic subscription alive
+    // plus its onMessage handlers, so every incoming message logs N
+    // times (once per leaked HMR reload). The globalThis mirror gives
+    // us a stable handle that survives the ph.swarm rewrite.
+    const g = globalThis as any;
+    const candidates = [
+      phAfterStart?.swarm?.chat?.manager,
+      g.__swarmChatManager__,
+    ];
+    for (const prev of candidates) {
+      if (prev && typeof prev.shutdown === "function") {
+        try {
+          prev.shutdown();
+          console.log("[SwarmPlugin] Old ChatManager shut down");
+        } catch (err) {
+          console.warn("[SwarmPlugin] Old ChatManager shutdown failed:", err);
+        }
       }
     }
 
@@ -66,6 +82,10 @@ async function initChatManager(
     if (phAfterStart.swarm) {
       phAfterStart.swarm.chat = { manager: chatManager };
     }
+    // Also mirror on globalThis so we can always find and shut down
+    // this manager even if ph.swarm gets reassigned by a later
+    // plugin.start(). See the shutdown candidates list above.
+    (globalThis as any).__swarmChatManager__ = chatManager;
 
     // Persist incoming messages to localStorage at the plugin level.
     // This runs even when the chat panel is CLOSED, so the unread badge
@@ -99,10 +119,6 @@ async function initChatManager(
         localEntries
           .map(([peerAddress]) => peerAddress?.toLowerCase?.())
           .filter((p) => typeof p === "string" && p.startsWith("0x")),
-      );
-
-      const { ensureChatPeerInUserManifest } = await import(
-        "../channel/manifest-manager.js"
       );
 
       let seeded = 0;
@@ -524,6 +540,78 @@ function applySwarmExtensions(ph: any, isDevMode: boolean): void {
       return;
     }
     await clearSwarmStorage(client, address);
+  };
+
+  // clearChats: wipe the user's conversation list. Local state (both
+  // localStorage buckets + in-memory ChatManager sessions) is cleared,
+  // and chatPeers is emptied from the user manifest so fresh browsers
+  // no longer recover these conversations. Intentionally does NOT
+  // touch chat history feeds or peer-side data:
+  //   - Feeds are append-only on Swarm; overwriting with tombstones
+  //     doesn't delete old entries, just adds noise the new reader
+  //     skips. Stamps will expire chunks naturally.
+  //   - Peer still sees everything on their side. If they message
+  //     you again, a fresh conversation starts.
+  ph.swarm.clearChats = async () => {
+    const client = ph.swarm?.client as SwarmClient | undefined;
+    const swarmAddress = client?.getOwnerAddress?.();
+    if (!client || !swarmAddress) {
+      console.warn("[SwarmPlugin] Cannot clear chats — no client or address");
+      return;
+    }
+
+    // 1. Shut down the ChatManager so PSS subscriptions close and
+    //    pending feed writes don't resurrect peers we're clearing.
+    const chatManager = ph.swarm?.chat?.manager;
+    if (chatManager && typeof chatManager.shutdown === "function") {
+      try {
+        chatManager.shutdown();
+        console.log("[SwarmPlugin] ChatManager shut down for clear");
+      } catch (err) {
+        console.warn("[SwarmPlugin] ChatManager shutdown failed:", err instanceof Error ? err.message : err);
+      }
+    }
+
+    // 2. Bump the chat chapter — all future writes go to a NEW history
+    //    feed, and the peer learns the rotation from my next PSS
+    //    message. Old feeds are orphaned on Swarm and decay as stamps
+    //    expire; we never ask Bee to delete (it can't).
+    const newChapter = bumpMyChatChapter();
+    console.log(`[SwarmPlugin] Chat chapter rotated to ${newChapter}`);
+
+    // 3. Wipe local caches — conversation list + last-read + per-peer
+    //    chapter map. The clearedAt timestamp still guards the broadcast
+    //    subscriber against cached PSS replays resurrecting peers we
+    //    just removed from the manifest.
+    try {
+      localStorage.removeItem("swarm:chatMessages");
+      localStorage.removeItem("swarm:chatLastRead");
+      localStorage.removeItem("swarm:chatPeerChapters");
+      localStorage.setItem("swarm:chatsClearedAt", String(Date.now()));
+      window.dispatchEvent(new CustomEvent("swarm:chatMessages:updated"));
+      window.dispatchEvent(new CustomEvent("swarm:chatLastRead:updated"));
+      window.dispatchEvent(new CustomEvent("swarm:chatsCleared"));
+    } catch { /* localStorage unavailable */ }
+
+    // 4. Remove chatPeers from the user manifest so a fresh browser
+    //    (or this one after reload) has nothing to recover.
+    try {
+      await clearChatPeersInUserManifest(client, swarmAddress);
+    } catch (err) {
+      console.warn(
+        "[SwarmPlugin] clearChats: manifest clear failed:",
+        err instanceof Error ? err.message : err,
+      );
+    }
+
+    // 5. Re-initialize ChatManager so the user can immediately start a
+    //    new conversation without reloading.
+    const usable = await fetchUsableStamp();
+    if (usable && ph.swarm?.plugin) {
+      await initChatManager(state.beeUrl, ph.swarm.plugin, usable.batchID);
+    }
+
+    console.log("[SwarmPlugin] Chats cleared — conversation list is empty. Ready for fresh chats.");
   };
 
   // getNodeStatus: rich node health snapshot (mode, peers, reachable, neighborhood)

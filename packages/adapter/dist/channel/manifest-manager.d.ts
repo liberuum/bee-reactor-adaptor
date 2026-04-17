@@ -11,6 +11,12 @@
  * the Swarm-specific metadata that enables recovery on a new device.
  */
 import type { SwarmClient } from "../swarm-client.js";
+import type { SwarmUserManifest } from "../types.js";
+/**
+ * Read the user manifest, preferring our in-process cache from the last
+ * successful write. Falls back to Swarm when no cache entry exists.
+ */
+export declare function readUserManifestCached(client: SwarmClient, ownerAddress: string): Promise<SwarmUserManifest | null>;
 /**
  * Ensure the user manifest contains a drive entry.
  * Serialized per-owner so concurrent drives can't race on the manifest.
@@ -46,6 +52,14 @@ export declare function clearDriveManifest(client: SwarmClient, driveId: string)
  * don't clobber each other.
  */
 export declare function ensureChatPeerInUserManifest(client: SwarmClient, ownerAddress: string, peerAddress: string): Promise<void>;
+/**
+ * Remove all chat peers from the user manifest. Used by the "Clear
+ * chats" action to wipe recovery hints from Swarm so a fresh browser
+ * starts with zero conversations. Does not touch drives, documents,
+ * stamps, or the chat history feeds themselves (feeds are append-only
+ * on Swarm; we simply stop advertising that they exist).
+ */
+export declare function clearChatPeersInUserManifest(client: SwarmClient, ownerAddress: string): Promise<void>;
 /**
  * Reconcile the user manifest against the reactor's local drive list.
  *

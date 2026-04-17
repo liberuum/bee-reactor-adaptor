@@ -20,6 +20,12 @@ export interface ChatMessage {
     timestamp: string;
     /** Delivery status (local tracking, not protocol-level) */
     status: "sending" | "sent" | "delivered" | "read";
+    /** Sender's current chat "chapter" — a per-browser counter that
+     *  increments on Clear-All-Chats to rotate the history feed to a new
+     *  topic. Receivers track the max chapter they've seen per peer and
+     *  use it when reading that peer's feed, so a chapter bump transparently
+     *  migrates both sides to the fresh feed. Absent/0 = legacy/default. */
+    chapter?: number;
 }
 /**
  * Chat attachment — either a raw file (image, audio, video, etc.)

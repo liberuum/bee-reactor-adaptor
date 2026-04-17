@@ -69,7 +69,19 @@ export function useChat() {
   // Use a counter to force re-renders when messages change
   const [, setRenderTick] = useState(0);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
-  const [isReady, setIsReady] = useState(false);
+  // Three-state readiness so the UI distinguishes "Bee not set up yet"
+  // from "Bee is up, ChatManager just hasn't mounted in the poll window".
+  //   waiting    → no SwarmClient (show full requirements checklist)
+  //   connecting → SwarmClient exists, ChatManager not yet populated
+  //                (brief spinner, NOT the scary checklist)
+  //   ready      → ChatManager available, chat UI fully live
+  const [readiness, setReadiness] = useState<"waiting" | "connecting" | "ready">(() => {
+    const ph = (globalThis as any).window?.ph;
+    if (ph?.swarm?.chat?.manager) return "ready";
+    if (ph?.swarm?.client) return "connecting";
+    return "waiting";
+  });
+  const isReady = readiness === "ready";
   const [isSending, setIsSending] = useState(false);
   const [isHydrating, setIsHydrating] = useState(false);
   const [isLoadingOlder, setIsLoadingOlder] = useState(false);
@@ -183,11 +195,26 @@ export function useChat() {
   useEffect(() => {
     let unsubscribe: (() => void) | null = null;
 
-    const interval = setInterval(() => {
+    // Poll at 200ms until ChatManager is ready so the user doesn't stare
+    // at an empty "connecting" state for up to 1.5s on a perfectly fine
+    // setup. Once we've subscribed we drop to 1500ms for the routine
+    // conversation-list refresh.
+    let tickMs = 200;
+    const tick = () => {
+      const ph = (globalThis as any).window?.ph;
+      const hasClient = !!ph?.swarm?.client;
       const manager = getManager();
-      if (!manager) return;
 
-      if (!isReady) setIsReady(true);
+      if (!manager) {
+        // Pivot the readiness state based on whether the Bee layer is
+        // up yet. No client → show the full requirements checklist.
+        // Client but no ChatManager → brief "Connecting…" spinner.
+        const next = hasClient ? "connecting" : "waiting";
+        setReadiness((cur) => (cur === next ? cur : next));
+        return;
+      }
+
+      if (readiness !== "ready") setReadiness("ready");
 
       if (!subscribedRef.current) {
         subscribedRef.current = true;
@@ -265,20 +292,49 @@ export function useChat() {
       }
 
       refreshConversations();
-    }, 1500);
+      // Once we're subscribed, back off to the normal refresh cadence.
+      tickMs = 1500;
+    };
+
+    // Drive the tick with setTimeout so we can vary the interval
+    // (200ms before ChatManager lands, 1500ms after).
+    let timer: ReturnType<typeof setTimeout>;
+    const loop = () => {
+      tick();
+      timer = setTimeout(loop, tickMs);
+    };
+    loop();
 
     return () => {
-      clearInterval(interval);
+      clearTimeout(timer);
       if (unsubscribe) {
         unsubscribe();
         subscribedRef.current = false;
       }
     };
-    // `isReady` is intentionally NOT in the dep array — it would tear down
-    // and recreate the subscription on first ready, doubling event handlers
-    // during the transition. setIsReady(true) is idempotent (React bails).
+    // `readiness` is intentionally NOT in the dep array — it would tear
+    // down and recreate the subscription on every state transition,
+    // doubling event handlers. The tick reads ph.swarm directly.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [addMessage, refreshConversations]);
+
+  // When clearChats runs (or any other code wipes swarm:chatMessages
+  // directly), reload the in-memory mirror and re-render. Without this
+  // listener the UI keeps showing deleted conversations because
+  // messagesRef is only read from localStorage on mount.
+  useEffect(() => {
+    const handleWipe = () => {
+      messagesRef.current = loadStoredMessages();
+      lastReadRef.current = loadLastRead();
+      cursorsRef.current = new Map();
+      setActivePeer(null);
+      setView("conversations");
+      setRenderTick((t) => t + 1);
+      refreshConversations();
+    };
+    window.addEventListener("swarm:chatsCleared", handleWipe);
+    return () => window.removeEventListener("swarm:chatsCleared", handleWipe);
+  }, [refreshConversations]);
 
   const markRead = useCallback((peerAddress: string) => {
     lastReadRef.current.set(peerAddress, Date.now());
@@ -537,6 +593,7 @@ export function useChat() {
     messages,
     conversations,
     isReady,
+    readiness,
     isSending,
     isHydrating,
     isOpeningConversation,

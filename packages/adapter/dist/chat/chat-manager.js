@@ -1,8 +1,9 @@
 import { reconcileMime } from "./mime-guess.js";
 import { PssMessenger, chatTopic } from "./pss-messenger.js";
-import { ChatHistory, historyTopic } from "./chat-history.js";
+import { ChatHistory, historyTopic, getMyChatChapter, recordPeerChatChapter, } from "./chat-history.js";
 import { GsocNotifier } from "./gsoc-notifier.js";
 import { SwarmFile } from "./swarm-file.js";
+import { ensureChatPeerInUserManifest, readUserManifestCached, } from "../channel/manifest-manager.js";
 export class ChatManager {
     client;
     pss;
@@ -39,6 +40,23 @@ export class ChatManager {
                 // conversation list would show our own Swarm ID as an entry.
                 if (message.from.toLowerCase() === this.myAddress.toLowerCase())
                     return;
+                // Suppress cached broadcast pings older than the last "clear
+                // chats" action. After clearing, the Bee node often replays
+                // buffered PSS chunks to the freshly-subscribed socket — those
+                // replays would call startSession → ensureChatPeerInUserManifest
+                // and immediately re-populate the manifest we just cleared.
+                // The clear timestamp is stored in localStorage by the UI-side
+                // clearChats action so it persists across page reloads.
+                try {
+                    const raw = globalThis.window?.localStorage?.getItem?.("swarm:chatsClearedAt");
+                    const clearedAt = raw ? parseInt(raw, 10) : 0;
+                    if (clearedAt > 0 && message.timestamp) {
+                        const ts = new Date(message.timestamp).getTime();
+                        if (ts > 0 && ts < clearedAt)
+                            return;
+                    }
+                }
+                catch { /* localStorage unavailable */ }
                 // Deduplicate SYNCHRONOUSLY. Bee may re-serve the same cached chunk
                 // multiple times in rapid succession; if we wait until after the
                 // async startSession to mark it seen, parallel deliveries all race
@@ -46,6 +64,11 @@ export class ChatManager {
                 if (this.seenMessageIds.has(message.id))
                     return;
                 this.markSeen(message.id);
+                // Record peer's chapter so my next read of their feed uses the
+                // rotated topic if they've cleared their chat since we last spoke.
+                if (typeof message.chapter === "number" && message.chapter > 0) {
+                    recordPeerChatChapter(message.from, message.chapter);
+                }
                 console.log(`[Chat] Broadcast ping from ${message.from.slice(0, 10)}: "${message.text.slice(0, 30)}"`);
                 // Auto-create session with the sender so we start receiving their messages
                 this.startSession(message.from, { skipGsoc: true })
@@ -114,6 +137,11 @@ export class ChatManager {
                 if (this.seenMessageIds.has(message.id))
                     return;
                 this.markSeen(message.id);
+                // Track peer's current history-chapter so reads migrate to the
+                // new feed when they've cleared their chat.
+                if (typeof message.chapter === "number" && message.chapter > 0) {
+                    recordPeerChatChapter(message.from, message.chapter);
+                }
                 session.lastActivity = new Date().toISOString();
                 this.emit({ type: "message-received", data: message });
             },
@@ -136,8 +164,7 @@ export class ChatManager {
         // Record the peer in the user manifest so a fresh browser can
         // reconstruct the conversation list on recovery. Fire-and-forget —
         // failure to record shouldn't block the session from becoming ready.
-        import("../channel/manifest-manager.js")
-            .then(({ ensureChatPeerInUserManifest }) => ensureChatPeerInUserManifest(this.client, this.myAddress, peerSignerAddress))
+        ensureChatPeerInUserManifest(this.client, this.myAddress, peerSignerAddress)
             .catch((err) => {
             console.warn(`[Chat] Failed to record peer in user manifest:`, err instanceof Error ? err.message : err);
         });
@@ -158,7 +185,11 @@ export class ChatManager {
      */
     async listKnownChatPeers() {
         try {
-            const manifest = await this.client.readUserManifest(this.myAddress);
+            // Use the cached read so a manifest-write that just happened
+            // (e.g. clearChatPeersInUserManifest) is reflected immediately,
+            // without waiting for the Swarm feed to converge. Going straight
+            // to the feed here caused "clear chats" to see stale peers.
+            const manifest = await readUserManifestCached(this.client, this.myAddress);
             const peers = manifest?.chatPeers ?? [];
             const myAddr = this.myAddress.toLowerCase();
             // Filter out our own address if a prior bug (pre-broadcast-echo-guard)
@@ -187,6 +218,10 @@ export class ChatManager {
      * sends a GSOC delivery notification (< 1s).
      */
     async sendMessage(session, text, attachment) {
+        // Stamp outgoing messages with my current chapter so the peer can
+        // learn that I've rotated to a new history feed (via Clear-All-Chats)
+        // and follow me to it on their next read.
+        const myChapter = getMyChatChapter();
         const message = {
             id: crypto.randomUUID(),
             from: this.myAddress,
@@ -195,6 +230,7 @@ export class ChatManager {
             attachment,
             timestamp: new Date().toISOString(),
             status: "sending",
+            ...(myChapter > 0 ? { chapter: myChapter } : {}),
         };
         // Send via PSS (direct topic between the two users)
         await this.pss.send(session.peerOverlay, session.peerBeeNodePubKey, session.peerAddress, message);

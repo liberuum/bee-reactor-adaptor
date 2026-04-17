@@ -14,12 +14,119 @@
 import { Topic, FeedIndex } from "@ethersphere/bee-js";
 const HISTORY_TOPIC_PREFIX = "ph:v2:chatlog:";
 /**
+ * Size of a feed payload that indirects to `{ actRef, actHist }`.
+ *
+ * The feed stores a 32-byte reference to a small plaintext /bytes chunk
+ * (the "wrapper"). The wrapper is exactly 64 bytes: the first 32 are the
+ * ACT-protected page's reference, the last 32 are its actHistoryAddress.
+ * On read we need both to decrypt — persisting them together in a single
+ * indirection keeps each page self-describing, without bloating the feed
+ * payload beyond the 32-byte convention used everywhere else.
+ *
+ * Wrapper contents are references (public-by-nature). Nothing sensitive
+ * lands in plaintext — the ACT grant is what actually protects the page.
+ */
+const WRAPPER_BYTES = 64;
+function hexToBytes32(hex) {
+    const clean = hex.replace(/^0x/i, "");
+    if (clean.length !== 64) {
+        throw new Error(`expected 32-byte hex, got length ${clean.length}`);
+    }
+    const bytes = new Uint8Array(32);
+    for (let i = 0; i < 32; i++) {
+        bytes[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+    }
+    return bytes;
+}
+function bytes32ToHex(bytes, offset = 0) {
+    let out = "";
+    for (let i = 0; i < 32; i++) {
+        out += bytes[offset + i].toString(16).padStart(2, "0");
+    }
+    return out;
+}
+/**
  * Derive a deterministic feed topic for chat history.
  * Sorting ensures both parties use the same topic (but different owners).
  */
-export function historyTopic(addressA, addressB) {
+export function historyTopic(addressA, addressB, chapter = 0) {
     const sorted = [addressA.toLowerCase(), addressB.toLowerCase()].sort();
-    return `${HISTORY_TOPIC_PREFIX}${sorted[0]}:${sorted[1]}`;
+    const base = `${HISTORY_TOPIC_PREFIX}${sorted[0]}:${sorted[1]}`;
+    // Chapter 0 omits the suffix so legacy readers continue to see the
+    // same topic. Any "clear chats" action increments the writer's
+    // chapter, starting a brand-new feed. Both directions are tracked
+    // independently (see chapterStore below) — I control my write
+    // chapter; I learn the peer's chapter from PSS announcements.
+    return chapter > 0 ? `${base}:${chapter}` : base;
+}
+// ─── Chapter store (per-browser localStorage) ─────────────────────
+const MY_CHAPTER_KEY = "swarm:chatMyChapter";
+const PEER_CHAPTERS_KEY = "swarm:chatPeerChapters";
+function readNumber(raw) {
+    if (!raw)
+        return 0;
+    const n = parseInt(raw, 10);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+}
+export function getMyChatChapter() {
+    try {
+        return readNumber(globalThis.window?.localStorage?.getItem?.(MY_CHAPTER_KEY) ?? null);
+    }
+    catch {
+        return 0;
+    }
+}
+export function bumpMyChatChapter() {
+    // Chapter value uses Date.now() (ms) instead of a simple counter so
+    // it stays monotonic across localStorage wipes. If the user clears
+    // browser storage entirely then clicks "Clear all chats" again, a
+    // naive counter restarts at 1 and collides with the chapter-1 feed
+    // they already wrote to earlier in the day — reviving old messages.
+    // Date.now() is always larger than any previously-used value, so we
+    // land on a brand-new feed no matter what came before.
+    //
+    // Math.max with (prev + 1) guards against system-clock drift: if the
+    // clock ever rolls backward we still get a strictly-increasing value.
+    const prev = getMyChatChapter();
+    const next = Math.max(prev + 1, Date.now());
+    try {
+        globalThis.window?.localStorage?.setItem?.(MY_CHAPTER_KEY, String(next));
+    }
+    catch { /* localStorage unavailable */ }
+    return next;
+}
+export function getPeerChatChapter(peerAddress) {
+    try {
+        const raw = globalThis.window?.localStorage?.getItem?.(PEER_CHAPTERS_KEY);
+        if (!raw)
+            return 0;
+        const map = JSON.parse(raw);
+        const v = map[peerAddress.toLowerCase()];
+        return typeof v === "number" && v > 0 ? v : 0;
+    }
+    catch {
+        return 0;
+    }
+}
+/** Record a chapter we learned from an incoming PSS message. Only ever
+ *  increases — we never move peer's chapter backwards. */
+export function recordPeerChatChapter(peerAddress, chapter) {
+    if (!Number.isFinite(chapter) || chapter <= 0)
+        return;
+    try {
+        const ls = globalThis.window?.localStorage;
+        if (!ls)
+            return;
+        const raw = ls.getItem(PEER_CHAPTERS_KEY);
+        const map = (raw ? JSON.parse(raw) : {});
+        const key = peerAddress.toLowerCase();
+        const cur = map[key] ?? 0;
+        if (chapter > cur) {
+            map[key] = chapter;
+            ls.setItem(PEER_CHAPTERS_KEY, JSON.stringify(map));
+        }
+    }
+    catch { /* localStorage unavailable */ }
 }
 export class ChatHistory {
     client;
@@ -55,15 +162,33 @@ export class ChatHistory {
             messages,
             writtenAt: new Date().toISOString(),
         };
-        // Upload ACT-protected page
-        const { reference } = await this.client.uploadFile(JSON.stringify(page), {
+        // Upload ACT-protected page. Capture BOTH the content reference and
+        // the ACT historyAddress — the latter is what downstream readers need
+        // alongside actPublisher to decrypt. bee-js returns the current head
+        // of the ACT grant chain; this can equal granteeHistRef (no rotation)
+        // or extend it (if grantees changed since last upload).
+        const { reference: actRef, historyAddress } = await this.client.uploadFile(JSON.stringify(page), {
             act: true,
             actHistoryAddress: grantees.granteeHistRef,
             skipEncryption: true,
         });
-        // Write as a new feed entry (feed index auto-increments)
-        const topic = Topic.fromString(historyTopic(this.myAddress, peerAddress));
-        await this.client.writeFeedPayload(topic, reference);
+        const actHist = historyAddress ?? grantees.granteeHistRef;
+        // Pack `{ actRef, actHist }` into a 64-byte wrapper and upload via
+        // /bytes. We write the WRAPPER's 32-byte reference to the feed, so
+        // the feed payload stays at the 32-byte convention used elsewhere.
+        // See WRAPPER_BYTES doc for the rationale.
+        const wrapper = new Uint8Array(WRAPPER_BYTES);
+        wrapper.set(hexToBytes32(actRef), 0);
+        wrapper.set(hexToBytes32(actHist), 32);
+        const { reference: wrapperRef } = await this.client.uploadData(wrapper, {
+            skipEncryption: true,
+        });
+        // Write the wrapper's reference as the feed entry. Topic is
+        // namespaced by MY current chapter — bumping the chapter (via
+        // "Clear all chats") switches future writes to a brand-new feed,
+        // leaving old messages orphaned on Swarm until their stamps expire.
+        const topic = Topic.fromString(historyTopic(this.myAddress, peerAddress, getMyChatChapter()));
+        await this.client.writeFeedPayload(topic, wrapperRef);
     }
     // ─── Read side ────────────────────────────────────────────────
     /**
@@ -78,7 +203,25 @@ export class ChatHistory {
      * to the pair topic, reads looked up a different topic that never existed.
      */
     async loadLatestPages(feedOwner, peerAddress, publisherBeeNodePubKey, pageCount) {
-        const topic = Topic.fromString(historyTopic(this.myAddress, peerAddress));
+        // Chapter resolution per feed owner:
+        //   Mine  → my current chapter (straightforward).
+        //   Peer  → max(recorded peer chapter, my chapter).
+        //
+        // The max() for peer is the key post-clear behavior: if I've bumped
+        // my chapter via "Clear all chats" but peer hasn't rotated yet,
+        // their recorded chapter is still behind mine. We look for their
+        // feed at my chapter — a feed they haven't written to yet — which
+        // correctly returns empty. This prevents peer's pre-clear history
+        // from resurfacing just because they haven't cleared their side.
+        // When peer eventually sends a message carrying a chapter >= mine,
+        // recordPeerChatChapter updates our recording, and subsequent reads
+        // find their new feed.
+        const myChapter = getMyChatChapter();
+        const isMine = feedOwner.toLowerCase() === this.myAddress.toLowerCase();
+        const chapter = isMine
+            ? myChapter
+            : Math.max(getPeerChatChapter(peerAddress), myChapter);
+        const topic = Topic.fromString(historyTopic(this.myAddress, peerAddress, chapter));
         const ownerNormalized = feedOwner.replace(/^0x/i, "").toLowerCase();
         // Step 1: Get the latest feed index
         const latestIndex = await this.getLatestFeedIndex(topic, ownerNormalized);
@@ -95,7 +238,9 @@ export class ChatHistory {
         if (cursor.nextIndex === null) {
             return { messages: [], cursor: { nextIndex: null } };
         }
-        const topic = Topic.fromString(historyTopic(this.myAddress, peerAddress));
+        const isMine = feedOwner.toLowerCase() === this.myAddress.toLowerCase();
+        const chapter = isMine ? getMyChatChapter() : getPeerChatChapter(peerAddress);
+        const topic = Topic.fromString(historyTopic(this.myAddress, peerAddress, chapter));
         const ownerNormalized = feedOwner.replace(/^0x/i, "").toLowerCase();
         return this.loadPages(topic, ownerNormalized, publisherBeeNodePubKey, cursor.nextIndex, pageCount);
     }
@@ -150,26 +295,38 @@ export class ChatHistory {
         let currentIndex = startIndex;
         let loaded = 0;
         while (loaded < pageCount && currentIndex >= 0) {
-            // Two distinct failure modes here — treating them the same way is
-            // what caused recovery to stall on bad pages:
-            //   1) downloadReference throws → feed boundary reached (no index
-            //      at or below currentIndex exists). Correct to break.
-            //   2) downloadFile throws → feed index exists but the /bzz chunk
-            //      isn't retrievable (sender hasn't propagated, ACT grant
-            //      missing, 2.7.x Bee can't fetch yet). Skip the page and keep
-            //      walking — older pages may still be retrievable.
-            let ref;
+            // Three distinct failure modes:
+            //   1) downloadReference throws → feed boundary. Break.
+            //   2) wrapper chunk unavailable / wrong size → legacy entry or
+            //      chunk not propagated. Skip this index, keep walking.
+            //   3) page download throws (ACT decrypt / missing /bzz) → same,
+            //      skip and keep walking. Older pages may still be retrievable.
+            let wrapperRef;
             try {
                 const feedIndex = FeedIndex.fromBigInt(BigInt(currentIndex));
                 const result = await reader.downloadReference({ index: feedIndex });
-                ref = result.reference.toHex();
+                wrapperRef = result.reference.toHex();
             }
             catch {
                 break; // case 1 — feed boundary
             }
             try {
-                const data = await this.client.downloadFile(ref, {
+                const wrapperBytes = await this.client.downloadData(wrapperRef, {
+                    skipDecryption: true,
+                });
+                if (wrapperBytes.length !== WRAPPER_BYTES) {
+                    // Case 2 — legacy feed entry from before the wrapper format
+                    // (bare 32-byte actRef with no hist). We can't decrypt without
+                    // actHistoryAddress, so skip. Users who have only legacy entries
+                    // will see empty recovery; newly-sent messages use the wrapper.
+                    currentIndex--;
+                    continue;
+                }
+                const actRef = bytes32ToHex(wrapperBytes, 0);
+                const actHist = bytes32ToHex(wrapperBytes, 32);
+                const data = await this.client.downloadFile(actRef, {
                     actPublisher: publisherBeeNodePubKey,
+                    actHistoryAddress: actHist,
                     skipDecryption: true,
                 });
                 const page = JSON.parse(new TextDecoder().decode(data));
@@ -179,7 +336,7 @@ export class ChatHistory {
                 loaded++;
             }
             catch {
-                // case 2 — page unavailable, don't count it but keep walking
+                // Case 3 — page or wrapper unavailable; keep walking.
             }
             currentIndex--;
         }
