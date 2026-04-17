@@ -395,6 +395,18 @@ export class SwarmChannel implements IChannel {
     const scope = ops[0]?.context?.scope ?? "global";
     const branch = ops[0]?.context?.branch ?? "main";
 
+    // Diagnostic: log what action types are being pushed per doc/scope.
+    // Lets us see (e.g.) that a drive's ADD_FILE is actually leaving the
+    // main browser; recovery misses that previously looked like pull bugs
+    // were often "the push never happened".
+    const actionTypes = ops
+      .map((o: any) => o.operation?.action?.type ?? "?")
+      .slice(0, 5)
+      .join(",");
+    this.logger.info(
+      `[SwarmChannel] Push ${docId.slice(0, 8)} scope=${scope} idx=${startIndex}-${endIndex} ops=[${actionTypes}${ops.length > 5 ? "…" : ""}]`,
+    );
+
     // Serialize manifest read-modify-write per document.
     // Without this, concurrent pushes for the same doc race:
     // both read manifest with N batches, both append → write N+1,
@@ -794,6 +806,23 @@ export class SwarmChannel implements IChannel {
         // Process "document" scope first (creates the document), then others
         const scopeOrder = ["document", ...Array.from(byScope.keys()).filter(s => s !== "document")];
         const branch = allOps[0]?.context?.branch ?? "main";
+
+        // Diagnostic: summarize what's in each scope so recovery problems
+        // (missing ADD_FILE, ops stuck in wrong scope, etc.) are visible
+        // without having to instrument a live session.
+        const scopeSummary = scopeOrder
+          .map((s) => {
+            const ops = byScope.get(s) ?? [];
+            const actionTypes = ops
+              .map((o: any) => o.operation?.action?.type ?? "?")
+              .slice(0, 5)
+              .join(",");
+            return `${s}=${ops.length}${ops.length > 0 ? `[${actionTypes}${ops.length > 5 ? "…" : ""}]` : ""}`;
+          })
+          .join(" ");
+        this.logger.info(
+          `[SwarmChannel] Pull doc ${docId.slice(0, 8)} (${docMeta.get(docId)?.documentType ?? "?"}): ${scopeSummary}`,
+        );
 
         for (const scope of scopeOrder) {
           const scopeOps = byScope.get(scope);

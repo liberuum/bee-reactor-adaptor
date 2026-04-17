@@ -490,13 +490,29 @@ export async function createReactor(localPackage?: DocumentModelLib) {
 
     logger.info("[SwarmPlugin] Toast notifications active");
 
-    // Initial registration attempt (covers the common case where drives are
-    // already hydrated by the time the Swarm plugin becomes ready).
-    // Additional coverage:
-    //   - "plugin:ready" event also calls registerSwarmRemotes() (above),
-    //     so late plugin init is handled.
-    //   - Reactor's "created" drive-change event listener registers any
-    //     new or late-hydrated drives.
+    // Retry every 3s for up to 30s to catch drives that hydrate late
+    // (reactor boot + drive fetch can stagger past the first attempt).
+    // Registration itself is idempotent, and recovery-pull only fires on
+    // a truly-new remote (`registered > 0` branch), so extra attempts
+    // are safe and don't re-pull already-processed batches.
+    let attempts = 0;
+    const retryInterval = setInterval(async () => {
+      attempts++;
+      try {
+        const done = await registerSwarmRemotes();
+        if (done || attempts >= 10) {
+          clearInterval(retryInterval);
+          if (!done && attempts >= 10) {
+            console.log("[SwarmChannel] Gave up waiting for drives after 30s");
+          }
+        }
+      } catch (err) {
+        console.warn("[SwarmChannel] Registration attempt failed:", err);
+        if (attempts >= 10) clearInterval(retryInterval);
+      }
+    }, 3000);
+
+    // Fire once immediately (common case: drives already hydrated).
     registerSwarmRemotes().catch((err) =>
       console.warn("[SwarmChannel] Initial registration failed:", err),
     );
