@@ -77,13 +77,30 @@ export async function clearSwarmStorage(
     } catch { /* best effort */ }
   }
 
+  // Helper: pull the request URL + status off an axios-style error so we
+  // can see exactly which endpoint 404'd (bee-js wraps axios internally).
+  const describeErr = (err: unknown): string => {
+    const anyErr = err as any;
+    const url = anyErr?.response?.config?.url ?? anyErr?.config?.url;
+    const method = (anyErr?.response?.config?.method ?? anyErr?.config?.method ?? "").toUpperCase();
+    const status = anyErr?.response?.status ?? anyErr?.status;
+    const body =
+      (typeof anyErr?.response?.data === "string" && anyErr.response.data) ||
+      anyErr?.response?.data?.message ||
+      (err instanceof Error ? err.message : String(err));
+    if (url) {
+      return `${method || "?"} ${url} → ${status ?? "?"}: ${body}`;
+    }
+    return err instanceof Error ? err.message : String(err);
+  };
+
   let currentManifest = null;
   try {
     currentManifest = await swarmClient.readUserManifest(ownerAddress);
   } catch (err) {
     console.warn(
       "[SwarmPlugin] clearSwarmStorage: readUserManifest failed:",
-      err instanceof Error ? err.message : err,
+      describeErr(err),
     );
   }
 
@@ -101,22 +118,24 @@ export async function clearSwarmStorage(
       } catch (err) {
         console.warn(
           `[SwarmPlugin] clearSwarmStorage: clearDriveManifest(${driveId.slice(0, 8)}) failed:`,
-          err instanceof Error ? err.message : err,
+          describeErr(err),
         );
       }
     }
   }
 
-  // Write empty user manifest. Try tracked first; if createTag / the
-  // tracked write itself 404s (some Bee setups disable or restrict the
-  // tag endpoints), retry once without tracking rather than hand a raw
-  // axios error to the UI.
+  // Write an updated user manifest that drops drives but PRESERVES chat
+  // state: chatPeers (conversation list for recovery), chatHistory feeds
+  // (untouched), and the publicKey. "Clear Swarm storage" from the UI
+  // means "wipe my drives+docs on Swarm" — it should not destroy
+  // conversations the user has had with other people.
   const emptyManifest = {
     address: currentManifest?.address ?? ownerAddress,
     beeNodePublicKey: currentManifest?.beeNodePublicKey,
     documents: {},
     drives: {},
     stamps: currentManifest?.stamps ?? {},
+    chatPeers: currentManifest?.chatPeers,
     updatedAt: new Date().toISOString(),
   };
   let tagUid: number | undefined;
@@ -130,9 +149,17 @@ export async function clearSwarmStorage(
   } catch (err) {
     console.warn(
       "[SwarmPlugin] clearSwarmStorage: tracked updateUserManifest failed, retrying without tracking:",
-      err instanceof Error ? err.message : err,
+      describeErr(err),
     );
-    await swarmClient.updateUserManifest(ownerAddress, emptyManifest as any);
+    try {
+      await swarmClient.updateUserManifest(ownerAddress, emptyManifest as any);
+    } catch (err2) {
+      console.warn(
+        "[SwarmPlugin] clearSwarmStorage: untracked updateUserManifest also failed:",
+        describeErr(err2),
+      );
+      throw err2;
+    }
   }
 
   // Tag API is a nice-to-have for propagation confirmation. If it fails
