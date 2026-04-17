@@ -73,6 +73,38 @@ export async function ensureDriveInUserManifest(client, ownerAddress, driveId, d
         console.log(`[ManifestManager] User manifest updated: drive "${driveName}" (${driveId.slice(0, 8)}), total drives: ${Object.keys(manifest.drives).length}`);
     });
 }
+/**
+ * Add a chat peer's signer address to the user manifest so the
+ * conversation list can be reconstructed after a fresh install.
+ *
+ * Serialized through the same per-owner mutex as drive updates, so
+ * concurrent startSession calls (e.g. two peers pinging us at once)
+ * don't clobber each other.
+ */
+export async function ensureChatPeerInUserManifest(client, ownerAddress, peerAddress) {
+    const normalizedPeer = peerAddress.toLowerCase();
+    return enqueueUserManifestWrite(ownerAddress, async () => {
+        let manifest = await client.readUserManifest(ownerAddress);
+        if (!manifest) {
+            manifest = {
+                address: ownerAddress,
+                documents: {},
+                drives: {},
+                stamps: {},
+                updatedAt: new Date().toISOString(),
+            };
+        }
+        const existing = manifest.chatPeers ?? [];
+        // Normalize for dedup, then preserve original order
+        const existingNormalized = new Set(existing.map((p) => p.toLowerCase()));
+        if (existingNormalized.has(normalizedPeer))
+            return;
+        manifest.chatPeers = [...existing, normalizedPeer];
+        manifest.updatedAt = new Date().toISOString();
+        await client.updateUserManifest(ownerAddress, manifest);
+        console.log(`[ManifestManager] Chat peer added: ${normalizedPeer.slice(0, 10)}, total peers: ${manifest.chatPeers.length}`);
+    });
+}
 // ═══════════════════════════════════════════════════════════════
 // Drive Manifest
 // ═══════════════════════════════════════════════════════════════

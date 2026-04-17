@@ -49,6 +49,13 @@ export declare class ChatManager {
      */
     getSession(peerAddress: string): ChatSession | undefined;
     /**
+     * Read the list of chat peers previously recorded in the user manifest.
+     * Used by Connect to reconstruct the conversation list on a fresh
+     * browser — without this, recovery would only discover conversations
+     * after the peer sends another message.
+     */
+    listKnownChatPeers(): Promise<string[]>;
+    /**
      * List all active sessions.
      */
     listSessions(): ChatSession[];

@@ -194,6 +194,45 @@ export function useChat() {
         });
 
         console.log("[Chat UI] Subscribed to ChatManager events");
+
+        // Recover known chat peers from the user manifest on Swarm so a
+        // fresh browser rebuilds the conversation list. Fire-and-forget —
+        // each peer with no local record kicks off a lazy session start.
+        void (async () => {
+          try {
+            const peers: string[] = await manager.listKnownChatPeers();
+            if (peers.length === 0) return;
+            const locallyKnown = new Set(messagesRef.current.keys());
+            const toRecover = peers.filter((p) => !locallyKnown.has(p));
+            if (toRecover.length === 0) {
+              console.log(`[Chat UI] ${peers.length} known peers — all already local`);
+              return;
+            }
+            console.log(`[Chat UI] Recovering ${toRecover.length} peer(s) from Swarm manifest`);
+            for (const peerAddress of toRecover) {
+              try {
+                await manager.startSession(peerAddress, { skipGsoc: true });
+                // Seed an empty bucket so the conversation shows in the list
+                // even before history has been fetched — openConversation
+                // will lazily pull history when clicked.
+                if (!messagesRef.current.has(peerAddress)) {
+                  messagesRef.current.set(peerAddress, []);
+                }
+              } catch (err) {
+                console.warn(
+                  `[Chat UI] Could not recover peer ${peerAddress.slice(0, 10)}:`,
+                  err instanceof Error ? err.message : err,
+                );
+              }
+            }
+            refreshConversations();
+          } catch (err) {
+            console.warn(
+              "[Chat UI] Chat peer recovery failed:",
+              err instanceof Error ? err.message : err,
+            );
+          }
+        })();
       }
 
       refreshConversations();

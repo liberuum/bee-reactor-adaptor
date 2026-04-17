@@ -79,6 +79,11 @@ export interface SwarmUserManifest {
     drives: Record<string, UserDriveEntry>;
     /** Stamp info for monitoring storage health */
     stamps: Record<string, UserStampEntry>;
+    /** Signer addresses of peers the user has had chat sessions with.
+     *  Lets a fresh browser rebuild the conversation list on recovery —
+     *  chat history itself lives in ACT-encrypted feeds keyed by the
+     *  sorted pair of addresses. Optional for backward compat. */
+    chatPeers?: string[];
     updatedAt: string;
 }
 export interface UserDocumentEntry {

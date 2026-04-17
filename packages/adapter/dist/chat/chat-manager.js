@@ -119,6 +119,14 @@ export class ChatManager {
         }
         session.ready = true;
         this.sessions.set(peerSignerAddress, session);
+        // Record the peer in the user manifest so a fresh browser can
+        // reconstruct the conversation list on recovery. Fire-and-forget —
+        // failure to record shouldn't block the session from becoming ready.
+        import("../channel/manifest-manager.js")
+            .then(({ ensureChatPeerInUserManifest }) => ensureChatPeerInUserManifest(this.client, this.myAddress, peerSignerAddress))
+            .catch((err) => {
+            console.warn(`[Chat] Failed to record peer in user manifest:`, err instanceof Error ? err.message : err);
+        });
         this.emit({ type: "session-ready", data: { peerAddress: peerSignerAddress } });
         return session;
     }
@@ -127,6 +135,23 @@ export class ChatManager {
      */
     getSession(peerAddress) {
         return this.sessions.get(peerAddress);
+    }
+    /**
+     * Read the list of chat peers previously recorded in the user manifest.
+     * Used by Connect to reconstruct the conversation list on a fresh
+     * browser — without this, recovery would only discover conversations
+     * after the peer sends another message.
+     */
+    async listKnownChatPeers() {
+        try {
+            const manifest = await this.client.readUserManifest(this.myAddress);
+            const peers = manifest?.chatPeers ?? [];
+            return peers.map((p) => p.toLowerCase());
+        }
+        catch (err) {
+            console.warn("[Chat] Could not read known chat peers:", err instanceof Error ? err.message : err);
+            return [];
+        }
     }
     /**
      * List all active sessions.

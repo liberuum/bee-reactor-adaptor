@@ -17,6 +17,15 @@ import type { SwarmClient } from "../swarm-client.js";
  */
 export declare function ensureDriveInUserManifest(client: SwarmClient, ownerAddress: string, driveId: string, driveName: string, preferredEditor?: string): Promise<void>;
 /**
+ * Add a chat peer's signer address to the user manifest so the
+ * conversation list can be reconstructed after a fresh install.
+ *
+ * Serialized through the same per-owner mutex as drive updates, so
+ * concurrent startSession calls (e.g. two peers pinging us at once)
+ * don't clobber each other.
+ */
+export declare function ensureChatPeerInUserManifest(client: SwarmClient, ownerAddress: string, peerAddress: string): Promise<void>;
+/**
  * Update the drive manifest from the reactor's drive state.
  *
  * Extracts nodes (files + folders) from the drive document and writes
