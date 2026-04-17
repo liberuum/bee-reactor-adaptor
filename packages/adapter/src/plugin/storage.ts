@@ -77,19 +77,31 @@ export async function clearSwarmStorage(
     } catch { /* best effort */ }
   }
 
-  // Helper: pull the request URL + status off an axios-style error so we
-  // can see exactly which endpoint 404'd (bee-js wraps axios internally).
+  // Helper: pull the request URL + status off a bee-js BeeResponseError
+  // (method/url/status/responseBody live directly on the error instance —
+  // bee-js flattens axios's shape) or an axios error. Gives us the
+  // exact endpoint that 404'd instead of a generic "Request failed".
   const describeErr = (err: unknown): string => {
     const anyErr = err as any;
-    const url = anyErr?.response?.config?.url ?? anyErr?.config?.url;
-    const method = (anyErr?.response?.config?.method ?? anyErr?.config?.method ?? "").toUpperCase();
-    const status = anyErr?.response?.status ?? anyErr?.status;
+    const method = (
+      anyErr?.method ??
+      anyErr?.response?.config?.method ??
+      anyErr?.config?.method ??
+      ""
+    ).toString().toUpperCase();
+    const url =
+      anyErr?.url ??
+      anyErr?.response?.config?.url ??
+      anyErr?.config?.url;
+    const status = anyErr?.status ?? anyErr?.response?.status;
     const body =
-      (typeof anyErr?.response?.data === "string" && anyErr.response.data) ||
-      anyErr?.response?.data?.message ||
-      (err instanceof Error ? err.message : String(err));
+      anyErr?.responseBody ??
+      ((typeof anyErr?.response?.data === "string" && anyErr.response.data) ||
+        anyErr?.response?.data?.message ||
+        (err instanceof Error ? err.message : String(err)));
+    const bodyStr = typeof body === "string" ? body : JSON.stringify(body);
     if (url) {
-      return `${method || "?"} ${url} → ${status ?? "?"}: ${body}`;
+      return `${method || "?"} ${url} → ${status ?? "?"}: ${bodyStr}`;
     }
     return err instanceof Error ? err.message : String(err);
   };
