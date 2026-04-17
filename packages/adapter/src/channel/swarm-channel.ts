@@ -623,11 +623,25 @@ export class SwarmChannel implements IChannel {
    * re-downloading and re-applying the same operations.
    */
   async pullFromSwarm(): Promise<boolean> {
-    if (this.isShutdown || !this.swarmClient) {
-      this.logger.warn(
-        `[SwarmChannel] pullFromSwarm early-exit: isShutdown=${this.isShutdown} swarmClient=${!!this.swarmClient}`,
-      );
+    if (this.isShutdown) {
+      this.logger.warn(`[SwarmChannel] pullFromSwarm early-exit: isShutdown`);
       return false;
+    }
+
+    // Channels load from the reactor's persisted sync_remotes on startup —
+    // that can happen BEFORE the SwarmPlugin populates window.ph.swarm.client,
+    // in which case init()'s resolveSwarmClient() found nothing and this.swarmClient
+    // is still null. Re-resolve lazily now that the plugin has had time to
+    // initialize. Matches the pattern handleOutboxAdded already uses.
+    if (!this.swarmClient) {
+      this.resolveSwarmClient();
+      if (!this.swarmClient) {
+        this.logger.warn(
+          `[SwarmChannel] pullFromSwarm early-exit: swarmClient still unresolved — window.ph.swarm.client not set yet`,
+        );
+        return false;
+      }
+      this.logger.info(`[SwarmChannel] Lazily resolved swarmClient in pullFromSwarm`);
     }
 
     this.recoveryInProgress = true;
