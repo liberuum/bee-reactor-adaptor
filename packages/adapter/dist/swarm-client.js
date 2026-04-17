@@ -71,13 +71,25 @@ export class SwarmClient {
             const created = await this.bee.createTag();
             tag = created.uid;
         }
-        const result = await this.bee.uploadData(this.batchId, payload, {
-            act: options?.act,
-            actHistoryAddress: options?.actHistoryAddress,
-            redundancyLevel: options?.redundancyLevel,
-            tag,
-            deferred: options?.deferred,
-        });
+        let result;
+        try {
+            result = await this.bee.uploadData(this.batchId, payload, {
+                act: options?.act,
+                actHistoryAddress: options?.actHistoryAddress,
+                redundancyLevel: options?.redundancyLevel,
+                tag,
+                deferred: options?.deferred,
+            });
+        }
+        catch (err) {
+            // Diagnostic: the app has hit "batch with id not found" with a stamp
+            // that responds 201 when curled directly. Log the exact batchId the
+            // client is passing to bee-js so we can compare byte-for-byte.
+            if (err?.status === 404 || /batch with id not found/i.test(String(err?.responseBody ?? err?.message ?? ""))) {
+                console.warn(`[SwarmClient] uploadData(/bytes) 404 with batchId=${JSON.stringify(this.batchId)} (type=${typeof this.batchId}, length=${this.batchId?.length})`);
+            }
+            throw err;
+        }
         const historyRef = result.historyAddress?.value ?? result.historyAddress;
         return {
             reference: result.reference.toHex(),
