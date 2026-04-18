@@ -307,12 +307,76 @@ describe("Collab end-to-end latency", () => {
       expect(loadCalledAt).toBeGreaterThan(0);
       const totalLatencyMs = loadCalledAt - startedAt;
       const postCommitLatencyMs = loadCalledAt - committedAt;
-      console.log(`GSOC-triggered latency:`);
+      console.log(`GSOC-triggered latency (inline fast path):`);
       console.log(`  A commit → B reactor.load TOTAL: ${totalLatencyMs}ms`);
-      console.log(`  A write DONE → B reactor.load: ${postCommitLatencyMs}ms (propagation + pull)`);
-      // With GSOC working we expect post-commit propagation well under
-      // the 5s poll interval. Total includes A's own write time.
-      expect(totalLatencyMs).toBeLessThan(60_000);
+      console.log(`  A write DONE → B reactor.load: ${postCommitLatencyMs}ms (ping + apply)`);
+      // Inline path: post-commit latency is essentially GSOC delivery +
+      // reactor.load. Cross-node GSOC arrives in ~1-4s on these Bee
+      // nodes, so we expect <6s post-commit.
+      expect(postCommitLatencyMs).toBeLessThan(15_000);
+    } finally {
+      managerA.shutdown();
+      managerB.shutdown();
+    }
+  }, 240_000);
+
+  it("GSOC refs-only fast path: oversized ops fall back to /bzz fetch, no feed read", async () => {
+    const driveId = `gsoclatbig-${Date.now().toString(16)}`;
+    const docId = `doc-${Math.random().toString(16).slice(2, 10)}`;
+    const collabId = buildCollabId("document", driveId, docId);
+
+    const { managerA, managerB } = await buildPair(true, collabId, driveId, docId);
+    try {
+      let loadCalledAt = 0;
+      (globalThis as any).window.ph = {
+        reactorClient: {
+          load: async (d: string, br: string, ops: any[]) => {
+            loadCalledAt = Date.now();
+            void d; void br; void ops;
+          },
+          get: async () => ({ state: { global: { nodes: [] } } }),
+        },
+      };
+      await (managerA as any).provisionOutboundGsoc(collabId, [
+        { address: addrA, beeNodePublicKey: beePubA, joinedAt: "" },
+        { address: addrB, beeNodePublicKey: beePubB, joinedAt: "" },
+      ]);
+      await (managerB as any).provisionOutboundGsoc(collabId, [
+        { address: addrA, beeNodePublicKey: beePubA, joinedAt: "" },
+        { address: addrB, beeNodePublicKey: beePubB, joinedAt: "" },
+      ]);
+      await new Promise((r) => setTimeout(r, 8_000));
+      const summaryB = (managerB as any).summaries.get(collabId);
+      await (managerB as any).subscribeToPeerGsoc(summaryB);
+      await new Promise((r) => setTimeout(r, 2_000));
+
+      // Build ops that exceed the inline budget (10KB blob). The ping
+      // will carry only refs; B must fetch the batch via /bzz.
+      const ops = [{
+        operation: {
+          id: "op-big-1",
+          index: 0,
+          hash: "h1",
+          timestampUtcMs: Date.now(),
+          action: { type: "PASTE", input: { blob: "z".repeat(12_000) } },
+        },
+        context: { documentId: docId, scope: "global", branch: "main" },
+      }];
+
+      const startedAt = Date.now();
+      await managerA.handleLocalPush({ driveId, docId, ops, scope: "global", branch: "main" });
+      const committedAt = Date.now();
+
+      while (loadCalledAt === 0 && Date.now() - startedAt < 90_000) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      expect(loadCalledAt).toBeGreaterThan(0);
+      const postCommitLatencyMs = loadCalledAt - committedAt;
+      console.log(`GSOC-triggered latency (refs-only fast path, oversized batch):`);
+      console.log(`  A write DONE → B reactor.load: ${postCommitLatencyMs}ms (GSOC ping + /bzz fetch + apply)`);
+      // Refs path: GSOC ping (~1-4s) + /bzz fetch with backoff retries
+      // (~1-10s depending on chunk propagation). Allow a generous 60s.
+      expect(postCommitLatencyMs).toBeLessThan(60_000);
     } finally {
       managerA.shutdown();
       managerB.shutdown();

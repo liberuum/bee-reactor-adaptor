@@ -113,8 +113,11 @@ export class CollabOpsFeed {
     documentId: string | undefined,
     batch: CollabOpsBatch,
     granteeHistRef: string,
-  ): Promise<void> {
-    // Upload ACT-protected batch payload to /bzz.
+  ): Promise<{ actRef: string; actHistoryAddress: string; feedIndex: number }> {
+    // Upload ACT-protected batch payload to /bzz with erasure coding so
+    // it replicates across neighborhoods faster and survives single-node
+    // outages. Level 2 is a cheap availability win per
+    // swarm-protocol-reference.md §9.
     const { reference: actRef, historyAddress } = await this.client.uploadFile(
       JSON.stringify(batch),
       {
@@ -158,6 +161,35 @@ export class CollabOpsFeed {
     }
     await this.client.writeFeedPayloadAtIndex(topic, wrapperRef, nextIndex);
     this.lastWrittenIndex.set(topicHex, nextIndex);
+    return { actRef, actHistoryAddress: actHist, feedIndex: nextIndex };
+  }
+
+  /**
+   * Fast-path download: given the actRef + actHistoryAddress carried
+   * in a GSOC `op-committed` ping, fetch the batch payload directly
+   * from /bzz — bypassing the feed read entirely. This is the main
+   * latency win, because cross-node feed propagation is slower than
+   * cross-node /bzz content-addressed retrieval.
+   *
+   * Returns null on any download/decrypt failure (chunks not yet
+   * propagated to the reader's neighborhood); caller should fall back
+   * to the feed path.
+   */
+  async fetchByRefs(
+    actRef: string,
+    actHistoryAddress: string,
+    publisherBeeNodePubKey: string,
+  ): Promise<CollabOpsBatch | null> {
+    try {
+      const data = await this.client.downloadFile(actRef, {
+        actPublisher: publisherBeeNodePubKey,
+        actHistoryAddress,
+        skipDecryption: true,
+      });
+      return JSON.parse(new TextDecoder().decode(data)) as CollabOpsBatch;
+    } catch {
+      return null;
+    }
   }
 
   // ─── Read side ─────────────────────────────────────────────────

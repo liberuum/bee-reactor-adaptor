@@ -35,6 +35,7 @@ import { CollabOpsFeed } from "./collab-ops-feed.js";
 import type { CollabOpsBatch } from "./collab-ops-feed.js";
 import { CollabManifestFeed } from "./collab-manifest-feed.js";
 import type { CollabManifest } from "./types.js";
+import { checkOpsFit } from "./gsoc-payload-size.js";
 import {
   ensureCollabInUserManifest,
   listCollabsFromUserManifest,
@@ -857,27 +858,269 @@ export class CollabManager {
     notification: unknown,
   ): void {
     // Any ping from a peer in this collab is a signal that they wrote
-    // new ops. Queue an urgent pull for that peer and trigger pollOnce
-    // on the next microtask.
-    const n = notification as { type?: string; data?: { collabId?: string; writerAddress?: string } } | undefined;
+    // new ops. If the ping carries actRef + actHistoryAddress, we can
+    // download directly via /bzz (bypassing the feed read entirely —
+    // the feed propagation delay is the main latency source). Otherwise
+    // fall back to scheduling a poll-loop read for that peer.
+    const n = notification as {
+      type?: string;
+      data?: {
+        collabId?: string;
+        writerAddress?: string;
+        driveId?: string;
+        documentId?: string;
+        actRef?: string;
+        actHistoryAddress?: string;
+        feedIndex?: number;
+        publisherBeeNodePubKey?: string;
+        inlineOps?: unknown[];
+        inlineScope?: string;
+        inlineBranch?: string;
+      };
+    } | undefined;
     const collabId = n?.data?.collabId ?? summary.collabId;
     const writer = (n?.data?.writerAddress ?? writerAddress).toLowerCase();
     if (collabId !== summary.collabId) return;
+
+    const d = n?.data;
+    const hasInline = Array.isArray(d?.inlineOps) && d!.inlineOps!.length > 0 && !!d?.documentId;
+    const hasRefs =
+      !!d?.actRef
+      && !!d?.actHistoryAddress
+      && !!d?.publisherBeeNodePubKey
+      && !!d?.driveId
+      && !!d?.documentId
+      && d?.feedIndex !== undefined;
+
+    if (hasInline) {
+      // Zero-RTT fast path — ops are already in the ping payload.
+      void this.applyInlineOps(summary, writer, {
+        ops: d!.inlineOps!,
+        docId: d!.documentId!,
+        scope: d!.inlineScope ?? "global",
+        branch: d!.inlineBranch ?? "main",
+        feedIndex: d!.feedIndex,
+      });
+    } else if (hasRefs) {
+      // Direct /bzz fetch fast path — skip feed read, fetch by refs.
+      void this.applyFromPing(summary, writer, {
+        actRef: d!.actRef!,
+        actHistoryAddress: d!.actHistoryAddress!,
+        feedIndex: d!.feedIndex!,
+        publisherBeeNodePubKey: d!.publisherBeeNodePubKey!,
+        driveId: d!.driveId!,
+        docId: d!.documentId!,
+      });
+    } else {
+      // Legacy / stripped ping — fall back to the poll-loop path which
+      // reads the feed. Still queue as urgent.
+      this.urgentPulls.add(`${summary.collabId}:${writer}`);
+      void this.pollOnce();
+    }
+  }
+
+  /**
+   * Zero-RTT apply: the ops arrived inline in the GSOC ping. No Swarm
+   * round-trip needed — straight to reactor.load. This is the fastest
+   * path, bound only by GSOC delivery (~1s cross-node) + reactor.load time.
+   */
+  private async applyInlineOps(
+    summary: CollabSummary,
+    writer: string,
+    input: {
+      ops: unknown[];
+      docId: string;
+      scope: string;
+      branch: string;
+      feedIndex?: number;
+    },
+  ): Promise<void> {
+    const ph = (globalThis as any).window?.ph;
+    const reactorClient = ph?.reactorClient;
+    const reactor = ph?.reactor;
+    if (!reactorClient && !reactor?.load) return;
+
+    try {
+      const raw = input.ops;
+      if (!Array.isArray(raw) || raw.length === 0) return;
+      // SwarmChannel pushes OperationWithContext[]; reactor.load needs
+      // bare Operation[]. Unwrap defensively.
+      const ops = raw.map((entry: any) => entry?.operation ?? entry);
+      if (reactor?.load) {
+        await reactor.load(input.docId, input.branch, ops);
+      } else {
+        await reactorClient.load(input.docId, input.branch, ops);
+      }
+      // Advance cursor so the poll loop doesn't redeliver the same batch.
+      if (input.feedIndex !== undefined) {
+        const cursorKey = `${LS_PEER_CURSOR_PREFIX}${summary.collabId}:${writer}:${input.docId}`;
+        const cursor = this.readCursor(cursorKey);
+        if (input.feedIndex + 1 > cursor) {
+          this.writeCursor(cursorKey, input.feedIndex + 1);
+        }
+      }
+      const liveSummary = this.summaries.get(summary.collabId);
+      if (liveSummary) {
+        const updated = { ...liveSummary, lastActivityAt: new Date().toISOString() };
+        this.summaries.set(summary.collabId, updated);
+        this.persist();
+      }
+      this.emit({ type: "op-applied", collabId: summary.collabId });
+      try {
+        (globalThis as any).window?.dispatchEvent(
+          new CustomEvent("swarm:collab:op-applied", {
+            detail: { collabId: summary.collabId },
+          }),
+        );
+      } catch { /* non-browser */ }
+    } catch (err) {
+      console.warn(
+        `[CollabManager] inline-ops apply failed for ${summary.collabId}, falling back to feed pull:`,
+        err instanceof Error ? err.message : err,
+      );
+      this.urgentPulls.add(`${summary.collabId}:${writer}`);
+      void this.pollOnce();
+    }
+  }
+
+  /**
+   * Fast-path: apply a peer's ops directly from the refs carried in
+   * a GSOC ping. Retries a few times with backoff because the /bzz
+   * content chunk may not yet have propagated to our neighborhood
+   * even though the ping did.
+   */
+  private async applyFromPing(
+    summary: CollabSummary,
+    writer: string,
+    refs: {
+      actRef: string;
+      actHistoryAddress: string;
+      feedIndex: number;
+      publisherBeeNodePubKey: string;
+      driveId: string;
+      docId: string;
+    },
+  ): Promise<void> {
+    const ph = (globalThis as any).window?.ph;
+    const reactorClient = ph?.reactorClient;
+    const reactor = ph?.reactor;
+    if (!reactorClient && !reactor?.load) return;
+
+    // Exponential backoff retries for chunk propagation.
+    // Total budget: ~15s (0 + 0.5 + 1 + 2 + 4 + 8 = 15.5s).
+    const waits = [0, 500, 1000, 2000, 4000, 8000];
+    for (const wait of waits) {
+      if (this.shuttingDown) return;
+      if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+      const batch = await this.opsFeed.fetchByRefs(
+        refs.actRef,
+        refs.actHistoryAddress,
+        refs.publisherBeeNodePubKey,
+      );
+      if (!batch) continue;
+      try {
+        const raw = JSON.parse(batch.opsJson);
+        if (!Array.isArray(raw) || raw.length === 0) return;
+        const ops = raw.map((entry: any) => entry?.operation ?? entry);
+        if (reactor?.load) {
+          await reactor.load(refs.docId, batch.branch ?? "main", ops);
+        } else {
+          await reactorClient.load(refs.docId, batch.branch ?? "main", ops);
+        }
+        // Advance cursor to just past this feedIndex so the next
+        // pollSummary doesn't redeliver the same batch.
+        const cursorKey = `${LS_PEER_CURSOR_PREFIX}${summary.collabId}:${writer}:${refs.docId}`;
+        const cursor = this.readCursor(cursorKey);
+        if (refs.feedIndex + 1 > cursor) {
+          this.writeCursor(cursorKey, refs.feedIndex + 1);
+        }
+        const liveSummary = this.summaries.get(summary.collabId);
+        if (liveSummary) {
+          const updated = { ...liveSummary, lastActivityAt: new Date().toISOString() };
+          this.summaries.set(summary.collabId, updated);
+          this.persist();
+        }
+        this.emit({ type: "op-applied", collabId: summary.collabId });
+        try {
+          (globalThis as any).window?.dispatchEvent(
+            new CustomEvent("swarm:collab:op-applied", {
+              detail: { collabId: summary.collabId },
+            }),
+          );
+        } catch { /* non-browser */ }
+        return;
+      } catch (err) {
+        console.warn(
+          `[CollabManager] fast-path apply failed for ${summary.collabId}:`,
+          err instanceof Error ? err.message : err,
+        );
+        return;
+      }
+    }
+    // All retries exhausted — fall back to poll-loop path. Queue an
+    // urgent pull and trigger pollOnce so we don't have to wait for
+    // the 5s timer.
     this.urgentPulls.add(`${summary.collabId}:${writer}`);
     void this.pollOnce();
   }
 
   /**
    * Send op-committed pings to every OTHER participant for a collab.
+   *
+   * Three-tier fast path, in order of speed:
+   *   1. **Inline ops** — if the serialized ops fit within the GSOC
+   *      4KB chunk budget, embed them in the ping. Receiver applies
+   *      immediately with zero Swarm content fetches. Sub-second.
+   *   2. **Refs only** — always include `actRef + actHistoryAddress +
+   *      feedIndex` so a receiver whose ping exceeded the inline budget
+   *      (or missed it) can download the batch via /bzz directly,
+   *      bypassing the feed read.
+   *   3. **Feed** — the actual feed write always happens in the write
+   *      path. Receivers who missed both the ping entirely fall back
+   *      to the poll loop that reads the feed. Recovery / fresh-browser
+   *      rehydrate also reads the feed.
+   *
    * Best-effort — failures don't block the personal push that already
-   * succeeded. Poll-loop is the fallback.
+   * succeeded.
    */
   private async pingPeersForCollab(
     summary: CollabSummary,
     driveId: string,
     docId: string,
+    write?: {
+      actRef: string;
+      actHistoryAddress: string;
+      feedIndex: number;
+      /** Raw OperationWithContext[] — will be inlined if the ping fits. */
+      ops?: unknown[];
+      scope?: string;
+      branch?: string;
+    },
   ): Promise<void> {
     if (!this.gsoc) return;
+    const myBeeNodePubKey = await this.client.getBeeNodePublicKey().catch(() => "");
+
+    // Decide which fast-path tier this batch qualifies for based on
+    // serialized size. See collab/gsoc-payload-size.ts for the full
+    // rationale. Ops sizes vary a lot — a SET_AUTHOR_NAME is ~200B;
+    // paste-a-big-string can be 10KB+. Inline when it fits; otherwise
+    // the ping carries only refs and the receiver does one /bzz fetch
+    // (still faster than a feed read). Feed is always written above.
+    const fit = checkOpsFit(write?.ops, write?.scope, write?.branch);
+    const inlineable =
+      fit.fits && write
+        ? {
+            ops: write.ops!,
+            scope: write.scope ?? "global",
+            branch: write.branch ?? "main",
+          }
+        : null;
+    if (write?.ops?.length) {
+      console.log(
+        `[CollabManager] ping ${summary.collabId} tier=${fit.tier} (${fit.size}B / ${fit.budget}B budget)`,
+      );
+    }
+
     for (const peer of summary.participants) {
       if (peer.address === this.myAddress.toLowerCase()) continue;
       const key = `${summary.collabId}:${peer.address}`;
@@ -893,6 +1136,23 @@ export class CollabManager {
             writerAddress: this.myAddress.toLowerCase(),
             driveId,
             documentId: docId,
+            // Refs fallback — always present when we have them.
+            ...(write
+              ? {
+                  actRef: write.actRef,
+                  actHistoryAddress: write.actHistoryAddress,
+                  feedIndex: write.feedIndex,
+                  publisherBeeNodePubKey: myBeeNodePubKey,
+                }
+              : {}),
+            // Zero-RTT fast path: inline ops when they fit the 4KB chunk.
+            ...(inlineable
+              ? {
+                  inlineOps: inlineable.ops,
+                  inlineScope: inlineable.scope,
+                  inlineBranch: inlineable.branch,
+                }
+              : {}),
           },
         );
       } catch (err) {
@@ -1129,7 +1389,7 @@ export class CollabManager {
           branch: input.branch,
           timestamp: new Date().toISOString(),
         };
-        await this.opsFeed.appendBatch(
+        const writeResult = await this.opsFeed.appendBatch(
           s.collabId,
           input.driveId,
           input.docId,
@@ -1139,9 +1399,16 @@ export class CollabManager {
         const updated = { ...this.summaries.get(s.collabId)!, lastActivityAt: new Date().toISOString() };
         this.summaries.set(s.collabId, updated);
         this.persist();
-        // Fire-and-forget GSOC ping — receiver polls on ping; poll-loop
-        // covers if the ping drops or isn't wired up yet.
-        void this.pingPeersForCollab(updated, input.driveId, input.docId).catch(() => {});
+        // Fire-and-forget GSOC ping. Three-tier fast path: the ping
+        // carries the ops inline if they fit in 4KB; falls back to
+        // actRef/actHistoryAddress for /bzz download; feed still got
+        // written above for catch-up + recovery.
+        void this.pingPeersForCollab(updated, input.driveId, input.docId, {
+          ...writeResult,
+          ops: input.ops,
+          scope: input.scope,
+          branch: input.branch,
+        }).catch(() => {});
       } catch (err) {
         console.warn(
           `[CollabManager] mirror push failed for ${s.collabId} doc ${input.docId.slice(0, 8)}:`,
