@@ -97,7 +97,15 @@ Feeds store plain-text references (content hashes). The data those references po
 
 This separation is why feed-level optimizations (like `uploadReference` vs `uploadPayload`) don't affect encryption — they only change how the 64-char hash is stored in the SOC, not the encrypted data at `/bytes`.
 
-**Sharing uses a different key**: instead of the wallet-derived key, shared data is encrypted with `SHA-256(sender_address:recipient_address)`. Both parties can derive the same key. The share manifest itself is unencrypted (the feed topic is obscure enough — requires knowing both signer addresses).
+**Sharing uses Swarm ACT, not the wallet key.** Cross-user shares and chat
+history ride on Swarm's Access Control Trie: the publisher's Bee node performs
+ECDH(`publisher_privkey` × `grantee_pubkey`) to derive a per-session key.
+A third party who only knows public addresses cannot derive it (discrete-log
+problem). The Bee node handles encrypt/decrypt transparently — we call
+`uploadFile({ act: true, actHistoryAddress, skipEncryption: true })` on the
+sender side and `downloadFile({ actPublisher, actHistoryAddress, skipDecryption: true })`
+on the recipient side. Share manifests and public profiles stay unencrypted
+(they're discovery indexes); the data they point to is ACT-protected.
 
 ---
 
@@ -111,14 +119,17 @@ The `SwarmClient` class wraps the Bee SDK and provides:
 |--------|-------------|
 | `uploadData(data)` | Encrypt with AES-256-GCM + upload to /bytes → returns content hash |
 | `downloadData(ref)` | Download from /bytes + auto-decrypt if SWE prefix detected |
-| `uploadSharedData(data, sender, recipient)` | Encrypt with SHA-256 shared key + upload to /bytes |
-| `downloadSharedData(ref, sender, recipient)` | Download from /bytes + decrypt with shared key |
+| `uploadFile(data, { act, actHistoryAddress, skipEncryption })` | ACT-protected /bzz upload. Bee node encrypts via ECDH. |
+| `downloadFile(ref, { actPublisher, actHistoryAddress, skipDecryption })` | ACT-protected /bzz download. Bee node decrypts via ECDH. |
+| `createGrantees(pubKeys)` / `patchGrantees(granteeRef, historyRef, pubKeys)` | Maintain ACT grantee lists |
+| `pssSend(topic, target, data, recipientPubKey)` / `pssSubscribe` | PSS 1-to-1 encrypted messaging |
+| `gsocSend(signer, identifier, data)` / `gsocSubscribe` | GSOC sub-second notifications |
 | `updateManifest(docId, manifest)` | Upload manifest to /bytes (encrypted), write reference to feed |
 | `readManifest(docId)` | Read feed → dereference → download from /bytes → decrypt → parse |
 | `updateDriveManifest(driveId, manifest)` | Same pattern for drive-level manifest |
 | `updateUserManifest(address, manifest)` | Same pattern for user-level index |
 | `getStampStatus()` | Postage stamp health, capacity, cost |
-| `grantAccess() / revokeAccess()` | ACT access control (built, not yet integrated into sharing) |
+| `grantAccess() / revokeAccess()` | ACT grantee list maintenance (wired into sharing + chat history) |
 
 The client also handles:
 - **Per-topic write locks** — prevents concurrent feed writes from getting the same index
@@ -150,14 +161,19 @@ The plugin layer (`plugin/init.ts`) still handles Bee node detection, stamp
 selection, wallet key derivation, and UI event emission. The sharing flow
 (`plugin/sharing.ts`) operates independently of the sync channel.
 
-### Layer 3: Connect Settings UI (swarm-storage.tsx)
+### Layer 3: Connect UI
 
-The settings panel in Connect that shows:
+The `swarm-settings/` panel in Connect shows:
 - Connection status and Bee node health
 - Storage capacity, TTL, and utilization
 - Document tree with per-doc sync status badges
 - Stamp management (extend, expand, create new)
-- Clear storage and reconnect controls
+- Share / import sections
+- Clear local data + reconnect controls
+
+The `components/chat/` panel ships the chat UI: conversation list, thread,
+composer (with the document-share picker modal), files tab, inline previews,
+and the two-step "Clear all chats" button that triggers chapter rotation.
 
 ---
 
@@ -368,6 +384,59 @@ PENDING → RUNNING → WRITE_READY → READ_READY
 | `reactorClient.addDrive(...)` | Create a new local drive |
 | `syncManager.add(remoteName, collectionId, config)` | Register a sync remote (Swarm or GQL) |
 | `reactor.load(docId, branch, ops)` | Apply remote operations to a document |
+
+---
+
+## Cross-User Sharing (ACT)
+
+Sharing documents with another Swarm user goes through three Swarm objects:
+
+1. **Public profile** at `ph:v2:profile:<address>` — unencrypted, lists the
+   user's Bee node public key and overlay address. Needed for PSS and ACT.
+2. **Share manifest** at `ph:v2:share:<sender>:<recipient>` — unencrypted
+   index listing each shared drive's ACT reference, grantee ref, and history
+   address. Carries `version: 2` on all new writes.
+3. **Share bundle** at a content-addressed `/bzz` reference — ACT-protected,
+   contains `{ documents, folders, docFolders, preferredEditor }`. The Bee
+   node encrypts it with ECDH(`publisher_privkey` × `recipient_bee_pubkey`).
+
+The bundle is built by `buildDriveShareBundle()` in
+[`plugin/sharing.ts`](../src/plugin/sharing.ts). It reads operations from the
+local reactor (including unflushed outbox ops) and falls back to Swarm
+manifests only when a document isn't present locally. Imported operations
+keep the sender's signer intact so authorship is preserved on the recipient.
+
+The same helper is used by the Settings share panel and the in-chat document
+share picker — full parity, single source of truth.
+
+`version: 1` manifests (SHA-256-derived key) are read-only fallback for
+existing shares from the previous scheme. No new writes use v1.
+
+---
+
+## Chat
+
+See [`chat-collaboration-design.md`](./chat-collaboration-design.md) for the
+full design; the summary:
+
+- **PSS 1-to-1 messaging** carries the live message stream on
+  `ph:v2:chat:<sorted(A,B)>`. Mined Trojan chunks, 2–10s latency.
+- **Chat history** persists on `ph:v2:chatlog:<sorted(A,B)>[:chapter]` as an
+  ACT-protected feed. Each feed update points to a small wrapper chunk
+  containing `actRef || actHistoryAddress` — self-contained, both parties
+  can decode without side-channel state.
+- **Chapter rotation** on Clear-All-Chats: the chapter value (a `Date.now()`
+  millisecond, stored in localStorage but reconstructable from its strictly
+  increasing property) is appended to the feed topic. Clearing bumps the
+  chapter, so the new feed is a genuinely new namespace. Peers learn the new
+  chapter from the first PSS message after clear.
+- **Session recovery** reads `chatPeers[]` from the user manifest, so a fresh
+  browser rehydrates all known conversations from wallet + Bee alone.
+- **Attachments:** raw files via ACT-protected `/bzz` (grantees = recipient's
+  Bee pubkey). Document shares reuse the sharing flow above.
+- **GSOC notifications** (typing, presence, delivery, doc-updated) exist on
+  the adapter and are the transport for the upcoming live-collaboration work.
+  UI for typing/presence is parked; live collab is the next track.
 
 ---
 

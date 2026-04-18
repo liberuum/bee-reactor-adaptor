@@ -420,14 +420,116 @@ User Manifest (one per user, keyed by Ethereum address)
 │  │  Anyone with the owner's public key can read.       │
 │  │                                                    │
 │  ▼                                                    │
-│  Cross-User Sharing                                   │
+│  Cross-User Sharing (ACT)                            │
 │  │                                                    │
-│  │  SHA-256(senderAddress + recipientAddress)           │
-│  │  → Derived shared key for AES-256-GCM               │
-│  │  → Both parties can derive the same key              │
-│  │  → Shared feed: deterministic topic from both IDs    │
+│  │  Swarm ACT — Access Control Trie                   │
+│  │  session_key = SHA-256(                            │
+│  │    ECDH(publisher_privkey × grantee_pubkey)        │
+│  │    || salt                                         │
+│  │  )                                                 │
+│  │                                                    │
+│  │  Only the publisher's Bee node has privkey,        │
+│  │  so a third party who knows both public addrs      │
+│  │  cannot derive the key (discrete-log problem).     │
+│  │                                                    │
+│  │  Upload:   uploadFile({ act: true,                 │
+│  │             actHistoryAddress, skipEncryption })   │
+│  │  Download: downloadFile({ actPublisher,            │
+│  │             actHistoryAddress, skipDecryption })   │
+│  │                                                    │
+│  │  Grantees maintained via createGrantees() /        │
+│  │  patchGrantees(). Used for document sharing,       │
+│  │  chat history feeds, and raw chat attachments.     │
+│                                                       │
+│  Chat Messages (PSS)                                  │
+│  │  Recipient's Bee pubkey encrypts each message.     │
+│  │  Trojan chunks land in recipient's neighborhood.   │
 │                                                       │
 └──────────────────────────────────────────────────────┘
+```
+
+## Chat Flow (PSS + ACT feed history)
+
+```
+Alice                                   Swarm                                   Bob
+═════                                   ═════                                   ═══
+
+1. Open conversation with Bob
+   │
+   │  lookupUser(bobAddr)
+   │  ──────────────────►  read ph:v2:profile:<bob>
+   │  ◄──────────────────  { beeNodePublicKey, overlayAddress }
+   │
+2. Send "hi"
+   │
+   │  PSS send
+   │  topic   = ph:v2:chat:<sorted(alice, bob)>
+   │  target  = first 4 chars of bob.overlay
+   │  payload = encrypted( { text, from, chapter, msgId } )
+   │  ────────────────►    Trojan chunk mined (2-10s)
+   │                       Lands in bob's neighborhood
+   │                                              ◄──────   3. pssSubscribe(chatTopic)
+   │                                                         decrypt → hand to ChatManager
+   │                                                         seenMessageIds guard
+   │                                                         dispatch to UI
+   │
+4. Persist to history feed (debounced, batched pages)
+   │
+   │  ACT upload page  ────►  /bzz  (encrypted by Bee via ECDH)
+   │  write wrapper   ────►  /bytes  (64-byte: actRef || actHist)
+   │  update feed     ────►  ph:v2:chatlog:<sorted(alice, bob)>[:chapter]
+   │                         grantees: { alice.beePub, bob.beePub }
+   │
+   │                                              5. loadPages(peer=alice)
+   │                                                 read feed → wrapper → ACT download
+   │                                                 merge with own feed → render
+   │
+─────────────────────────────────────────────────────────────────────────────────
+6. Clear all chats (alice side)
+   │
+   │  bumpMyChatChapter()  → Date.now() (wipe-safe)
+   │  localStorage.setItem("swarm:chatMyChapter", newChapter)
+   │  clearChatPeersInUserManifest()
+   │
+   │  Next PSS message carries `chapter: <newChapter>`
+   │                                              7. Bob records alice's new chapter
+   │                                                 All reads of alice's history
+   │                                                 use the new chapter topic
+```
+
+## Document Share in Chat
+
+```
+Alice picks docs in the composer share-document modal
+   │
+   │  buildDriveShareBundle(driveId, [docIds])
+   │  │
+   │  ├─ reactorClient.get(docId) for each        ← local source of truth
+   │  ├─ reactorClient.getOperations(...)          ← includes unflushed outbox ops
+   │  ├─ fallback to Swarm manifest if doc absent
+   │  └─ preserve action.context.signer.signatures  ← authorship intact
+   │
+   │  Returns: { documents[], folders, docFolders, preferredEditor }
+   │
+   ▼
+createGrantees([bob.beeNodePubKey])      → granteeRef, historyRef
+uploadFile(bundle, { act:true, historyRef, skipEncryption:true })
+                                          → shareRef, actHistoryAddress
+   │
+   ▼
+PSS message with attachment = {
+  kind: "document-share",
+  driveId, driveName,
+  shareReference, actHistoryAddress,
+  publisherBeeNodePubKey,
+  documents: [{ id, name, documentType }]
+}
+   │
+   │  ─────PSS─────►
+   │                                   Bob receives → DocumentShareCard renders
+   │                                   [Import] → downloadFile with ACT
+   │                                           → applyDocumentBundle()
+   │                                           → drive + folders + docs materialize
 ```
 
 ## File Structure (adapter/src/channel/)
@@ -446,26 +548,34 @@ adapter/src/channel/
 
 adapter/src/ (kept — infrastructure)
   │
-  ├── swarm-client.ts             — Bee API: upload, download, feeds, encrypt
+  ├── swarm-client.ts             — Bee API: /bytes, /bzz, feeds, ACT, PSS, GSOC, node status
   ├── swarm-crypto.ts             — AES-256-GCM encryption
   ├── wallet-signer.ts            — Key derivation from wallet signature
-  ├── stamp-manager.ts            — Postage stamp lifecycle
-  ├── share-manager.ts            — Cross-user sharing
+  ├── stamp-manager.ts            — Postage stamp lifecycle + CoinGecko pricing
+  ├── share-manager.ts            — Cross-user ACT sharing + public profile I/O
   ├── folder-tree.ts              — Recursive tree builder
-  ├── types.ts                    — Manifest and operation types
+  ├── types.ts                    — Manifest types, sharing types (version: 2 ACT), stamp status
   ├── swarm-operation-store.ts    — IOperationStore interface
-  └── swarm-keyframe-store.ts     — IKeyframeStore interface
+  ├── swarm-keyframe-store.ts     — IKeyframeStore interface
+  └── bytes-utils.ts              — hex/bytes conversion
 
-adapter/src/plugin/ (cleaned — supports SwarmChannel architecture)
+adapter/src/chat/
   │
-  ├── init.ts         — 508 lines — Orchestrator: Bee detection, stamps, wallet, events
-  ├── sharing.ts      — 394 lines — Cross-user encrypted sharing + import
-  ├── hydration.ts    — 160 lines — restoreFolderStructure + populateUiCacheFromDrives
-  ├── state.ts        — 114 lines — Bee URL, UI cache fields, drive mapping
-  ├── storage.ts      — 107 lines — clearSwarmStorage + loadManifestIndex (IndexedDB)
-  └── events.ts       —  87 lines — Toast event system (onSwarmEvent/emitSwarmEvent)
-  
-  Deleted (replaced by SwarmChannel):
-  ✗ sync.ts (649)  ✗ flush.ts (788)  ✗ pending-ops-store.ts (137)
-  Total removed: 3,574 lines → 1,370 lines
+  ├── chat-manager.ts             — PSS session orchestrator + chapter tracking
+  ├── chat-history.ts             — ACT-encrypted feed pages + chapter rotation
+  ├── pss-messenger.ts            — PSS send/subscribe + broadcast topic
+  ├── gsoc-notifier.ts            — GSOC signer mining + notification send/subscribe
+  ├── swarm-file.ts               — ACT-protected file upload + thumbnails
+  ├── mime-guess.ts               — MIME detection for attachments
+  ├── types.ts                    — ChatMessage, FileAttachment, DocumentShareAttachment
+  └── index.ts                    — Public exports
+
+adapter/src/plugin/
+  │
+  ├── init.ts         — Orchestrator: Bee detection, stamps, wallet, ChatManager bootstrap, ph.swarm surface
+  ├── sharing.ts      — Cross-user ACT share + import + buildDriveShareBundle
+  ├── hydration.ts    — restoreFolderStructure + populateUiCacheFromDrives
+  ├── state.ts        — Bee URL, UI cache fields, drive mapping
+  ├── storage.ts      — clearSwarmStorage + loadManifestIndex (IndexedDB) + chat-related keys
+  └── events.ts       — Toast event system (onSwarmEvent/emitSwarmEvent)
 ```

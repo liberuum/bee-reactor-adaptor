@@ -1,17 +1,20 @@
 # Chat Roadmap — What's Next
 
-Status as of commit `e552dba` (2026-04-16). Source of truth for prioritizing
-follow-on chat work. Pairs with the longer
+Status as of 2026-04-18. Source of truth for prioritizing follow-on chat
+and collaboration work. Pairs with the longer
 [`chat-collaboration-design.md`](./chat-collaboration-design.md) for the
-original design phases.
+full design and [`live-collaboration-design.md`](./live-collaboration-design.md)
+for the upcoming live-collab cut.
 
 ## Where we are
 
 | Capability | Status | Notes |
 |---|---|---|
 | PSS 1-to-1 messaging | ✅ Done | [`pss-messenger.ts`](../src/chat/pss-messenger.ts), `ChatManager.sendMessage` |
-| Broadcast ping for new conversations | ✅ Done | `pss.subscribeAll` + `sendBroadcastPing` |
-| Feed-indexed chat history (paginated, ACT-encrypted) | ✅ Done | [`chat-history.ts`](../src/chat/chat-history.ts); both parties granted |
+| Broadcast ping for new conversations | ✅ Done | `pss.subscribeAll` + `sendBroadcastPing`, synchronous `seenMessageIds` guard |
+| Feed-indexed chat history (paginated, ACT-encrypted, chapter-rotated) | ✅ Done | [`chat-history.ts`](../src/chat/chat-history.ts); both parties granted, 64-byte wrapper chunk for self-contained ACT decode |
+| Chat history recovery across browser wipes | ✅ Done | `chatPeers[]` in user manifest + chapter tracking in localStorage (using `Date.now()` for wipe-safety) |
+| Clear-all-chats (UI button + chapter rotation) | ✅ Done | Two-step confirm in `conversation-list.tsx` → `ph.swarm.clearChats()` bumps chapter, wipes caches, clears `chatPeers` |
 | Message dedup (Bee re-serve, broadcast+direct) | ✅ Done | `seenMessageIds` set, batch-trimmed |
 | Raw file upload (images, PDF, audio, video, text) | ✅ Done | [`swarm-file.ts`](../src/chat/swarm-file.ts), ACT grantees cached |
 | Inline previews (image / GIF / PDF iframe / audio / video / text) | ✅ Done | [`message-bubble.tsx`](../../connect/src/components/chat/message-bubble.tsx), [`files-tab.tsx`](../../connect/src/components/chat/files-tab.tsx) |
@@ -22,79 +25,68 @@ original design phases.
 | Video codec pre-flight + on-error download fallback | ✅ Done | `canPlayType` check + `onError` on `<video>` |
 | Broad mime-guess coverage (MKV, FLV, 3GP, TS/MTS, WMV, VOB, etc.) | ✅ Done | [`mime-guess.ts`](../src/chat/mime-guess.ts) |
 | Unread badge on sidebar chat icon | ✅ Done | `useUnreadCount` hook + custom-event dispatch |
-| Document-sharing attachment type | ✅ Done | `DocumentShareAttachment` + `DocumentShareCard` (render-only) |
-| `shareDocumentInChat` on the adapter | ✅ Done | builds the bundle, uploads via ACT, sends via PSS |
+| Document-share attachment type | ✅ Done | `DocumentShareAttachment` + `DocumentShareCard` |
+| `shareDocumentInChat` on the adapter | ✅ Done | builds bundle via unified `buildDriveShareBundle`, ACT upload, PSS delivery |
+| **Composer share-document button + picker modal** | ✅ Done | [`document-share-picker.tsx`](../../connect/src/components/chat/document-share-picker.tsx) — drive selector, multi-select, caption |
+| **Document share via chat at parity with Settings-share** | ✅ Done | same bundle shape, full op history (including unflushed ops), original signer preserved |
+| GSOC notifier (adapter) | ✅ Done | `sendTyping`, `sendStoppedTyping`, `sendPresence`, `onNotification` subscribers |
+| GSOC typing/presence **UI** | ❌ Scratched | Decision 2026-04-18 — see below |
+| Live collaboration via GSOC (doc-updated / presence / cursors) | ❌ Not started | Next track — see below |
 
-## What's next — three tracks, ordered by size
+## Scratched work
 
-### A. GSOC typing & presence indicators *(smallest, highest visible UX payoff)*
+### Typing indicators (formerly Track A)
 
-The adapter has everything; the UI uses none of it.
+**Decision (2026-04-18): not shipping.** PSS message latency is 2–10 seconds
+(Trojan chunk mining + push-sync). A "User is typing…" hint doesn't pay off
+when the message itself arrives on a longer timescale than the hint. The
+adapter hooks stay — they're useful for presence and live collab — but no UI
+indicator is planned.
 
-**Adapter side (already done):**
-- `GsocNotifier.sendTyping` / `sendStoppedTyping` / `sendPresence` in [`gsoc-notifier.ts`](../src/chat/gsoc-notifier.ts).
-- `ChatManager.sendTyping` / `sendStoppedTyping` forward to the session's mined signer.
-- `ChatManager.onNotification` subscribers receive typing/presence/delivery events.
+Presence dots (green-dot + "Last seen …") are also parked for now. Low payoff
+relative to live collaboration, which delivers the real value users are
+waiting for.
 
-**What to build (Connect side):**
-1. **"Alice is typing…" indicator** under the thread header.
-   - New state in `useChat`: `peerTyping: boolean` per active peer.
-   - Subscribe in `useChat` effect: `manager.onNotification(n => if n.type === "typing" && n.from === activePeer) setTyping(true)` with a 3s auto-clear.
-   - Debounced sender in `MessageInput`: on `onChange`, call `manager.sendTyping(session)` if > 1s since last send; on blur/empty, `sendStoppedTyping`.
-2. **Presence in the conversation list** — green dot + "Online" or "Last seen …".
-   - Cache last-seen timestamp per peer; GSOC presence events bump it.
-   - Conversation row renders a small status indicator based on the cache.
-3. **Delivery status** — messages currently stay `"sent"` forever. Wire the GSOC
-   `message-delivered` notification to promote status to `"delivered"` when the
-   peer's node acknowledges, and optionally `"read"` when the peer's chat panel
-   has the conversation open.
+## What's next
 
-**Estimated size:** ~150 lines across `use-chat.ts`, `message-input.tsx`,
-`conversation-list.tsx`, `message-bubble.tsx`. No new adapter methods.
+### Live collaboration via ACT + GSOC
 
-### B. Document-sharing UX *(medium)*
+The remaining major track. Detailed plan in
+[`live-collaboration-design.md`](./live-collaboration-design.md).
 
-The adapter path (`shareDocumentInChat` → `DocumentShareAttachment` → render)
-works end-to-end, but users can't actually trigger a share or act on a received
-one.
+**What "live" means here:** both users have the document open, and when one
+commits an op, the other sees it appear in the toolbar's History view
+within a second or two, attributed to the correct signer. That's it. No
+cursor overlays, no caret labels, no per-editor presence — Powerhouse
+editors are too varied (tables, visual canvases, dashboards, button grids)
+for any of that to be meaningful.
 
-**What to build:**
-1. **"Share a document" button** in the composer (next to the paperclip).
-2. **Drive/document picker modal** — reuses existing drive list; multi-select
-   documents; optional text message.
-3. **[Open] button** on `DocumentShareCard` — navigate to the document in
-   Connect (needs the reactor router to accept a document id).
-4. **[Import] / [Collaborate] button** — calls `importFromUser` to pull the
-   shared drive bundle into the recipient's reactor, surfaces progress + error.
-5. **Dedup / idempotency** — if the receiver already has a more recent version
-   of a document, warn before overwriting.
+**Shape:**
+- **Drive-level first, doc-level second.** Start with "collaborate on this
+  whole drive" (covers ADD_FOLDER / MOVE_NODE / per-doc ops). Narrow to
+  doc-level in a second pass using a tighter ACT grantee chain.
+- **Per-user op feeds + collab manifest.** Each collaborator writes ops to
+  their own feed (Swarm constraint — only the owner can write). A
+  collaboration manifest (ACT-gated) lists participants and targets. Each
+  collaborator reads every other collaborator's feeds.
+- **ACT gates read access.** Removing a participant rebuilds the ACT chain
+  via `patchGrantees`.
+- **GSOC `op-committed` pings** replace the polling timer for active
+  collabs. Debounced ~300 ms so a burst of ops triggers one pull.
+- **Signatures already preserved** end-to-end (shipped 2026-04-17), so
+  toolbar history shows the real author of every revision.
 
-**Estimated size:** ~400 lines (modal + picker + import flow UI +
-reactor-router glue). No adapter changes.
+**UX entry point: Collaborate tab in the chat panel.** Picks drive or doc,
+multi-selects participants by Swarm ID (reusing the document-share picker
+pattern), sends an invitation delivered as a chat card with [Join] /
+[Decline]. Active collabs list with participant avatars + last-activity
+timestamp. No editor-level UI work.
 
-### C. Live collaboration via GSOC *(biggest, multi-session work)*
-
-Phase 4 from the design doc. Replaces the SwarmChannel's periodic polling with
-GSOC-triggered pulls, adds per-document presence, and broadcasts
-cursors/selections.
-
-**Open design choices:**
-- One GSOC signer per document, or one per drive? (Signer mining is ~10–30s.)
-- Where does cursor state live — in the message pane (ephemeral) or feed
-  (persistent)?
-- How does presence reconcile with the existing PSS broadcast ping?
-
-**What to build (rough cut):**
-1. `SwarmChannel` listens on a per-drive GSOC signer for `document-updated`
-   events; pulls inbox immediately on notification instead of every N seconds.
-2. Per-document presence: set "Alice is viewing doc X" in a short-TTL GSOC
-   channel; render viewer avatars in the document toolbar.
-3. Cursor/selection broadcast: small GSOC messages per edit, throttled.
-4. Conflict handling is already free — the reactor's operation model resolves
-   concurrent edits without CRDT.
-
-**Estimated size:** multi-session — design pass, channel refactor, presence
-layer, cursor broadcast, UI polish.
+**Build order:** adapter plumbing → collab manifest + ACT → SwarmChannel
+peer-feed registration → GSOC pings → Collaborate tab → invitation card →
+toolbar history auto-refresh → doc-level scope. See
+[`live-collaboration-design.md`](./live-collaboration-design.md) for the
+detail.
 
 ## Smaller polish items (pick up any time)
 
@@ -108,14 +100,4 @@ layer, cursor broadcast, UI polish.
 - **Message deletion / edit** — no UI, no adapter flow. Feeds are append-only,
   so "delete" would mean writing a tombstone message.
 - **Message reactions** — small GSOC payloads keyed by message id.
-- **`application/mp4` and `application/x-mp4` fallback** in `mime-guess` — rare
-  servers return those instead of `video/mp4`.
-
-## Recommended order
-
-1. **A · typing + presence** — fastest win, users instantly feel the app is
-   "alive", validates the GSOC wiring we already shipped.
-2. **B · document-sharing UX** — the whole original motivation for this
-   feature. Everything downstream flows through it.
-3. **C · live collaboration** — tackles real-time editing, the hardest piece.
-   Only start after A + B are stable in the field.
+- **Group chat** — out of scope for live collab; needs its own design pass.

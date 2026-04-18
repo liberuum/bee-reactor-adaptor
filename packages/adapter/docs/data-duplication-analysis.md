@@ -1,6 +1,13 @@
 # Data Duplication Analysis: Swarm vs Switchboard
 
-Comparing what data is stored where, what's duplicated, and the different architecture options.
+Comparing what data is stored where, what's duplicated, and the different
+architecture options.
+
+> This doc covers the document-sync data path. Chat messages and file
+> attachments follow a parallel pattern: PSS for live delivery, ACT-protected
+> feeds (`ph:v2:chatlog:<sorted(A,B)>[:chapter]`) for persistent history.
+> See [`architecture.md`](./architecture.md) and
+> [`chat-collaboration-design.md`](./chat-collaboration-design.md) for the chat data path.
 
 ---
 

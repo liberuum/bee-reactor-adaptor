@@ -82,6 +82,20 @@ tests/
 
 The skipped test (`BeeReactorAdapter` full flow) is a Path B adapter test that has feed propagation timing issues on live nodes. Path B is not used by the Connect plugin — it's for potential server-side use.
 
+### Chat + collaboration tests (future)
+
+Chat PSS / ACT / GSOC paths aren't yet covered by automated tests. When live
+collaboration work begins (see
+[`live-collaboration-design.md`](./live-collaboration-design.md)), the plan
+is to add a `tests/integration/chat/` suite requiring two Bee endpoints via
+`BEE_URL` and `BEE_URL_PEER`, covering:
+
+- PSS send/subscribe roundtrip between peers.
+- ACT-protected chat-history page write + cross-peer read.
+- Chapter rotation on clear-all-chats, verifying the old chapter's feed is
+  still readable but no longer referenced.
+- GSOC signer mining + `doc-updated` trigger on SwarmChannel pull.
+
 ## Preflight Health Check
 
 Every integration test file runs a preflight check before any test executes. This validates:

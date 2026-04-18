@@ -1,10 +1,12 @@
 # Swarm Chat & Live Collaboration — Design Investigation
 
-> **Implementation status (2026-04-16):** Phases 1 and 2 (adapter-side) are
-> shipped. Document-sharing UI wiring, GSOC typing/presence, and live
-> collaboration are still to build. See
-> [`chat-roadmap-next.md`](./chat-roadmap-next.md) for the prioritized
-> follow-on list with per-track size estimates.
+> **Implementation status (2026-04-18):**
+> Phases 1, 2, and 2b (chat, document sharing, file sharing) are **shipped end-to-end**
+> — adapter + UI. Phase 3 (GSOC notifier) is **shipped in the adapter**; the typing /
+> presence UI on top of it is **scratched** — PSS has 2–10s latency, so a typing hint
+> doesn't pay off. Phase 4 (live collaboration) is the **only remaining track**; see
+> [`live-collaboration-design.md`](./live-collaboration-design.md) for the concrete plan
+> and [`chat-roadmap-next.md`](./chat-roadmap-next.md) for the prioritized list.
 
 ## Goal
 
@@ -383,15 +385,20 @@ shows presence indicators:
 
 **Estimated message latency:** 2–10 seconds (PSS mining)
 
-### Phase 2: Document Sharing in Chat — ⚠️ adapter done, UI wiring pending
+### Phase 2: Document Sharing in Chat — ✅ shipped
 
-**Extend existing sharing:**
-- Reuse `shareDocuments()` / `importSharedDocuments()`
-- Add chat message type "share" with attachment metadata ✅ (`DocumentShareAttachment`)
-- Inline document preview cards in chat ✅ (`DocumentShareCard`, render-only)
-- "Open" button navigates to document in Connect — ❌ not wired
-- "Import" button runs `importFromUser` on the recipient — ❌ not wired
-- Composer "share a document" picker — ❌ not built
+**Extends existing sharing:**
+- Reuses `shareDocuments()` / `importSharedDocuments()` via a unified
+  `buildDriveShareBundle()` in [`plugin/sharing.ts`](../src/plugin/sharing.ts).
+- Chat message carries a `DocumentShareAttachment` → rendered as
+  `DocumentShareCard` inline in the thread.
+- Composer has a **share-document button** wired to
+  [`document-share-picker.tsx`](../../connect/src/components/chat/document-share-picker.tsx):
+  drive selector → multi-select documents → optional caption → Share.
+- `[Import]` on the card pulls the bundle via ACT and applies it to the
+  recipient's reactor, preserving the sender's signatures on every op.
+- Same bundle shape, same ACT path, same signer-preservation guarantee as the
+  Settings share panel — full parity.
 
 **No new protocols needed** — uses existing share infrastructure + PSS.
 
@@ -408,31 +415,54 @@ Not in the original design; added during implementation. Raw-file sharing
   path (no ACT, public content, badged as such)
 - 200 MB cap, matching client + adapter guards, broad mime-guess coverage
 
-### Phase 3: GSOC Notifications — ⚠️ adapter done, UI wiring pending
+### Phase 3: GSOC Notifications — ⚠️ adapter done, UI scratched
 
-**New adapter code:**
-- `src/chat/gsoc-notifier.ts` — mine signers, send/receive notifications
-- Notification types: typing, document-updated, user-online, user-offline
+**Adapter ships:**
+- [`src/chat/gsoc-notifier.ts`](../src/chat/gsoc-notifier.ts) — `mineSigner`,
+  `send`, `subscribe` + notification types: typing, stopped-typing,
+  presence-online/offline, message-delivered, message-read, doc-updated,
+  collab-join, collab-leave.
+- `ChatManager.sendTyping` / `sendStoppedTyping` / `sendPresence` +
+  `onNotification` for UI subscribers.
 
-**Enables:**
-- Typing indicators (< 1s latency)
-- Instant document update notifications
-- Online/offline presence
-- Replaces SwarmChannel's polling with event-driven pull
+**UI decision (2026-04-18) — typing indicator not shipping.** PSS message
+latency is 2–10s; a "User is typing…" hint doesn't pay off when the message
+itself arrives on a slower timescale than the hint. Presence dots and
+delivery/read receipts are also parked for now.
 
-### Phase 4: Live Collaboration — ❌ not started
+**Where the GSOC plumbing goes instead:** live collaboration (Phase 4).
+Doc-update pings, collab-join/leave, and cursor broadcasts are all what this
+infrastructure was really for — sub-second collaboration signals, not
+message-level UI hints.
+
+### Phase 4: Live Collaboration — ❌ not started (next up)
+
+**Model:** multi-writer on a drive or a single document, with ACT gating
+read access. Each collaborator writes ops to their own feeds; everyone reads
+everyone else's. GSOC pings trigger immediate pulls.
+
+**The only live surface is the document toolbar's History view.** Powerhouse
+editors are too varied (tables, visual canvases, dashboards, button grids)
+to support meaningful cursors or per-editor presence. Instead, peers' ops
+arrive in the existing op history timeline, attributed to the correct signer.
 
 **Extend SwarmChannel:**
-- GSOC-triggered inbox pull (instead of polling)
-- Per-document collaboration sessions
-- Presence: who has a document open
-- Cursor/selection broadcasting via GSOC
+- Register additional pull sources for each collaborator's per-user feeds.
+- GSOC-triggered pulls on `op-committed`, debounced.
+- Timer-based poll remains as fallback.
 
-**Conflict resolution:**
-- Already handled by reactor's operation model
-- Each user produces independent operation streams
-- `reactor.load()` applies remote ops with proper ordering
-- No CRDT needed — the reactor IS the conflict resolver
+**UX:** a new **Collaborate** tab in the chat panel (next to Conversations)
+— pick a drive or document, multi-select participants by Swarm ID, send an
+invitation that arrives as a chat card with [Join] / [Decline].
+
+**Conflict resolution:** already handled by the reactor's operation model.
+Each user produces independent operation streams; `reactor.load()` applies
+remote ops with proper ordering. No CRDT.
+
+**Next-step doc:** [`live-collaboration-design.md`](./live-collaboration-design.md)
+walks the data model (collab manifest + per-user op feeds), the ACT strategy
+(drive-level first, doc-level narrow later), the adapter surface
+(`ph.swarm.collab`), and the Collaborate tab UX.
 
 ---
 

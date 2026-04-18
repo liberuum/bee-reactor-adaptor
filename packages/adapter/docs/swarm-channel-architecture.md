@@ -1,5 +1,10 @@
 # Swarm Channel Architecture — Complete Design Document
 
+> **Status (2026-04-18):** Shipped and in production. The push/pull cycles
+> described below are live. The next evolution is
+> [live collaboration](./live-collaboration-design.md) — replacing the
+> periodic pull timer with GSOC-triggered pulls for active documents.
+
 ## Vision
 
 Connect runs entirely in the browser, served from Swarm itself. No servers.

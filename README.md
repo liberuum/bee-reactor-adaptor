@@ -122,13 +122,12 @@ All docs live under [`packages/adapter/docs/`](packages/adapter/docs/):
 | [`architecture-diagram.md`](packages/adapter/docs/architecture-diagram.md) | Visual system diagrams |
 | [`build-plan.md`](packages/adapter/docs/build-plan.md) | Build plan & overall roadmap |
 | [`chat-collaboration-design.md`](packages/adapter/docs/chat-collaboration-design.md) | Chat + collaboration design, protocol choices, security model |
-| [`chat-roadmap-next.md`](packages/adapter/docs/chat-roadmap-next.md) | What's shipped vs what's next in chat (typing/presence, document sharing UX, live collab) |
+| [`chat-roadmap-next.md`](packages/adapter/docs/chat-roadmap-next.md) | What's shipped vs what's next in chat + live collab |
+| [`live-collaboration-design.md`](packages/adapter/docs/live-collaboration-design.md) | Live collaboration (GSOC-triggered sync, presence, cursors) — the next track |
 | [`swarm-channel-architecture.md`](packages/adapter/docs/swarm-channel-architecture.md) | How SwarmChannel integrates as a native reactor `IChannel` |
 | [`swarm-protocol-reference.md`](packages/adapter/docs/swarm-protocol-reference.md) | Condensed reference for PSS, GSOC, ACT, feeds, stamps |
-| [`multi-user-sync-design.md`](packages/adapter/docs/multi-user-sync-design.md) | Multi-user sync semantics |
 | [`feed-structure-examples.md`](packages/adapter/docs/feed-structure-examples.md) | Concrete feed-layout examples |
 | [`data-duplication-analysis.md`](packages/adapter/docs/data-duplication-analysis.md) | Storage duplication analysis |
-| [`files-communicating-via-bee-node.md`](packages/adapter/docs/files-communicating-via-bee-node.md) | File upload paths via the Bee node |
 | [`testing.md`](packages/adapter/docs/testing.md) | Testing strategy & running the suite |
 
 Swarm product docs: [docs.ethswarm.org](https://docs.ethswarm.org).

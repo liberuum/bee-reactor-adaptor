@@ -1,6 +1,10 @@
 # Swarm Feed Structure Examples
 
-How document operations are stored on Swarm — single-user mode vs collaborative mode.
+How document operations are stored on Swarm — single-user mode vs
+collaborative mode. For chat and cross-user sharing feeds
+(`ph:v2:profile:*`, `ph:v2:share:*`, `ph:v2:chat:*`, `ph:v2:chatlog:*`)
+see [`chat-collaboration-design.md`](./chat-collaboration-design.md) and
+[`architecture.md`](./architecture.md).
 
 ---
 
