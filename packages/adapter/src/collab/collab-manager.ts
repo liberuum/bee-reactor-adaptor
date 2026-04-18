@@ -524,10 +524,13 @@ export class CollabManager {
         if (participant.address === this.myAddress.toLowerCase()) continue;
         if (!participant.beeNodePublicKey) continue;
         try {
+          // Write path in handleLocalPush always passes a docId (even for
+          // drive ops, docId === driveId), so the read path matches that
+          // convention: always use the doc-scoped topic.
           const latest = await this.opsFeed.getLatestIndex(
             summary.collabId,
             summary.driveId,
-            docId === summary.driveId ? summary.driveId : docId,
+            docId,
             participant.address,
           );
           if (latest == null) continue;
@@ -537,7 +540,7 @@ export class CollabManager {
           const batches = await this.opsFeed.readRange(
             summary.collabId,
             summary.driveId,
-            docId === summary.driveId ? summary.driveId : docId,
+            docId,
             participant.address,
             cursor,
             latest,

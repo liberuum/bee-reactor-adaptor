@@ -459,14 +459,17 @@ export class CollabManager {
                 if (!participant.beeNodePublicKey)
                     continue;
                 try {
-                    const latest = await this.opsFeed.getLatestIndex(summary.collabId, summary.driveId, docId === summary.driveId ? summary.driveId : docId, participant.address);
+                    // Write path in handleLocalPush always passes a docId (even for
+                    // drive ops, docId === driveId), so the read path matches that
+                    // convention: always use the doc-scoped topic.
+                    const latest = await this.opsFeed.getLatestIndex(summary.collabId, summary.driveId, docId, participant.address);
                     if (latest == null)
                         continue;
                     const cursorKey = `${LS_PEER_CURSOR_PREFIX}${summary.collabId}:${participant.address}:${docId}`;
                     const cursor = this.readCursor(cursorKey);
                     if (latest < cursor)
                         continue;
-                    const batches = await this.opsFeed.readRange(summary.collabId, summary.driveId, docId === summary.driveId ? summary.driveId : docId, participant.address, cursor, latest, participant.beeNodePublicKey);
+                    const batches = await this.opsFeed.readRange(summary.collabId, summary.driveId, docId, participant.address, cursor, latest, participant.beeNodePublicKey);
                     if (batches.length === 0)
                         continue;
                     for (const { feedIndex, batch } of batches) {

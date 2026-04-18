@@ -45,13 +45,14 @@ export function CollaborateList({
   const handleCreate = useCallback(
     async (input: {
       driveId: string;
+      documentId?: string;
       participantAddresses: string[];
       caption?: string;
     }) => {
       const manager = (globalThis as any).window?.ph?.swarm?.collab?.manager;
       if (!manager) throw new Error("Collaboration is not initialized");
       await manager.create({
-        target: { driveId: input.driveId },
+        target: { driveId: input.driveId, documentId: input.documentId },
         participants: input.participantAddresses,
         caption: input.caption,
       });
@@ -189,6 +190,29 @@ function CollabRow({
 
 // ─── Create picker ────────────────────────────────────────────────
 
+type CollabScope = "drive" | "document";
+
+type DocNode = { id: string; name: string; documentType?: string };
+
+async function listDriveDocuments(driveId: string): Promise<DocNode[]> {
+  const ph = (globalThis as any).window?.ph;
+  const reactorClient = ph?.reactorClient;
+  if (!reactorClient) return [];
+  try {
+    const driveDoc = await reactorClient.get(driveId);
+    const nodes: any[] = driveDoc?.state?.global?.nodes ?? [];
+    return nodes
+      .filter((n) => n?.kind === "file" && n?.id)
+      .map((n) => ({
+        id: n.id,
+        name: n.name ?? n.id,
+        documentType: n.documentType,
+      }));
+  } catch {
+    return [];
+  }
+}
+
 function CollabCreatePicker({
   isOpen,
   onClose,
@@ -199,6 +223,7 @@ function CollabCreatePicker({
   onClose: () => void;
   onCreate: (input: {
     driveId: string;
+    documentId?: string;
     participantAddresses: string[];
     caption?: string;
   }) => Promise<void>;
@@ -206,6 +231,10 @@ function CollabCreatePicker({
 }) {
   const drives = useDrives() as DriveLike[] | undefined;
   const [selectedDriveId, setSelectedDriveId] = useState<string | null>(null);
+  const [scope, setScope] = useState<CollabScope>("drive");
+  const [documents, setDocuments] = useState<DocNode[] | null>(null);
+  const [loadingDocs, setLoadingDocs] = useState(false);
+  const [selectedDocId, setSelectedDocId] = useState<string | null>(null);
   const [selectedPeers, setSelectedPeers] = useState<Set<string>>(new Set());
   const [manualAddress, setManualAddress] = useState("");
   const [caption, setCaption] = useState("");
@@ -214,12 +243,30 @@ function CollabCreatePicker({
   useEffect(() => {
     if (!isOpen) {
       setSelectedDriveId(null);
+      setScope("drive");
+      setDocuments(null);
+      setSelectedDocId(null);
       setSelectedPeers(new Set());
       setManualAddress("");
       setCaption("");
       setSubmitting(false);
     }
   }, [isOpen]);
+
+  // Load docs when the user switches to document scope (and a drive is picked)
+  useEffect(() => {
+    if (scope !== "document" || !selectedDriveId) {
+      setDocuments(null);
+      setSelectedDocId(null);
+      return;
+    }
+    let cancelled = false;
+    setLoadingDocs(true);
+    listDriveDocuments(selectedDriveId)
+      .then((docs) => { if (!cancelled) setDocuments(docs); })
+      .finally(() => { if (!cancelled) setLoadingDocs(false); });
+    return () => { cancelled = true; };
+  }, [scope, selectedDriveId]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -260,7 +307,10 @@ function CollabCreatePicker({
     selectedDrive?.state?.global?.name ?? selectedDrive?.header.name ?? "";
 
   const canSubmit =
-    !!selectedDriveId && participantAddresses.length > 0 && !submitting;
+    !!selectedDriveId
+    && participantAddresses.length > 0
+    && (scope === "drive" || !!selectedDocId)
+    && !submitting;
 
   const handleSubmit = async () => {
     if (!canSubmit || !selectedDriveId) return;
@@ -268,6 +318,7 @@ function CollabCreatePicker({
     try {
       await onCreate({
         driveId: selectedDriveId,
+        documentId: scope === "document" ? selectedDocId ?? undefined : undefined,
         participantAddresses,
         caption: caption.trim() || undefined,
       });
@@ -327,12 +378,78 @@ function CollabCreatePicker({
                 </option>
               ))}
             </select>
-            {driveName && (
-              <p className="mt-1 text-[11px] text-gray-400">
-                Every document in <strong>{driveName}</strong> will be live-shared.
-              </p>
-            )}
           </label>
+
+          {selectedDriveId && (
+            <div>
+              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-gray-500">
+                Scope
+              </span>
+              <div className="flex gap-1 rounded-md border border-gray-200 bg-gray-50 p-1">
+                <button
+                  type="button"
+                  onClick={() => setScope("drive")}
+                  className={`flex-1 rounded-md px-2 py-1.5 text-[11px] font-semibold transition-colors ${
+                    scope === "drive"
+                      ? "bg-white text-blue-700 shadow-sm"
+                      : "text-gray-500 hover:text-gray-700"
+                  }`}
+                >
+                  Entire drive
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setScope("document")}
+                  className={`flex-1 rounded-md px-2 py-1.5 text-[11px] font-semibold transition-colors ${
+                    scope === "document"
+                      ? "bg-white text-blue-700 shadow-sm"
+                      : "text-gray-500 hover:text-gray-700"
+                  }`}
+                >
+                  Single document
+                </button>
+              </div>
+              <p className="mt-1.5 text-[11px] text-gray-400">
+                {scope === "drive"
+                  ? <>Every document in <strong>{driveName}</strong> will be live-shared — participants can read and write to all of them.</>
+                  : <>Only the chosen document will be live-shared. Other docs in <strong>{driveName}</strong> stay private.</>
+                }
+              </p>
+            </div>
+          )}
+
+          {scope === "document" && selectedDriveId && (
+            <label className="block">
+              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-gray-500">
+                Document
+              </span>
+              {loadingDocs ? (
+                <div className="flex items-center justify-center rounded-md border border-gray-200 bg-gray-50 py-4">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" strokeWidth="2.5" className="animate-spin">
+                    <circle cx="12" cy="12" r="10" strokeDasharray="32" strokeDashoffset="8" />
+                  </svg>
+                </div>
+              ) : !documents || documents.length === 0 ? (
+                <div className="rounded-md border border-gray-200 bg-gray-50 px-3 py-3 text-[12px] text-gray-400">
+                  No documents in this drive.
+                </div>
+              ) : (
+                <select
+                  value={selectedDocId ?? ""}
+                  onChange={(e) => setSelectedDocId(e.target.value || null)}
+                  className="w-full rounded-md border border-gray-300 bg-white px-2.5 py-2 text-[13px] text-gray-800 outline-none focus:border-blue-400"
+                >
+                  <option value="">Select a document…</option>
+                  {documents.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.name}
+                      {d.documentType ? ` — ${d.documentType}` : ""}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </label>
+          )}
 
           <div>
             <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-gray-500">
