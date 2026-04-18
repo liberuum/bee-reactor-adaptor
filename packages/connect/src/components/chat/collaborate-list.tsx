@@ -10,6 +10,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { useDrives } from "@powerhousedao/reactor-browser";
 import type { CollabSummary, ConversationSummary } from "./types.js";
+import { CollabDetailPanel } from "./collab-detail-panel.js";
 
 const ACCENT = "#2563eb";
 
@@ -28,6 +29,15 @@ export function CollaborateList({
   const [summaries, setSummaries] = useState<CollabSummary[]>(() => readCollabs());
   const [pickerOpen, setPickerOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [detailCollabId, setDetailCollabId] = useState<string | null>(null);
+  const myAddress = (
+    (globalThis as any).window?.ph?.swarm?.client?.getOwnerAddress?.()
+    ?? (globalThis as any).window?.ph?.swarm?.signerEntry?.swarmAddress
+    ?? ""
+  ).toLowerCase();
+  const detailSummary = detailCollabId
+    ? summaries.find((s) => s.collabId === detailCollabId) ?? null
+    : null;
 
   // Refresh from the manager periodically (and on storage events from other
   // tabs). The manager persists to localStorage, so reading from there is
@@ -113,11 +123,28 @@ export function CollaborateList({
               key={s.collabId}
               summary={s}
               onOpen={() => onOpenCollab(s)}
+              onManage={() => setDetailCollabId(s.collabId)}
               onLeave={() => handleLeave(s.collabId)}
             />
           ))
         )}
       </div>
+
+      <CollabDetailPanel
+        isOpen={!!detailSummary}
+        summary={detailSummary}
+        myAddress={myAddress}
+        onClose={() => setDetailCollabId(null)}
+        onUpdated={(updated) => {
+          setSummaries((prev) => {
+            const idx = prev.findIndex((s) => s.collabId === updated.collabId);
+            if (idx < 0) return [updated, ...prev];
+            const next = [...prev];
+            next[idx] = updated;
+            return next;
+          });
+        }}
+      />
 
       <CollabCreatePicker
         isOpen={pickerOpen}
@@ -142,14 +169,25 @@ export function CollaborateList({
 function CollabRow({
   summary,
   onOpen,
+  onManage,
   onLeave,
 }: {
   summary: CollabSummary;
   onOpen: () => void;
+  onManage: () => void;
   onLeave: () => void;
 }) {
   const participantCount = summary.participants.length;
   const otherCount = Math.max(0, participantCount - 1);
+  const statusLabel =
+    summary.status === "pending" ? "setup" :
+    summary.status === "revoked" ? "revoked" :
+    summary.status === "error" ? "error" :
+    "open";
+  const statusColor =
+    summary.status === "revoked" ? "text-red-500" :
+    summary.status === "error" ? "text-amber-600" :
+    "text-gray-400";
 
   return (
     <div className="mb-1 rounded-lg border border-transparent px-2.5 py-2.5 hover:bg-gray-50">
@@ -174,16 +212,24 @@ function CollabRow({
               : `You + ${otherCount} participant${otherCount !== 1 ? "s" : ""}`}
           </div>
         </div>
-        <span className="shrink-0 text-[10px] uppercase tracking-wider text-gray-400">
-          {summary.status === "pending" ? "setup" : "open"}
+        <span className={`shrink-0 text-[10px] uppercase tracking-wider ${statusColor}`}>
+          {statusLabel}
         </span>
       </button>
-      <div className="mt-1 flex justify-end">
+      <div className="mt-1 flex justify-end gap-2">
+        <button
+          type="button"
+          onClick={onManage}
+          className="text-[10px] font-semibold text-blue-600 hover:underline"
+          title="Manage access, add or revoke participants"
+        >
+          Manage
+        </button>
         <button
           type="button"
           onClick={onLeave}
           className="text-[10px] font-semibold text-gray-400 hover:text-red-600"
-          title="Leave this collaboration locally"
+          title="Leave this collaboration"
         >
           Leave
         </button>
