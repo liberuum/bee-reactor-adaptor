@@ -7,9 +7,10 @@
  * All writes go through the adapter's CollabManager, which rotates the
  * ACT grantee chain and publishes a new manifest feed revision.
  */
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useMemo } from "react";
 import { createPortal } from "react-dom";
 import type { CollabSummary, CollabParticipant } from "./types.js";
+import { parseBulkAddresses } from "../../../../adapter/src/collab/address-utils.js";
 
 const ACCENT = "#2563eb";
 const DANGER = "#dc2626";
@@ -36,6 +37,11 @@ export function CollabDetailPanel({
   const [addInput, setAddInput] = useState("");
   const [showAdd, setShowAdd] = useState(false);
   const [confirmRevoke, setConfirmRevoke] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [selectedForBulk, setSelectedForBulk] = useState<Set<string>>(new Set());
+  const [bulkMode, setBulkMode] = useState(false);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [confirmBulkRevoke, setConfirmBulkRevoke] = useState(false);
 
   useEffect(() => {
     if (!isOpen) {
@@ -46,6 +52,11 @@ export function CollabDetailPanel({
       setAddBusy(false);
       setConfirmRevoke(null);
       setShowAdd(false);
+      setSearch("");
+      setSelectedForBulk(new Set());
+      setBulkMode(false);
+      setBulkBusy(false);
+      setConfirmBulkRevoke(false);
     }
   }, [isOpen]);
 
@@ -124,28 +135,107 @@ export function CollabDetailPanel({
   const handleAdd = useCallback(async () => {
     const manager = (globalThis as any).window?.ph?.swarm?.collab?.manager;
     if (!manager || !summary) return;
-    const addr = addInput.trim().toLowerCase();
-    if (!addr.startsWith("0x") || addr.length < 10) {
-      setError("Paste a peer address starting with 0x");
+
+    const parsed = parseBulkAddresses(addInput);
+    if (parsed.valid.length === 0) {
+      if (parsed.invalid.length > 0) {
+        setError(`Couldn't parse ${parsed.invalid.length} address${parsed.invalid.length === 1 ? "" : "es"} — check they start with 0x and have 40 hex chars.`);
+      } else {
+        setError("Paste a peer address starting with 0x.");
+      }
       return;
     }
+
+    // Filter addresses already on the participant list — avoids the
+    // round-trip to the manager + a confusing "already in the collab"
+    // error.
+    const existing = new Set(summary.participants.map((p) => p.address.toLowerCase()));
+    const toAdd = parsed.valid.filter((a) => !existing.has(a));
+    if (toAdd.length === 0) {
+      setError("Those addresses are already in the collaboration.");
+      return;
+    }
+
     setAddBusy(true);
     setError(null);
+    let failures: string[] = [];
+    let last: CollabSummary | undefined;
     try {
-      const updated = await manager.addParticipant(summary.collabId, addr);
-      if (updated) onUpdated(updated);
-      setAddInput("");
-      setShowAdd(false);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      for (const addr of toAdd) {
+        try {
+          last = await manager.addParticipant(summary.collabId, addr);
+        } catch (err) {
+          failures.push(addr);
+          console.warn("[CollabDetailPanel] addParticipant failed:", err);
+        }
+      }
+      if (last) onUpdated(last);
+      if (failures.length > 0) {
+        setError(
+          `Added ${toAdd.length - failures.length}/${toAdd.length}. Failed: ${failures.map((f) => f.slice(0, 10) + "…").join(", ")}`,
+        );
+      } else {
+        setAddInput("");
+        setShowAdd(false);
+      }
     } finally {
       setAddBusy(false);
     }
-  }, [summary?.collabId, addInput, onUpdated]);
+  }, [summary?.collabId, summary?.participants, addInput, onUpdated]);
+
+  const handleBulkRevoke = useCallback(async () => {
+    const manager = (globalThis as any).window?.ph?.swarm?.collab?.manager;
+    if (!manager || !summary) return;
+    if (selectedForBulk.size === 0) return;
+    setBulkBusy(true);
+    setError(null);
+    let last: CollabSummary | undefined;
+    let failures: string[] = [];
+    try {
+      for (const addr of selectedForBulk) {
+        try {
+          last = await manager.revokeParticipant(summary.collabId, addr);
+        } catch (err) {
+          failures.push(addr);
+          console.warn("[CollabDetailPanel] revokeParticipant failed:", err);
+        }
+      }
+      if (last) onUpdated(last);
+      if (failures.length > 0) {
+        setError(
+          `Revoked ${selectedForBulk.size - failures.length}/${selectedForBulk.size}. Failed: ${failures.map((f) => f.slice(0, 10) + "…").join(", ")}`,
+        );
+      }
+      setSelectedForBulk(new Set());
+      setConfirmBulkRevoke(false);
+      if (failures.length === 0) setBulkMode(false);
+    } finally {
+      setBulkBusy(false);
+    }
+  }, [summary?.collabId, selectedForBulk, onUpdated]);
+
+  // Filter participants by search query (name/address substring).
+  const filteredParticipants = useMemo(() => {
+    if (!summary) return [];
+    const q = search.trim().toLowerCase();
+    if (!q) return summary.participants;
+    return summary.participants.filter((p) =>
+      p.address.toLowerCase().includes(q)
+      || (p.displayName ?? "").toLowerCase().includes(q),
+    );
+  }, [summary, search]);
 
   if (!isOpen || !summary) return null;
 
   const isInitiator = summary.initiator === myAddress.toLowerCase();
+  // Show the search box once the list is long enough to want filtering.
+  const showSearch = summary.participants.length > 5;
+  // Bulk-revoke mode only matters to the initiator (only they can
+  // actually revoke); non-initiators never see the checkboxes.
+  const canBulkRevoke = isInitiator
+    && summary.participants.some((p) =>
+      p.address !== summary.initiator && p.address !== myAddress.toLowerCase()
+    );
 
   return createPortal(
     <div
@@ -191,21 +281,60 @@ export function CollabDetailPanel({
 
         <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4">
           <div>
-            <div className="mb-2 flex items-center justify-between">
+            <div className="mb-2 flex items-center justify-between gap-2">
               <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">
                 Participants
+                {search && filteredParticipants.length !== summary.participants.length && (
+                  <span className="ml-1 font-normal normal-case text-gray-400">
+                    ({filteredParticipants.length} of {summary.participants.length})
+                  </span>
+                )}
               </span>
-              {isInitiator && !showAdd && (
-                <button
-                  type="button"
-                  onClick={() => setShowAdd(true)}
-                  className="text-[11px] font-semibold hover:underline"
-                  style={{ color: ACCENT }}
-                >
-                  + Add participant
-                </button>
-              )}
+              <div className="flex items-center gap-2">
+                {canBulkRevoke && !bulkMode && (
+                  <button
+                    type="button"
+                    onClick={() => setBulkMode(true)}
+                    className="text-[11px] font-semibold text-gray-500 hover:underline"
+                  >
+                    Select
+                  </button>
+                )}
+                {canBulkRevoke && bulkMode && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBulkMode(false);
+                      setSelectedForBulk(new Set());
+                      setConfirmBulkRevoke(false);
+                    }}
+                    className="text-[11px] font-semibold text-gray-500 hover:underline"
+                  >
+                    Done
+                  </button>
+                )}
+                {isInitiator && !showAdd && !bulkMode && (
+                  <button
+                    type="button"
+                    onClick={() => setShowAdd(true)}
+                    className="text-[11px] font-semibold hover:underline"
+                    style={{ color: ACCENT }}
+                  >
+                    + Add participant
+                  </button>
+                )}
+              </div>
             </div>
+
+            {showSearch && (
+              <input
+                type="search"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search participants…"
+                className="mb-2 w-full rounded-md border border-gray-200 bg-white px-2.5 py-1.5 text-[12px] outline-none focus:border-blue-400"
+              />
+            )}
 
             {isInitiator && showAdd && (
               <div className="mb-2 rounded-md border border-gray-200 bg-gray-50 p-2.5">
@@ -213,8 +342,14 @@ export function CollabDetailPanel({
                   <input
                     type="text"
                     value={addInput}
-                    onChange={(e) => setAddInput(e.target.value)}
-                    placeholder="0x… peer address"
+                    onChange={(e) => { setAddInput(e.target.value); if (error) setError(null); }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !addBusy && addInput.trim()) {
+                        e.preventDefault();
+                        handleAdd();
+                      }
+                    }}
+                    placeholder="0x… peer address(es)"
                     disabled={addBusy}
                     className="flex-1 rounded-md border border-gray-300 bg-white px-2.5 py-1.5 font-mono text-[12px] outline-none focus:border-blue-400 disabled:opacity-60"
                     autoFocus
@@ -238,9 +373,51 @@ export function CollabDetailPanel({
                   </button>
                 </div>
                 <p className="mt-2 text-[11px] text-gray-500">
-                  They'll get a one-click invite in chat. Once they join, you
-                  can both edit together in real time.
+                  Paste one or several addresses (comma or newline separated).
+                  They'll each get a one-click invite in chat.
                 </p>
+              </div>
+            )}
+
+            {bulkMode && (
+              <div className="mb-2 flex items-center justify-between rounded-md border border-blue-100 bg-blue-50 px-2.5 py-1.5 text-[11px]">
+                <span className="text-blue-800">
+                  {selectedForBulk.size === 0
+                    ? "Select one or more participants below."
+                    : `${selectedForBulk.size} selected`}
+                </span>
+                <div className="flex items-center gap-2">
+                  {confirmBulkRevoke ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={handleBulkRevoke}
+                        disabled={bulkBusy}
+                        style={{ backgroundColor: DANGER }}
+                        className="rounded-md px-2 py-0.5 text-[11px] font-semibold text-white disabled:opacity-60"
+                      >
+                        {bulkBusy ? "Revoking…" : `Revoke ${selectedForBulk.size}`}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setConfirmBulkRevoke(false)}
+                        disabled={bulkBusy}
+                        className="text-gray-500 hover:text-gray-700"
+                      >
+                        Cancel
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setConfirmBulkRevoke(true)}
+                      disabled={selectedForBulk.size === 0}
+                      className="font-semibold text-red-600 hover:underline disabled:cursor-not-allowed disabled:text-gray-400 disabled:no-underline"
+                    >
+                      Revoke selected
+                    </button>
+                  )}
+                </div>
               </div>
             )}
 
@@ -250,16 +427,24 @@ export function CollabDetailPanel({
                 <ParticipantRowSkeleton />
                 <ParticipantRowSkeleton />
               </ul>
+            ) : filteredParticipants.length === 0 ? (
+              <div className="rounded-md border border-gray-200 bg-gray-50 px-3 py-4 text-center text-[11px] text-gray-400">
+                No participants match "{search}".
+              </div>
             ) : (
               <ul className="divide-y divide-gray-100 rounded-md border border-gray-200">
-                {summary.participants.map((p) => {
+                {filteredParticipants.map((p) => {
                   const activity = summary.peerActivity?.[p.address.toLowerCase()];
+                  const isMeRow = p.address === myAddress.toLowerCase();
+                  const isInitiatorRow = p.address === summary.initiator;
+                  const selectable = bulkMode && !isMeRow && !isInitiatorRow;
+                  const selected = selectedForBulk.has(p.address);
                   return (
                     <ParticipantRow
                       key={p.address}
                       participant={p}
-                      isMe={p.address === myAddress.toLowerCase()}
-                      isInitiator={p.address === summary.initiator}
+                      isMe={isMeRow}
+                      isInitiator={isInitiatorRow}
                       viewerIsInitiator={isInitiator}
                       lastAppliedAt={activity?.lastAppliedAt}
                       opsApplied={activity?.opsApplied ?? 0}
@@ -268,6 +453,16 @@ export function CollabDetailPanel({
                       hasActivity={!!activity || peerHasSeenActivity(summary.collabId, p.address)}
                       confirming={confirmRevoke === p.address}
                       busy={busyAddr === p.address}
+                      bulkSelectable={selectable}
+                      bulkSelected={selected}
+                      onToggleBulk={() => {
+                        setSelectedForBulk((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(p.address)) next.delete(p.address);
+                          else next.add(p.address);
+                          return next;
+                        });
+                      }}
                       onRequestRevoke={() => setConfirmRevoke(p.address)}
                       onCancelRevoke={() => setConfirmRevoke(null)}
                       onConfirmRevoke={() => handleRevoke(p.address)}
@@ -370,6 +565,9 @@ function ParticipantRow({
   opsApplied,
   confirming,
   busy,
+  bulkSelectable,
+  bulkSelected,
+  onToggleBulk,
   onRequestRevoke,
   onCancelRevoke,
   onConfirmRevoke,
@@ -383,6 +581,9 @@ function ParticipantRow({
   opsApplied: number;
   confirming: boolean;
   busy: boolean;
+  bulkSelectable: boolean;
+  bulkSelected: boolean;
+  onToggleBulk: () => void;
   onRequestRevoke: () => void;
   onCancelRevoke: () => void;
   onConfirmRevoke: () => void;
@@ -398,7 +599,16 @@ function ParticipantRow({
     && Date.now() - new Date(lastAppliedAt).getTime() < 60_000;
 
   return (
-    <li className="flex items-center gap-2.5 px-3 py-2 text-[13px]">
+    <li className={`flex items-center gap-2.5 px-3 py-2 text-[13px] ${bulkSelected ? "bg-blue-50" : ""}`}>
+      {bulkSelectable && (
+        <input
+          type="checkbox"
+          checked={bulkSelected}
+          onChange={onToggleBulk}
+          className="h-4 w-4 shrink-0 rounded border-gray-300 text-blue-600 focus:ring-blue-400"
+          aria-label={`Select ${label}`}
+        />
+      )}
       <div className="relative flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gray-100 text-[11px] font-semibold text-gray-600">
         {getInitials(label)}
         {activeNow && (
@@ -469,7 +679,7 @@ function ParticipantRow({
           <button
             type="button"
             onClick={onRequestRevoke}
-            className="shrink-0 rounded-md px-2 py-1 text-[11px] font-semibold text-gray-500 transition-colors hover:bg-red-50 hover:text-red-600"
+            className="shrink-0 rounded-md px-2 py-1 text-[11px] font-semibold text-gray-500 transition-colors hover:bg-red-50 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-300"
             title="Remove this participant"
           >
             Revoke

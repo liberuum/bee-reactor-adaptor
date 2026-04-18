@@ -11,6 +11,7 @@ import { createPortal } from "react-dom";
 import { useDrives } from "@powerhousedao/reactor-browser";
 import type { CollabSummary, ConversationSummary } from "./types.js";
 import { CollabDetailPanel } from "./collab-detail-panel.js";
+import { parseBulkAddresses } from "../../../../adapter/src/collab/address-utils.js";
 
 const ACCENT = "#2563eb";
 
@@ -72,10 +73,32 @@ export function CollaborateList({
       }
     };
     window.addEventListener("swarm:collab:op-applied", onApplied as EventListener);
+
+    // Keyboard shortcut: Cmd/Ctrl+K opens the New collaboration picker
+    // while the Collaborate tab is visible. Skipped when a modal that
+    // already handles Cmd+K (the detail panel, picker itself) is open,
+    // and skipped inside text inputs / contentEditable so it doesn't
+    // hijack normal typing.
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== "k") return;
+      const target = e.target as HTMLElement | null;
+      if (target) {
+        const tag = target.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || target.isContentEditable) return;
+      }
+      // Don't steal focus if another chat overlay is already open.
+      const anyOverlay = document.querySelector('[data-chat-overlay="true"]');
+      if (anyOverlay) return;
+      e.preventDefault();
+      setPickerOpen(true);
+    };
+    window.addEventListener("keydown", onKey);
+
     return () => {
       clearInterval(id);
       window.removeEventListener("storage", refresh);
       window.removeEventListener("swarm:collab:op-applied", onApplied as EventListener);
+      window.removeEventListener("keydown", onKey);
     };
   }, []);
 
@@ -135,12 +158,16 @@ export function CollaborateList({
           <button
             type="button"
             onClick={() => setPickerOpen(true)}
-            className="w-full rounded-md py-2 text-xs font-semibold text-white transition-colors"
+            className="flex w-full items-center justify-center gap-2 rounded-md py-2 text-xs font-semibold text-white transition-colors"
             style={{ backgroundColor: ACCENT }}
             onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "#1d4ed8")}
             onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = ACCENT)}
+            title="New collaboration (⌘K / Ctrl+K)"
           >
-            New collaboration
+            <span>New collaboration</span>
+            <kbd className="rounded border border-white/30 bg-white/10 px-1 py-0.5 font-mono text-[9px] font-normal">
+              {isMac() ? "⌘K" : "Ctrl K"}
+            </kbd>
           </button>
           <p className="mt-2.5 text-[11px] leading-snug text-gray-400">
             Pick a drive and invite peers by their <strong className="text-gray-600">peer address</strong>.
@@ -420,10 +447,28 @@ function CollabCreatePicker({
     });
   };
 
+  const [manualParseNotice, setManualParseNotice] = useState<string | null>(null);
+
   const addManual = () => {
-    const addr = manualAddress.trim().toLowerCase();
-    if (!addr.startsWith("0x") || addr.length < 10) return;
-    setSelectedPeers((prev) => new Set(prev).add(addr));
+    const result = parseBulkAddresses(manualAddress);
+    if (result.valid.length === 0 && result.invalid.length === 0) return;
+    let added = 0;
+    let skippedAsSelf = 0;
+    setSelectedPeers((prev) => {
+      const next = new Set(prev);
+      for (const addr of result.valid) {
+        if (next.has(addr)) continue;
+        next.add(addr);
+        added++;
+      }
+      return next;
+    });
+    const notices: string[] = [];
+    if (added > 0) notices.push(`${added} added`);
+    if (result.duplicates.length > 0) notices.push(`${result.duplicates.length} already in list`);
+    if (result.invalid.length > 0) notices.push(`${result.invalid.length} invalid`);
+    if (skippedAsSelf > 0) notices.push(`${skippedAsSelf} skipped (yourself)`);
+    setManualParseNotice(notices.length > 0 ? notices.join(" · ") : null);
     setManualAddress("");
   };
 
@@ -623,9 +668,14 @@ function CollabCreatePicker({
               <input
                 type="text"
                 value={manualAddress}
-                onChange={(e) => setManualAddress(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && addManual()}
-                placeholder="0x… peer address (not your wallet)"
+                onChange={(e) => {
+                  setManualAddress(e.target.value);
+                  if (manualParseNotice) setManualParseNotice(null);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") { e.preventDefault(); addManual(); }
+                }}
+                placeholder="0x… peer address(es) — paste several, comma or newline separated"
                 className="flex-1 rounded-md border border-gray-300 bg-white px-2.5 py-1.5 font-mono text-[12px] outline-none focus:border-blue-400"
               />
               <button
@@ -637,6 +687,9 @@ function CollabCreatePicker({
                 Add
               </button>
             </div>
+            {manualParseNotice && (
+              <div className="mt-1 text-[10.5px] text-gray-500">{manualParseNotice}</div>
+            )}
 
             {participantAddresses.length > 0 && (
               <div className="mt-2 flex flex-wrap gap-1.5">
@@ -739,6 +792,12 @@ function ParticipantAvatar({ address }: { address: string }) {
       {initials}
     </span>
   );
+}
+
+function isMac(): boolean {
+  const p = (globalThis as any).navigator?.platform ?? "";
+  const ua = (globalThis as any).navigator?.userAgent ?? "";
+  return /Mac|iPhone|iPad|iPod/.test(p) || /Mac OS X/i.test(ua);
 }
 
 function formatRelativeAgo(iso: string): string {
