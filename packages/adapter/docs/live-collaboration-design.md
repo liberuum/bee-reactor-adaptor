@@ -98,30 +98,80 @@ A participant joining or leaving is a new manifest revision by the initiator.
 (Future: allow any participant to amend — needs either a Merkle-log or
 convention where the initiator is authoritative.)
 
-### Per-user operation feeds (already exist)
+### Collab-scoped per-user feeds (new)
 
-Each collaborator continues to write their own ops to their own
-`ph:v2:doc:<docId>` feeds (for docs) and `ph:v2:drive:<driveId>` feed (for
-drive-level ops). Nothing new here — this is just the existing SwarmChannel
-push path.
+Personal drives stay encrypted with the wallet-derived AES key (as today).
+**We don't re-encrypt existing personal feeds.** A collaboration creates a
+parallel set of ACT-protected "collab" feeds so only participants can read:
 
-The **only** change: writers grant read access on those feed contents to
-the other participants via ACT, so participants can read each other's ops.
+```
+Topic: ph:v2:collab:<collabId>:ops:<driveId>         (drive-level ops)
+       ph:v2:collab:<collabId>:ops:<driveId>:<docId> (doc-level ops)
+Owner: each collaborator owns their own topic(s)
+ACT:   grantees = all participants' Bee node pubkeys
+```
+
+Each collaborator appends their own ops here (debounced + batched, same as
+the existing SwarmChannel push). Batch payloads are ACT-protected /bytes
+uploads; the feed update is a 64-byte wrapper (`actRef || actHistory`),
+same pattern as chat history.
+
+Why parallel feeds instead of ACT-wrapping the existing personal feeds:
+
+- **Boundary clarity.** Personal drives stay private even if a drive is
+  later shared. No migration of existing history.
+- **ACT revocation is clean.** Removing a participant only affects the
+  collab chain. The owner's personal feeds stay untouched.
+- **Multi-collab on the same drive.** The same drive can be shared with
+  different participant sets as separate collabs, each with its own ACT
+  scope, without tangling the owner's personal history.
+
+### Initial-state transfer
+
+A participant who accepts an invitation needs the current state, not just
+future ops. We reuse the **existing document-share bundle**:
+
+- The invitation message carries a `shareReference` + `actHistoryAddress`
+  pointing to a one-shot drive bundle (built via `buildDriveShareBundle`).
+- On accept, the recipient imports the bundle → drive + folders + docs
+  materialize locally with the original signatures preserved.
+- After import, the recipient's SwarmChannel registers the peer feeds and
+  starts pulling incremental ops.
+
+This keeps the snapshot path and the incremental-ops path decoupled.
 
 ### Read fanout on each participant
 
-When B's SwarmChannel initializes for a collab, it:
+When B accepts an invitation, B's SwarmChannel:
 
-1. Reads the collab manifest → learns the participants.
-2. Registers a pull source per participant's (`driveId`, `docId`) feed.
-3. Polls each participant's feeds (fallback) and subscribes to each
-   participant's GSOC signer (primary, sub-second).
-4. Pulls new ops → `reactor.load(docId, branch, ops)` → history updates.
+1. Imports the initial drive bundle (reuses `importFromUser` path).
+2. Reads the collab manifest → learns the full participant list.
+3. Registers pull sources for every *other* participant's collab feeds.
+4. Polls each participant's collab feeds (fallback) and subscribes to each
+   participant's GSOC signer for this collab (primary, sub-second).
+5. Pulls new ops → `reactor.load(docId, branch, ops)` → history updates.
 
 Ops keep the sender's signature (we already preserve
-`action.context.signer.signatures` through imports, thanks to the
-signature-preservation fix shipped 2026-04-17), so each revision is
-attributed to the correct author in the toolbar history.
+`action.context.signer.signatures` through imports, per the fix shipped
+2026-04-17), so each revision is attributed to the correct author in the
+toolbar history.
+
+### Local writes: where do collaborators write?
+
+For a drive/doc that is part of a collab, the user's reactor still produces
+ops locally. Those ops need to flow to two places:
+
+- **Their personal drive feeds** — unchanged. Still wallet-key encrypted.
+  This keeps the user's cross-device recovery working.
+- **Their collab feeds** — ACT-protected, so peers can read them.
+
+Implementation: SwarmChannel gains a `collabTargets` set. For each ordinal
+it would push to the personal feed, it *also* pushes to the collab feed if
+the doc is in an active collab. One read of the op, two pushes.
+
+(A future optimization: push only to the collab feed for docs that exist
+*only* inside a collab — e.g., a doc imported via collab accept and never
+independently owned. Out of scope for v1.)
 
 ## Phasing: drive-level first, then document-level
 
@@ -321,24 +371,80 @@ already the entry point, and it already preserves signer signatures.
 
 ## Build order
 
-1. **Adapter plumbing: `ph.swarm.collab`.** `create`, `accept`, `leave`,
-   `list`, `on("updated")`. Draft the collab manifest shape, ACT writes,
-   localStorage cache of active collabs (survives reload).
-2. **Collaboration manifest feed.** Topic convention, ACT grantee list,
-   version field, idempotent writes on participant changes.
-3. **SwarmChannel peer-feed registration.** Multiple pull sources per
-   channel; each source has its own cursor under `sync_cursors`.
-4. **GSOC `op-committed` pings.** Send on local op push; subscribe on
-   collab registration; debounce pulls.
-5. **Chat UI: Collaborate tab.** Empty state → creation flow → invitation
-   cards → active collab rows. Reuse `DocumentSharePicker` as the drive/doc
-   selector.
-6. **CollabInviteCard + CollabInviteAttachment** in the chat message
-   pipeline. Mirrors `DocumentShareCard` / `DocumentShareAttachment`.
-7. **Toolbar history auto-refresh.** Wire the existing history view to
-   refresh on inbound op events for collabs the user has joined.
-8. **Scope down to document-level.** Reuse Phase 1 plumbing, narrow the
-   ACT grantee list to one doc's chain.
+### Milestone 1 — MVP (polling, no GSOC yet)
+
+Goal: two users, one drive, invitation → accept → B's edit appears in A's
+toolbar History within ~5 s (the existing poll interval). Prove the full
+loop on real Bee nodes.
+
+1. **Types + manifest format** in `adapter/src/chat/types.ts` (or a new
+   `adapter/src/collab/types.ts`): `CollabManifest`, `CollabSummary`,
+   `CollabInviteAttachment`.
+2. **`CollabManager`** (`adapter/src/collab/collab-manager.ts`):
+   - `create({ target, participants, caption })` → builds initial share
+     bundle, writes collab manifest, sends PSS invitation (chat message +
+     `CollabInviteAttachment`).
+   - `accept(invite)` → reads manifest, imports initial bundle via
+     existing `importFromUser` path, registers pull sources.
+   - `list()` / `on("updated")` — local cache of active collabs in
+     localStorage, so sessions survive reload.
+   - `leave(collabId)` — local-only for now (stop pushing/pulling).
+3. **SwarmChannel peer-feed registration**
+   (`adapter/src/channel/swarm-channel.ts`): add a `peerSources` list;
+   each source has `{ participantAddress, feedTopic, cursor }`. Polling
+   walks `peerSources` as well as the owner's own feeds. Each peer source
+   gets its own cursor row in `sync_cursors`.
+4. **Collab-scoped push path**: when a doc in an active collab flushes, the
+   push pipeline ALSO writes the ACT-protected collab feed update. Reuses
+   the same op-batch payload; second upload with `{ act: true }`.
+5. **Chat UI — Collaborate tab** (`connect/src/components/chat/`):
+   - New tab next to Conversations.
+   - Empty state, pending invites, active collabs.
+   - New-collab creation flow: drive/doc picker (reuse `DocumentSharePicker`
+     plumbing) + participant multi-select from chat peers.
+6. **`CollabInviteCard`** in the chat message pipeline. Renders inline with
+   [Join] / [Decline]. Join calls `ph.swarm.collab.accept`.
+7. **Toolbar History auto-refresh.** Wire the existing history view to
+   re-query on inbound ops for docs the user has joined via collab. If a
+   straightforward React-state refresh isn't already in place, fire a
+   custom event on `reactor.load` completion and listen for it in the
+   History panel.
+8. **Manual smoke test**: two browsers, two Bee nodes, drive-level collab
+   end-to-end. Landing criteria below.
+
+### Milestone 2 — GSOC real-time upgrade
+
+1. **`GsocNotifier.onOpCommitted`** — subscribe to each participant's
+   signer for the collab.
+2. **Send pings on push** — after a collab-feed update, fire an
+   `op-committed` GSOC message to each other participant.
+3. **Debounced pull on ping** — SwarmChannel pulls that writer's feeds on
+   receipt, coalescing bursts (~300 ms debounce).
+4. **Background signer mining** — first collab create/accept kicks off
+   mining without blocking the UI; fall back to polling until mining
+   completes.
+5. **Latency smoke test**: peer sees new revision in History view within
+   ~1–2 s of the sender committing.
+
+### Milestone 3 — Document-level scope
+
+1. Narrow the ACT chain to the doc's feeds only (exclude drive manifest +
+   sibling docs).
+2. Participant join gets just the one doc (not the containing drive).
+3. UI: show "Shared document: X" in the active collab row, differentiated
+   from drive-level collabs.
+
+### Landing criteria for Milestone 1
+
+- A invites B to collaborate on a drive → B receives a chat card with
+  [Join] / [Decline].
+- B clicks Join → drive materializes in B's reactor within 5 s, all
+  existing docs and folders present with original signatures.
+- B makes a change (edit doc, add folder) → appears in A's toolbar History
+  within the poll interval, attributed to B's signer.
+- A makes a change → appears in B's toolbar History the same way.
+- Both users can close and reopen the browser; collab resumes from
+  localStorage + the manifest.
 
 ## Testing strategy
 
