@@ -471,9 +471,14 @@ export class CollabManager {
                         continue;
                     for (const { feedIndex, batch } of batches) {
                         try {
-                            const ops = JSON.parse(batch.opsJson);
-                            if (!Array.isArray(ops) || ops.length === 0)
+                            const raw = JSON.parse(batch.opsJson);
+                            if (!Array.isArray(raw) || raw.length === 0)
                                 continue;
+                            // SwarmChannel pushes OperationWithContext[] (each entry has
+                            // `.operation` + `.context`); reactor.load expects bare
+                            // Operation[]. Unwrap defensively — fall back to the entry
+                            // itself for already-flat payloads.
+                            const ops = raw.map((entry) => entry?.operation ?? entry);
                             // Dispatch to the reactor. reactor.load() is idempotent per op
                             // id, so re-runs from a re-pull don't corrupt state.
                             if (reactor?.load) {
