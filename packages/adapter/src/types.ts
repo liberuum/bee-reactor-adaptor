@@ -105,7 +105,37 @@ export interface SwarmUserManifest {
    *  sorted pair of addresses. Optional for backward compat. */
   chatPeers?: string[];
 
+  /** Active live-collaborations the user is participating in. Keyed by
+   *  collabId (`drive:<id>` or `doc:<driveId>:<docId>`). The user manifest
+   *  is the authoritative source of "which collabs am I in" — localStorage
+   *  is a startup cache. On fresh-browser recovery, CollabManager reads
+   *  this map and rehydrates by reading each collab's manifest feed.
+   *  Optional for backward compat. */
+  collabs?: Record<string, UserCollabEntry>;
+
   updatedAt: string;
+}
+
+/**
+ * User-manifest entry per live-collaboration. Carries just enough to
+ * locate the collab's manifest feed on recovery; full membership +
+ * current grantee chain live on the feed itself, ACT-protected.
+ */
+export interface UserCollabEntry {
+  collabId: string;
+  kind: "drive" | "document";
+  driveId: string;
+  documentId?: string;
+  title: string;
+  /** "initiator" if I own the manifest feed, otherwise "participant". */
+  role: "initiator" | "participant";
+  initiator: string;
+  /** Manifest-feed locator: owner signer address + their Bee node pubkey
+   *  (needed as actPublisher when we decrypt the manifest payload). */
+  manifestOwnerAddress: string;
+  manifestPublisherBeeNodePubKey: string;
+  joinedAt: string;
+  lastActivityAt: string;
 }
 
 export interface UserDocumentEntry {

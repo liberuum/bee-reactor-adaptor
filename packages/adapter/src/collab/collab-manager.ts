@@ -35,6 +35,12 @@ import { CollabOpsFeed } from "./collab-ops-feed.js";
 import type { CollabOpsBatch } from "./collab-ops-feed.js";
 import { CollabManifestFeed } from "./collab-manifest-feed.js";
 import type { CollabManifest } from "./types.js";
+import {
+  ensureCollabInUserManifest,
+  listCollabsFromUserManifest,
+  removeCollabFromUserManifest,
+} from "../channel/manifest-manager.js";
+import type { UserCollabEntry } from "../types.js";
 
 const LS_SUMMARIES_KEY = "swarm:collabs";
 const LS_PEER_CURSOR_PREFIX = "swarm:collabPeerCursor:";
@@ -68,6 +74,11 @@ export class CollabManager {
     // op flush. Stable global so channels created before this manager
     // (cold start, HMR) can still find it lazily.
     (globalThis as any).__swarmCollabManager__ = this;
+    // Rehydrate from the user manifest on Swarm — authoritative source
+    // of "which collabs am I in". Local summaries (localStorage) are a
+    // startup cache; on a fresh browser they start empty and this
+    // backfills from Swarm. Runs in background, not awaited.
+    void this.rehydrateFromUserManifest();
   }
 
   shutdown(): void {
@@ -263,6 +274,15 @@ export class CollabManager {
     // 8. Persist + announce.
     this.summaries.set(collabId, summary);
     this.persist();
+    // Authoritative record on Swarm — survives browser wipes. Written
+    // AFTER the manifest feed is up so a peer rehydrating can find a
+    // readable feed.
+    void this.upsertUserManifestEntry(summary).catch((err) => {
+      console.warn(
+        "[CollabManager] create: user-manifest write failed (non-fatal):",
+        err instanceof Error ? err.message : err,
+      );
+    });
     this.emit({ type: "collab-created", collabId, data: summary });
 
     return summary;
@@ -583,21 +603,37 @@ export class CollabManager {
     };
     this.summaries.set(summary.collabId, summary);
     this.persist();
+    void this.upsertUserManifestEntry(summary).catch((err) => {
+      console.warn(
+        "[CollabManager] accept: user-manifest write failed (non-fatal):",
+        err instanceof Error ? err.message : err,
+      );
+    });
     this.emit({ type: "collab-accepted", collabId: summary.collabId, data: summary });
 
     return summary;
   }
 
   /**
-   * Locally stop participating in a collab. M1 is local-only: we clear
-   * the summary so pulls + UI stop. The initiator still lists this user
-   * in their manifest until they rewrite it.
+   * Stop participating in a collab on this device + strip the entry
+   * from the user manifest so a fresh browser doesn't re-hydrate it.
+   * The initiator's collab manifest feed is untouched — they still
+   * list this user as a participant until they explicitly revoke.
+   * Returns a promise so callers can await the manifest write.
    */
-  leave(collabId: CollabId): void {
+  async leave(collabId: CollabId): Promise<void> {
     const existing = this.summaries.get(collabId);
     if (!existing) return;
     this.summaries.delete(collabId);
     this.persist();
+    try {
+      await removeCollabFromUserManifest(this.client, this.myAddress, collabId);
+    } catch (err) {
+      console.warn(
+        "[CollabManager] leave: user-manifest remove failed (local state already cleared):",
+        err instanceof Error ? err.message : err,
+      );
+    }
     this.emit({ type: "collab-removed", collabId });
   }
 
@@ -617,6 +653,120 @@ export class CollabManager {
     };
     this.handlers.add(wrapped);
     return () => this.handlers.delete(wrapped);
+  }
+
+  // ─── User-manifest integration (authoritative collab registry) ─
+
+  private summaryToUserManifestEntry(s: CollabSummary): UserCollabEntry {
+    return {
+      collabId: s.collabId,
+      kind: s.kind,
+      driveId: s.driveId,
+      documentId: s.documentId,
+      title: s.title,
+      role: s.initiator === this.myAddress.toLowerCase() ? "initiator" : "participant",
+      initiator: s.initiator,
+      manifestOwnerAddress: s.initiator,
+      manifestPublisherBeeNodePubKey: s.manifestPublisherBeeNodePubKey,
+      joinedAt:
+        s.participants.find((p) => p.address === this.myAddress.toLowerCase())?.joinedAt
+        ?? new Date().toISOString(),
+      lastActivityAt: s.lastActivityAt,
+    };
+  }
+
+  private async upsertUserManifestEntry(s: CollabSummary): Promise<void> {
+    await ensureCollabInUserManifest(
+      this.client,
+      this.myAddress,
+      this.summaryToUserManifestEntry(s),
+    );
+  }
+
+  /**
+   * Boot-time recovery: read the user manifest's `collabs` map and
+   * reconstruct local summaries for any collab that isn't already in
+   * localStorage. For each entry we pull the ACT-protected manifest
+   * feed to get the live participant list.
+   *
+   * Non-fatal if any part fails — the user can still open the
+   * Collaborate tab and re-join from a fresh invite.
+   */
+  private async rehydrateFromUserManifest(): Promise<void> {
+    try {
+      const registry = await listCollabsFromUserManifest(this.client, this.myAddress);
+      const entries = Object.values(registry);
+      if (entries.length === 0) return;
+      let recovered = 0;
+      for (const entry of entries) {
+        if (this.summaries.has(entry.collabId)) continue;
+        try {
+          const latest = await this.manifestFeed.readLatest(
+            entry.collabId,
+            entry.manifestOwnerAddress,
+            entry.manifestPublisherBeeNodePubKey,
+          );
+          if (!latest) {
+            // Feed unreachable — maybe we've been revoked, maybe
+            // chunks haven't propagated. Stash a pending summary so
+            // the UI can show it; a later refreshManifest or retry
+            // will promote it to active or mark it revoked.
+            this.summaries.set(entry.collabId, {
+              collabId: entry.collabId,
+              kind: entry.kind,
+              driveId: entry.driveId,
+              documentId: entry.documentId,
+              title: entry.title,
+              initiator: entry.initiator,
+              participants: [],
+              manifestRef: "",
+              manifestActHistoryAddress: "",
+              manifestPublisherBeeNodePubKey: entry.manifestPublisherBeeNodePubKey,
+              lastActivityAt: entry.lastActivityAt,
+              status: "pending",
+            });
+            continue;
+          }
+          const m = latest.manifest;
+          this.summaries.set(entry.collabId, {
+            collabId: entry.collabId,
+            kind: entry.kind,
+            driveId: entry.driveId,
+            documentId: entry.documentId,
+            title: m.title ?? entry.title,
+            initiator: m.initiator,
+            participants: m.participants.map((p) => ({
+              ...p,
+              address: p.address.toLowerCase(),
+            })),
+            manifestRef: "",
+            manifestActHistoryAddress: "",
+            manifestPublisherBeeNodePubKey: entry.manifestPublisherBeeNodePubKey,
+            manifestFeedIndex: latest.feedIndex,
+            lastActivityAt: entry.lastActivityAt,
+            status: "active",
+          });
+          recovered++;
+        } catch (err) {
+          console.warn(
+            `[CollabManager] rehydrate skipped ${entry.collabId}:`,
+            err instanceof Error ? err.message : err,
+          );
+        }
+      }
+      if (recovered > 0) {
+        console.log(
+          `[CollabManager] Rehydrated ${recovered} collab(s) from user manifest.`,
+        );
+        this.persist();
+        this.emit({ type: "collab-updated", collabId: "*" as any });
+      }
+    } catch (err) {
+      console.warn(
+        "[CollabManager] rehydrate failed:",
+        err instanceof Error ? err.message : err,
+      );
+    }
   }
 
   // ─── Internal helpers ──────────────────────────────────────────

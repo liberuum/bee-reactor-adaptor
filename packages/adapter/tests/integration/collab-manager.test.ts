@@ -259,6 +259,51 @@ describe("CollabManager: push + pull round trip", () => {
     }
   });
 
+  it("user manifest: ensureCollabInUserManifest upserts + listCollabsFromUserManifest reads it back", async () => {
+    const {
+      ensureCollabInUserManifest,
+      listCollabsFromUserManifest,
+      removeCollabFromUserManifest,
+    } = await import("../../src/channel/manifest-manager.js");
+
+    const collabId = `drive:rehydrate-${Date.now().toString(16)}`;
+    const now = new Date().toISOString();
+    const entry = {
+      collabId,
+      kind: "drive" as const,
+      driveId: collabId.replace("drive:", ""),
+      title: "Rehydrate test",
+      role: "initiator" as const,
+      initiator: clientA.getOwnerAddress().toLowerCase(),
+      manifestOwnerAddress: clientA.getOwnerAddress().toLowerCase(),
+      manifestPublisherBeeNodePubKey: beePubA,
+      joinedAt: now,
+      lastActivityAt: now,
+    };
+
+    await ensureCollabInUserManifest(clientA, clientA.getOwnerAddress(), entry);
+    let registry = await listCollabsFromUserManifest(clientA, clientA.getOwnerAddress());
+    expect(registry[collabId]).toBeDefined();
+    expect(registry[collabId].title).toBe("Rehydrate test");
+
+    // Upsert an update — title change should land; lastActivityAt should
+    // win the max.
+    const later = new Date(Date.now() + 60_000).toISOString();
+    await ensureCollabInUserManifest(clientA, clientA.getOwnerAddress(), {
+      ...entry,
+      title: "Rehydrate test v2",
+      lastActivityAt: later,
+    });
+    registry = await listCollabsFromUserManifest(clientA, clientA.getOwnerAddress());
+    expect(registry[collabId].title).toBe("Rehydrate test v2");
+    expect(registry[collabId].lastActivityAt).toBe(later);
+
+    // Removal wipes the entry.
+    await removeCollabFromUserManifest(clientA, clientA.getOwnerAddress(), collabId);
+    registry = await listCollabsFromUserManifest(clientA, clientA.getOwnerAddress());
+    expect(registry[collabId]).toBeUndefined();
+  }, 90_000);
+
   it("leave() removes the summary and persists", async () => {
     const chatStub: any = {
       startSession: async () => ({}),
@@ -281,7 +326,7 @@ describe("CollabManager: push + pull round trip", () => {
     });
     (mgr as any).persist();
 
-    mgr.leave(fakeId);
+    await mgr.leave(fakeId);
 
     expect(mgr.list().find((s) => s.collabId === fakeId)).toBeUndefined();
 

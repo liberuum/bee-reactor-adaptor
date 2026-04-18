@@ -61,10 +61,14 @@ export function CollaborateList({
     [],
   );
 
-  const handleLeave = (collabId: string) => {
+  const handleLeave = async (collabId: string) => {
     const manager = (globalThis as any).window?.ph?.swarm?.collab?.manager;
     if (!manager) return;
-    manager.leave(collabId);
+    try {
+      await manager.leave(collabId);
+    } catch (err) {
+      console.warn("[CollaborateList] leave failed:", err);
+    }
     setSummaries(readCollabs());
   };
 
