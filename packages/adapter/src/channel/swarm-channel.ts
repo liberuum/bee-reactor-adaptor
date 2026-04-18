@@ -486,6 +486,31 @@ export class SwarmChannel implements IChannel {
         }
       }
     }
+
+    // Mirror to any active collab feed covering this doc. Best-effort —
+    // the personal-feed push above is the authoritative write; this extra
+    // fan-out is what other participants read to see the change. Failures
+    // are logged by the manager and retried on the next push. We resolve
+    // the manager lazily because the SwarmChannel may come up before
+    // CollabManager is constructed (cold start / HMR reload).
+    if (driveId) {
+      const collab = (globalThis as any).__swarmCollabManager__ as
+        | { handleLocalPush?: (input: any) => Promise<void> }
+        | undefined;
+      if (collab?.handleLocalPush) {
+        void collab.handleLocalPush({
+          driveId,
+          docId,
+          ops,
+          scope,
+          branch,
+        }).catch((err: unknown) => {
+          this.logger.warn(
+            `[SwarmChannel] Collab mirror hook rejected: ${err instanceof Error ? err.message : err}`,
+          );
+        });
+      }
+    }
   }
 
   // ─── Manifest Updates (drive + user) ───────────────────────────

@@ -62,6 +62,20 @@ export const DocumentEditor: React.FC<Props> = (props) => {
     }
   }, [revisionHistoryVisible, refetchOperations]);
 
+  // Auto-refresh the revision history when a collaborator's ops arrive.
+  // CollabManager fires `swarm:collab:op-applied` after reactor.load()
+  // succeeds for any collab doc. The reactor's own subscription should
+  // already trigger a re-query, but we call refetch explicitly to cover
+  // cases where the history panel is already open and the underlying
+  // data-hook didn't observe the change.
+  useEffect(() => {
+    const handler = () => {
+      if (revisionHistoryVisible) void refetchOperations();
+    };
+    window.addEventListener("swarm:collab:op-applied", handler);
+    return () => window.removeEventListener("swarm:collab:op-applied", handler);
+  }, [revisionHistoryVisible, refetchOperations]);
+
   const globalRevisionNumber = document?.header.revision.global ?? 0;
   const localRevisionNumber = document?.header.revision.local ?? 0;
   const documentModelModule = useDocumentModelModuleById(documentType);

@@ -18,18 +18,41 @@
  *   - GSOC `op-committed` pings for real-time pulls.
  */
 import { buildCollabId } from "./types.js";
+import { CollabOpsFeed } from "./collab-ops-feed.js";
 const LS_SUMMARIES_KEY = "swarm:collabs";
+const LS_PEER_CURSOR_PREFIX = "swarm:collabPeerCursor:";
+const POLL_INTERVAL_MS = 5000;
 export class CollabManager {
     client;
     chat;
     myAddress;
     summaries = new Map();
     handlers = new Set();
+    opsFeed;
+    pollTimer = null;
+    pollInFlight = false;
+    shuttingDown = false;
     constructor(client, chat, myAddress) {
         this.client = client;
         this.chat = chat;
         this.myAddress = myAddress;
+        this.opsFeed = new CollabOpsFeed(client);
         this.loadFromStorage();
+        this.startPolling();
+        // Install the push hook so SwarmChannel can notify us on every local
+        // op flush. Stable global so channels created before this manager
+        // (cold start, HMR) can still find it lazily.
+        globalThis.__swarmCollabManager__ = this;
+    }
+    shutdown() {
+        this.shuttingDown = true;
+        if (this.pollTimer) {
+            clearInterval(this.pollTimer);
+            this.pollTimer = null;
+        }
+        if (globalThis.__swarmCollabManager__ === this) {
+            globalThis.__swarmCollabManager__ = null;
+        }
     }
     // ─── Public API ────────────────────────────────────────────────
     /**
@@ -322,6 +345,193 @@ export class CollabManager {
         }
         catch {
             return [];
+        }
+    }
+    // ─── Push hook: mirror local ops to collab feed ────────────────
+    /**
+     * Called by SwarmChannel after a successful push of local ops to the
+     * user's personal doc feed. Mirrors the same batch to each active
+     * collab's ACT-protected per-peer feed so other participants can see
+     * the ops.
+     *
+     * Best-effort: errors are logged but don't fail the caller — the
+     * personal-feed push already succeeded, the collab mirror is a
+     * secondary write that can be retried on next push.
+     */
+    async handleLocalPush(input) {
+        if (this.shuttingDown)
+            return;
+        if (!input.ops?.length)
+            return;
+        // Find all collabs that cover this doc. For drive-level collabs, every
+        // doc in the drive counts. For doc-level collabs, only the specific doc.
+        const relevant = [];
+        for (const s of this.summaries.values()) {
+            if (s.driveId !== input.driveId)
+                continue;
+            if (s.kind === "document" && s.documentId !== input.docId)
+                continue;
+            relevant.push(s);
+        }
+        if (relevant.length === 0)
+            return;
+        const startIndex = input.ops[0]?.operation?.index ?? 0;
+        const endIndex = input.ops[input.ops.length - 1]?.operation?.index ?? 0;
+        for (const s of relevant) {
+            try {
+                const granteeKeys = s.participants
+                    .map((p) => p.beeNodePublicKey)
+                    .filter((k) => !!k);
+                if (granteeKeys.length < 2) {
+                    // Participant list is incomplete (e.g. accepted invite with no
+                    // bee pubkey for the initiator) — skip mirror until the
+                    // participant list gets refreshed on next invite exchange.
+                    continue;
+                }
+                const batch = {
+                    opsJson: JSON.stringify(input.ops),
+                    startIndex,
+                    endIndex,
+                    scope: input.scope,
+                    branch: input.branch,
+                    timestamp: new Date().toISOString(),
+                };
+                // Doc-level collab writes to a doc-scoped topic; drive-level writes
+                // to a doc-scoped topic as well, so every doc gets its own feed
+                // inside the drive collab. This keeps reads parallelizable per doc.
+                await this.opsFeed.appendBatch(s.collabId, input.driveId, input.docId, batch, granteeKeys);
+                const updated = { ...s, lastActivityAt: new Date().toISOString() };
+                this.summaries.set(s.collabId, updated);
+                this.persist();
+            }
+            catch (err) {
+                console.warn(`[CollabManager] mirror push failed for ${s.collabId} doc ${input.docId.slice(0, 8)}:`, err instanceof Error ? err.message : err);
+            }
+        }
+    }
+    // ─── Poll loop: pull peers' ops and apply to local reactor ─────
+    startPolling() {
+        if (this.pollTimer)
+            return;
+        // Run once shortly after boot, then periodically.
+        setTimeout(() => { void this.pollOnce(); }, 1500);
+        this.pollTimer = setInterval(() => { void this.pollOnce(); }, POLL_INTERVAL_MS);
+    }
+    async pollOnce() {
+        if (this.shuttingDown)
+            return;
+        if (this.pollInFlight)
+            return;
+        if (this.summaries.size === 0)
+            return;
+        this.pollInFlight = true;
+        try {
+            for (const summary of this.summaries.values()) {
+                if (this.shuttingDown)
+                    break;
+                await this.pollSummary(summary);
+            }
+        }
+        finally {
+            this.pollInFlight = false;
+        }
+    }
+    async pollSummary(summary) {
+        const ph = globalThis.window?.ph;
+        const reactorClient = ph?.reactorClient;
+        const reactor = ph?.reactor; // low-level reactor module — exposes load()
+        if (!reactorClient)
+            return;
+        // Figure out which docs to poll. Drive-level = every doc currently in
+        // the drive. Doc-level = just the one doc.
+        const docIds = summary.kind === "document" && summary.documentId
+            ? [summary.documentId]
+            : await this.listDocIdsInDrive(summary.driveId);
+        // Include the drive itself for drive-level ops (ADD_FOLDER, MOVE_NODE).
+        if (summary.kind === "drive" && !docIds.includes(summary.driveId)) {
+            docIds.unshift(summary.driveId);
+        }
+        let anyApplied = false;
+        for (const docId of docIds) {
+            for (const participant of summary.participants) {
+                if (participant.address === this.myAddress.toLowerCase())
+                    continue;
+                if (!participant.beeNodePublicKey)
+                    continue;
+                try {
+                    const latest = await this.opsFeed.getLatestIndex(summary.collabId, summary.driveId, docId === summary.driveId ? summary.driveId : docId, participant.address);
+                    if (latest == null)
+                        continue;
+                    const cursorKey = `${LS_PEER_CURSOR_PREFIX}${summary.collabId}:${participant.address}:${docId}`;
+                    const cursor = this.readCursor(cursorKey);
+                    if (latest < cursor)
+                        continue;
+                    const batches = await this.opsFeed.readRange(summary.collabId, summary.driveId, docId === summary.driveId ? summary.driveId : docId, participant.address, cursor, latest, participant.beeNodePublicKey);
+                    if (batches.length === 0)
+                        continue;
+                    for (const { feedIndex, batch } of batches) {
+                        try {
+                            const ops = JSON.parse(batch.opsJson);
+                            if (!Array.isArray(ops) || ops.length === 0)
+                                continue;
+                            // Dispatch to the reactor. reactor.load() is idempotent per op
+                            // id, so re-runs from a re-pull don't corrupt state.
+                            if (reactor?.load) {
+                                await reactor.load(docId, batch.branch ?? "main", ops);
+                            }
+                            else if (reactorClient?.load) {
+                                await reactorClient.load(docId, batch.branch ?? "main", ops);
+                            }
+                            else {
+                                console.warn("[CollabManager] No reactor.load available, ops queued but not applied");
+                                continue;
+                            }
+                            anyApplied = true;
+                            this.writeCursor(cursorKey, feedIndex + 1);
+                        }
+                        catch (err) {
+                            console.warn(`[CollabManager] apply ops failed (${summary.collabId}, doc ${docId.slice(0, 8)}, idx ${feedIndex}):`, err instanceof Error ? err.message : err);
+                        }
+                    }
+                }
+                catch (err) {
+                    // Peer's feed may not exist yet (they haven't made any edits).
+                    // Keep walking — other peers / docs may be ahead.
+                    void err;
+                }
+            }
+        }
+        if (anyApplied) {
+            const updated = { ...summary, lastActivityAt: new Date().toISOString() };
+            this.summaries.set(summary.collabId, updated);
+            this.persist();
+            this.emit({ type: "op-applied", collabId: summary.collabId });
+            // UI hook: fire a custom event so the toolbar History view can
+            // refresh without having to subscribe to collab events.
+            try {
+                globalThis.window?.dispatchEvent(new CustomEvent("swarm:collab:op-applied", {
+                    detail: { collabId: summary.collabId },
+                }));
+            }
+            catch { /* non-browser */ }
+        }
+    }
+    readCursor(key) {
+        try {
+            const raw = globalThis.window?.localStorage?.getItem?.(key);
+            const n = raw ? parseInt(raw, 10) : 0;
+            return Number.isFinite(n) && n >= 0 ? n : 0;
+        }
+        catch {
+            return 0;
+        }
+    }
+    writeCursor(key, value) {
+        try {
+            globalThis.window?.localStorage?.setItem?.(key, String(value));
+        }
+        catch {
+            /* localStorage unavailable */
         }
     }
 }

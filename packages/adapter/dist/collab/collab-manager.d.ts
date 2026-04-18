@@ -34,7 +34,12 @@ export declare class CollabManager {
     private readonly myAddress;
     private readonly summaries;
     private readonly handlers;
+    private readonly opsFeed;
+    private pollTimer;
+    private pollInFlight;
+    private shuttingDown;
     constructor(client: SwarmClient, chat: ChatManager, myAddress: string);
+    shutdown(): void;
     /**
      * Create a new collaboration, invite each participant via chat, and
      * return the local summary.
@@ -63,5 +68,27 @@ export declare class CollabManager {
      * back to an empty list if the reactor client isn't wired up.
      */
     private listDocIdsInDrive;
+    /**
+     * Called by SwarmChannel after a successful push of local ops to the
+     * user's personal doc feed. Mirrors the same batch to each active
+     * collab's ACT-protected per-peer feed so other participants can see
+     * the ops.
+     *
+     * Best-effort: errors are logged but don't fail the caller — the
+     * personal-feed push already succeeded, the collab mirror is a
+     * secondary write that can be retried on next push.
+     */
+    handleLocalPush(input: {
+        driveId: string;
+        docId: string;
+        ops: any[];
+        scope: string;
+        branch: string;
+    }): Promise<void>;
+    private startPolling;
+    private pollOnce;
+    private pollSummary;
+    private readCursor;
+    private writeCursor;
 }
 //# sourceMappingURL=collab-manager.d.ts.map
