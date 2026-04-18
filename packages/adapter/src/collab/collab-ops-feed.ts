@@ -61,9 +61,14 @@ function bytes32ToHex(bytes: Uint8Array, offset = 0): string {
 }
 
 function parseFeedIndex(raw: unknown): number {
+  if (raw == null) return 0;
   if (typeof raw === "number") return raw;
-  if (typeof raw !== "string") return 0;
-  const hex = raw.startsWith("0x") ? raw.slice(2) : raw;
+  if (typeof raw === "object" && raw !== null && typeof (raw as any).toBigInt === "function") {
+    try { return Number((raw as any).toBigInt()); } catch { /* fall through */ }
+  }
+  const asString = typeof raw === "string" ? raw : String(raw);
+  const hex = asString.startsWith("0x") ? asString.slice(2) : asString;
+  if (!/^[0-9a-f]+$/i.test(hex)) return 0;
   try {
     return Number(BigInt("0x" + hex));
   } catch {
@@ -72,6 +77,11 @@ function parseFeedIndex(raw: unknown): number {
 }
 
 export class CollabOpsFeed {
+  /** Last index we wrote per topic. Same staleness workaround as the
+   *  manifest feed — bee-js's auto-pick pre-read can be stale on public
+   *  nodes, so we track indices ourselves and write at an explicit index. */
+  private lastWrittenIndex = new Map<string, number>();
+
   constructor(private readonly client: SwarmClient) {}
 
   // ─── Topics ────────────────────────────────────────────────────
@@ -126,8 +136,28 @@ export class CollabOpsFeed {
 
     // Feed write. The feed is owned by the writer's Swarm signer, so only
     // this participant can append here; other participants read it.
+    // We pass the index explicitly so back-to-back writes don't collide
+    // on bee-js's stale auto-pick pre-read (same workaround as the
+    // manifest feed).
     const topic = CollabOpsFeed.topicFor(collabId, driveId, documentId);
-    await this.client.writeFeedPayload(topic, wrapperRef);
+    const topicHex = topic.toHex();
+    let nextIndex = this.lastWrittenIndex.get(topicHex);
+    if (nextIndex === undefined) {
+      const reader = (this.client as any).bee.makeFeedReader(topic, this.client.getOwnerAddress());
+      try {
+        const head = await reader.downloadReference();
+        nextIndex =
+          head?.feedIndexNext !== undefined
+            ? parseFeedIndex(head.feedIndexNext)
+            : parseFeedIndex(head.feedIndex) + 1;
+      } catch {
+        nextIndex = 0;
+      }
+    } else {
+      nextIndex = nextIndex + 1;
+    }
+    await this.client.writeFeedPayloadAtIndex(topic, wrapperRef, nextIndex);
+    this.lastWrittenIndex.set(topicHex, nextIndex);
   }
 
   // ─── Read side ─────────────────────────────────────────────────
@@ -145,7 +175,13 @@ export class CollabOpsFeed {
     try {
       const reader = (this.client as any).bee.makeFeedReader(topic, peerAddress);
       const result = await reader.downloadReference();
-      return parseFeedIndex(result.feedIndex);
+      const base = parseFeedIndex(result.feedIndex);
+      // Same stale-latest correction as CollabManifestFeed.readLatest.
+      if (result.feedIndexNext !== undefined) {
+        const nextIdx = parseFeedIndex(result.feedIndexNext);
+        if (nextIdx > base + 1) return nextIdx - 1;
+      }
+      return base;
     } catch {
       return null;
     }

@@ -191,11 +191,7 @@ describe("CollabOpsFeed: cross-node ACT round trip", () => {
     console.log(`Node B read ${read!.length} batch(es) from Node A's feed, decrypted + matched.`);
   });
 
-  // Known-flaky on Bee 2.7.1 against bee-js 11: the second ACT-protected
-  // feed write's chunks don't always propagate cross-node within the poll
-  // budget. Local-only (same-node) this passes reliably. Skipped until
-  // bee-js catches up or we move to a controlled test network.
-  it.skip("multiple batches land on successive feed indices", async () => {
+  it("multiple batches land on successive feed indices", async () => {
     const driveId = `multidrive-${Date.now().toString(16)}`;
     const docId = `doc-${Math.random().toString(16).slice(2, 10)}`;
     const collabId = buildCollabId("document", driveId, docId);
@@ -267,9 +263,7 @@ describe("CollabOpsFeed: cross-node ACT round trip", () => {
     console.log(`Node B read all ${read.length} batches in order, indices 0..${read.length - 1}`);
   }, 240_000);
 
-  // Same flake as above — depends on two successive ACT writes propagating
-  // cross-node. Re-enable on same-node setups or once bee-js 2.7 support lands.
-  it.skip("cursor semantics: readRange honors fromIndex to skip already-seen batches", async () => {
+  it("cursor semantics: readRange honors fromIndex to skip already-seen batches", async () => {
     const driveId = `cursor-${Date.now().toString(16)}`;
     const docId = `cursor-doc-${Math.random().toString(16).slice(2, 8)}`;
     const collabId = buildCollabId("document", driveId, docId);

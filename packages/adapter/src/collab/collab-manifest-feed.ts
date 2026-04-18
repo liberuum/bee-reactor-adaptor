@@ -48,9 +48,16 @@ function bytes32ToHex(bytes: Uint8Array, offset = 0): string {
 }
 
 function parseFeedIndex(raw: unknown): number {
+  if (raw == null) return 0;
   if (typeof raw === "number") return raw;
-  if (typeof raw !== "string") return 0;
-  const hex = raw.startsWith("0x") ? raw.slice(2) : raw;
+  // bee-js's FeedIndex instances expose `.toBigInt()` in newer builds.
+  if (typeof raw === "object" && raw !== null && typeof (raw as any).toBigInt === "function") {
+    try { return Number((raw as any).toBigInt()); } catch { /* fall through */ }
+  }
+  // Older / non-FeedIndex objects may have a string representation.
+  const asString = typeof raw === "string" ? raw : String(raw);
+  const hex = asString.startsWith("0x") ? asString.slice(2) : asString;
+  if (!/^[0-9a-f]+$/i.test(hex)) return 0;
   try {
     return Number(BigInt("0x" + hex));
   } catch {
@@ -59,6 +66,11 @@ function parseFeedIndex(raw: unknown): number {
 }
 
 export class CollabManifestFeed {
+  /** Last index we wrote per topic. Lets publish() return a correct
+   *  feedIndex even when Bee's post-write feed reads are still showing
+   *  stale state (which we hit against public nodes). */
+  private lastWrittenIndex = new Map<string, number>();
+
   constructor(private readonly client: SwarmClient) {}
 
   static topicFor(collabId: CollabId): Topic {
@@ -75,6 +87,34 @@ export class CollabManifestFeed {
     manifest: CollabManifest,
     granteeHistRef: string,
   ): Promise<{ feedIndex: number; actRef: string; actHistoryAddress: string }> {
+    const topic = CollabManifestFeed.topicFor(manifest.collabId);
+    const topicHex = topic.toHex();
+    const ownerAddress = this.client.getOwnerAddress();
+
+    // Work out which index this write lands at. Prefer a local counter
+    // (per-topic, seeded from Swarm on first access) because Bee's
+    // immediate post-write reads are eventually-consistent on public
+    // networks — we hit repeated feedIndex: 0 readbacks in integration.
+    let nextIndex = this.lastWrittenIndex.get(topicHex);
+    if (nextIndex === undefined) {
+      const readerPre = (this.client as any).bee.makeFeedReader(topic, ownerAddress);
+      try {
+        const head = await readerPre.downloadReference();
+        // head.feedIndex = current latest. Next write lands at +1.
+        // Some bee-js builds also expose feedIndexNext which is the same
+        // thing precomputed — prefer it when present.
+        nextIndex =
+          head?.feedIndexNext !== undefined
+            ? parseFeedIndex(head.feedIndexNext)
+            : parseFeedIndex(head.feedIndex) + 1;
+      } catch {
+        // Brand-new feed — our write lands at index 0.
+        nextIndex = 0;
+      }
+    } else {
+      nextIndex = nextIndex + 1;
+    }
+
     const { reference: actRef, historyAddress } = await this.client.uploadFile(
       JSON.stringify(manifest),
       {
@@ -94,23 +134,13 @@ export class CollabManifestFeed {
       skipEncryption: true,
     });
 
-    const topic = CollabManifestFeed.topicFor(manifest.collabId);
-    await this.client.writeFeedPayload(topic, wrapperRef);
+    // Write at the explicit index we decided above. bee-js's auto-pick
+    // uses its own pre-read which is stale on public nodes — passing the
+    // index ourselves keeps the counter consistent.
+    await this.client.writeFeedPayloadAtIndex(topic, wrapperRef, nextIndex);
+    this.lastWrittenIndex.set(topicHex, nextIndex);
 
-    // Read back the index we just wrote so callers can record it.
-    const reader = (this.client as any).bee.makeFeedReader(
-      topic,
-      // Owner = current signer (initiator).
-      this.client.getOwnerAddress(),
-    );
-    let feedIndex = 0;
-    try {
-      const result = await reader.downloadReference();
-      feedIndex = parseFeedIndex(result.feedIndex);
-    } catch {
-      /* brand-new feed — default to 0 */
-    }
-    return { feedIndex, actRef, actHistoryAddress: actHist };
+    return { feedIndex: nextIndex, actRef, actHistoryAddress: actHist };
   }
 
   /**
@@ -133,6 +163,27 @@ export class CollabManifestFeed {
       const result = await reader.downloadReference();
       wrapperRef = result.reference.toHex();
       feedIndex = parseFeedIndex(result.feedIndex);
+      // Bee's "latest" feed lookup (downloadReference with no args) can
+      // return a stale entry when multiple updates land in quick
+      // succession — the feedIndexNext header still correctly advances,
+      // so if next > feedIndex+1 we know the real latest is elsewhere
+      // and re-fetch by explicit index.
+      if (result.feedIndexNext !== undefined) {
+        const nextIdx = parseFeedIndex(result.feedIndexNext);
+        if (nextIdx > feedIndex + 1) {
+          const realLatest = nextIdx - 1;
+          const m = await this.readAtIndex(
+            collabId,
+            ownerSignerAddress,
+            readerBeeNodePubKey,
+            realLatest,
+          );
+          if (m) return { manifest: m, feedIndex: realLatest };
+          // Fall through to use the first-returned entry if the explicit
+          // lookup for the real latest fails (chunk not propagated).
+          feedIndex = realLatest;
+        }
+      }
     } catch {
       return null;
     }

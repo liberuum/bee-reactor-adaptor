@@ -304,6 +304,82 @@ describe("CollabManager: push + pull round trip", () => {
     expect(registry[collabId]).toBeUndefined();
   }, 90_000);
 
+  it("revoke round trip: initiator removes peer → peer's ops feed can't be extended under the new chain", async () => {
+    // We set up the inviter's CollabManager with an initialized summary
+    // (simulating a post-create state), then call revokeParticipant and
+    // verify the manifest feed advances to a new revision with the
+    // shrunken participant list.
+    const chatStub: any = {
+      startSession: async () => ({}),
+      sendMessage: async () => ({}),
+      getSession: () => ({}),
+    };
+    const managerA = new CollabManager(clientA, chatStub, addrA);
+
+    try {
+      const driveId = `revdrive-${Date.now().toString(16)}`;
+      const collabId = `drive:${driveId}`;
+      const now = new Date().toISOString();
+
+      // Seed the manager with a collab we created. Participants are A
+      // (initiator) and B. Grantee chain is already established.
+      const { ref: granteeRef, historyRef } = await clientA.createGrantees([beePubA, beePubB]);
+      await new Promise((r) => setTimeout(r, 1100));
+      // Publish manifest v0 so the feed exists before we revoke.
+      const { CollabManifestFeed } = await import("../../src/collab/collab-manifest-feed.js");
+      const manifestFeed = new CollabManifestFeed(clientA);
+      const v0 = await manifestFeed.publish({
+        version: 1,
+        collabId,
+        kind: "drive",
+        driveId,
+        title: "Revoke round trip",
+        participants: [
+          { address: addrA, beeNodePublicKey: beePubA, joinedAt: now },
+          { address: addrB, beeNodePublicKey: beePubB, joinedAt: now },
+        ],
+        initiator: addrA,
+        createdAt: now,
+        updatedAt: now,
+      }, historyRef);
+      await new Promise((r) => setTimeout(r, 1100));
+
+      (managerA as any).summaries.set(collabId, {
+        collabId,
+        kind: "drive",
+        driveId,
+        title: "Revoke round trip",
+        initiator: addrA,
+        participants: [
+          { address: addrA, beeNodePublicKey: beePubA, joinedAt: now },
+          { address: addrB, beeNodePublicKey: beePubB, joinedAt: now },
+        ],
+        manifestRef: "0".repeat(64),
+        manifestActHistoryAddress: "0".repeat(64),
+        manifestPublisherBeeNodePubKey: beePubA,
+        manifestFeedIndex: v0.feedIndex,
+        currentGranteeRef: granteeRef,
+        currentGranteeHistRef: historyRef,
+        lastActivityAt: now,
+        status: "active",
+      });
+
+      // Revoke B. This should rebuild the grantee chain and publish
+      // manifest v1 with just A.
+      const updated = await managerA.revokeParticipant(collabId, addrB);
+      expect(updated.participants).toHaveLength(1);
+      expect(updated.participants[0].address).toBe(addrA);
+      expect(updated.currentGranteeHistRef).not.toBe(historyRef); // rotated
+      expect((updated.manifestFeedIndex ?? 0)).toBeGreaterThan(v0.feedIndex);
+
+      console.log(
+        `Revoke complete: manifest feed advanced ${v0.feedIndex} → ${updated.manifestFeedIndex}, grantee chain rotated`,
+      );
+    } finally {
+      managerA.shutdown();
+    }
+  }, 90_000);
+
   it("leave() removes the summary and persists", async () => {
     const chatStub: any = {
       startSession: async () => ({}),
