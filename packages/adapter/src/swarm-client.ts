@@ -25,8 +25,8 @@ import { ShareManager } from "./share-manager.js";
  * Sharing and profiles are delegated to ShareManager.
  */
 export class SwarmClient {
-  private readonly bee: Bee;
-  private readonly batchId: string;
+  readonly bee: Bee;
+  readonly batchId: string;
   private readonly useFeedMode: boolean;
   private readonly feedTopicPrefix: string;
   /** The wallet-derived key used for app-layer AES-256-GCM encryption */

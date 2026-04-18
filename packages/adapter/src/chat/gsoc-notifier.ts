@@ -11,6 +11,7 @@
  * Requirement: receiver must run a FULL Bee node.
  */
 import type { Bee } from "@ethersphere/bee-js";
+import { PrivateKey } from "@ethersphere/bee-js";
 import type { GsocNotification, GsocNotificationType } from "./types.js";
 
 const NOTIFY_IDENTIFIER_PREFIX = "ph:v2:notify:";
@@ -77,6 +78,108 @@ export class GsocNotifier {
 
     this.minedSigners.set(targetOverlay, signerHex);
     return signerHex;
+  }
+
+  /**
+   * Mine a GSOC signer with a caller-chosen identifier. Used by
+   * subsystems (e.g. CollabManager) that need multiple independent
+   * notification channels per (sender, receiver) pair — each
+   * identifier produces a distinct SOC address, so chat and collab
+   * pings don't cross-talk.
+   *
+   * Returns the signer hex and the listen address derived from the
+   * signer's pubkey. The listen address is what subscribers use with
+   * `gsocSubscribe`.
+   */
+  mineSignerWithIdentifier(
+    targetOverlay: string,
+    identifierRaw: string,
+    proximity = 12,
+  ): { signerHex: string; listenAddress: string; identifierHex: string } {
+    const identifierHex = makeIdentifierHexSync(identifierRaw);
+    const signer = this.bee.gsocMine(targetOverlay, identifierHex, proximity);
+    // Normalize the signer to a PrivateKey object so we can derive the
+    // listen address. bee-js may return a PrivateKey already or a hex
+    // string; construct one either way.
+    const pk = signer instanceof PrivateKey ? signer : new PrivateKey(
+      typeof signer === "string" ? signer : (signer as any).toHex?.() ?? String(signer),
+    );
+    const signerHex = pk.toHex();
+    const listenAddress = pk.publicKey().address().toHex();
+    return { signerHex, listenAddress, identifierHex };
+  }
+
+  /**
+   * Low-level send that targets an explicit identifier + signer. Used by
+   * CollabManager so multiple independent signer chains can coexist per
+   * peer pair without crashing into each other via the shared mining
+   * cache.
+   */
+  async sendWithSigner(
+    signerHex: string,
+    identifierHex: string,
+    notificationType: GsocNotificationType,
+    data?: Record<string, unknown>,
+  ): Promise<void> {
+    const notification: GsocNotification = {
+      type: notificationType,
+      from: this.myAddress,
+      timestamp: new Date().toISOString(),
+      data,
+    };
+    await this.bee.gsocSend(
+      this.batchId,
+      signerHex,
+      identifierHex,
+      JSON.stringify(notification),
+    );
+  }
+
+  /**
+   * Subscribe using an explicit identifier + listen address. Mirror of
+   * sendWithSigner for the receive side.
+   */
+  subscribeWithIdentifier(
+    subscriptionKey: string,
+    listenAddress: string,
+    identifierHex: string,
+    handler: {
+      onNotification: (notification: GsocNotification) => void;
+      onError?: (error: Error) => void;
+      onClose?: () => void;
+    },
+  ): GsocSubscription {
+    const existing = this.subscriptions.get(subscriptionKey);
+    if (existing) existing.cancel();
+
+    const sub = this.bee.gsocSubscribe(listenAddress, identifierHex, {
+      onMessage: (data: any) => {
+        try {
+          const bytes = typeof data.toUint8Array === "function"
+            ? data.toUint8Array()
+            : data instanceof Uint8Array ? data : new Uint8Array(data);
+          const text = new TextDecoder().decode(bytes);
+          const notification = JSON.parse(text) as GsocNotification;
+          handler.onNotification(notification);
+        } catch (err) {
+          handler.onError?.(err instanceof Error ? err : new Error(String(err)));
+        }
+      },
+      onError: (error: Error) => handler.onError?.(error),
+      onClose: () => {
+        this.subscriptions.delete(subscriptionKey);
+        handler.onClose?.();
+      },
+    });
+
+    const subscription: GsocSubscription = {
+      cancel: () => {
+        sub.cancel();
+        this.subscriptions.delete(subscriptionKey);
+      },
+    };
+    this.subscriptions.set(subscriptionKey, subscription);
+    return subscription;
   }
 
   /**

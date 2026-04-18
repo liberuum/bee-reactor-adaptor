@@ -276,6 +276,20 @@ export interface SwarmPublicProfile {
   /** Bee node overlay address (for GSOC/PSS targeting) */
   overlayAddress?: string;
 
+  /** Outbound GSOC listen addresses advertised by this user.
+   *
+   *  Shape: { [collabId]: { [peerAddress]: gsocAddress } }
+   *
+   *  Reading: "when I send a collab `op-committed` ping on collabId to
+   *  peerAddress, I write to the SOC at gsocAddress". The receiver
+   *  subscribes at that address.
+   *
+   *  This lives on the public profile because GSOC addresses aren't
+   *  secret (the SOC payloads are; the address is a lookup index). Keeps
+   *  the discovery path self-contained: accept() reads the peer's profile
+   *  and immediately knows where to listen. */
+  collabGsocOutbound?: Record<string, Record<string, string>>;
+
   updatedAt: string;
 }
 

@@ -40,7 +40,17 @@ import {
   listCollabsFromUserManifest,
   removeCollabFromUserManifest,
 } from "../channel/manifest-manager.js";
-import type { UserCollabEntry } from "../types.js";
+import type { UserCollabEntry, SwarmPublicProfile } from "../types.js";
+import { GsocNotifier } from "../chat/gsoc-notifier.js";
+import type { Bee } from "@ethersphere/bee-js";
+
+/**
+ * GSOC identifier for op-committed pings. Namespaced under "collab-notify"
+ * so chat's GSOC subscription doesn't see our traffic (and vice versa).
+ */
+function collabGsocIdentifier(senderAddress: string, collabId: string): string {
+  return `ph:v2:collab-notify:${senderAddress.toLowerCase()}:${collabId}`;
+}
 
 const LS_SUMMARIES_KEY = "swarm:collabs";
 const LS_PEER_CURSOR_PREFIX = "swarm:collabPeerCursor:";
@@ -57,17 +67,39 @@ export class CollabManager {
   private readonly handlers = new Set<CollabEventHandler>();
   private readonly opsFeed: CollabOpsFeed;
   private readonly manifestFeed: CollabManifestFeed;
+  /** Optional GSOC notifier for sub-second op-committed pings. When not
+   *  provided (unit tests, pre-plugin-init), all ping paths no-op and
+   *  the 5s poll timer stays as the sole transport. */
+  private readonly gsoc: GsocNotifier | null;
+  /** Per-peer mined signer: key `<collabId>:<peerAddress>`, value
+   *  { signerHex, identifierHex } — stable for the life of the collab. */
+  private readonly outboundGsoc = new Map<string, { signerHex: string; identifierHex: string }>();
+  /** Subscription handles for pings we listen to (incoming). Key:
+   *  `<collabId>:<peerAddress>`. */
+  private readonly inboundGsocSubs = new Map<string, () => void>();
+  /** Signed out-of-process subscription deduper: `<collabId>:<peerAddress>`
+   *  set when we have already either subscribed or failed — stops the
+   *  rehydrate path from repeatedly hitting the same unreachable peer. */
+  private readonly subscribedPeers = new Set<string>();
+
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private pollInFlight = false;
+  /** Peers whose feeds should be pulled on the next pollOnce, triggered
+   *  by a GSOC ping. Skips the timer for that peer's feeds. */
+  private readonly urgentPulls = new Set<string>();
   private shuttingDown = false;
 
   constructor(
     private readonly client: SwarmClient,
     private readonly chat: ChatManager,
     private readonly myAddress: string,
+    /** Optional — pass a notifier to enable GSOC op-committed pings.
+     *  Pre-plugin-init paths and unit tests can omit it. */
+    gsoc?: GsocNotifier | null,
   ) {
     this.opsFeed = new CollabOpsFeed(client);
     this.manifestFeed = new CollabManifestFeed(client);
+    this.gsoc = gsoc ?? null;
     this.loadFromStorage();
     this.startPolling();
     // Install the push hook so SwarmChannel can notify us on every local
@@ -87,6 +119,10 @@ export class CollabManager {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
+    for (const cancel of this.inboundGsocSubs.values()) {
+      try { cancel(); } catch { /* ignore */ }
+    }
+    this.inboundGsocSubs.clear();
     if ((globalThis as any).__swarmCollabManager__ === this) {
       (globalThis as any).__swarmCollabManager__ = null;
     }
@@ -280,6 +316,15 @@ export class CollabManager {
     void this.upsertUserManifestEntry(summary).catch((err) => {
       console.warn(
         "[CollabManager] create: user-manifest write failed (non-fatal):",
+        err instanceof Error ? err.message : err,
+      );
+    });
+    // Background: mine GSOC signers per peer + publish our outbound
+    // addresses to our profile. Non-blocking — first push might hit
+    // before mining completes, poll-loop covers the gap.
+    void this.provisionOutboundGsoc(collabId, participantsFull).catch((err) => {
+      console.warn(
+        "[CollabManager] GSOC provision (create) failed:",
         err instanceof Error ? err.message : err,
       );
     });
@@ -609,6 +654,21 @@ export class CollabManager {
         err instanceof Error ? err.message : err,
       );
     });
+    // Provision our outbound GSOC to each peer (so they can subscribe and
+    // learn when we push) and subscribe to theirs (so we pull on their
+    // pushes). Both are background, best-effort.
+    void this.provisionOutboundGsoc(summary.collabId, participants).catch((err) => {
+      console.warn(
+        "[CollabManager] GSOC provision (accept) failed:",
+        err instanceof Error ? err.message : err,
+      );
+    });
+    void this.subscribeToPeerGsoc(summary).catch((err) => {
+      console.warn(
+        "[CollabManager] GSOC subscribe (accept) failed:",
+        err instanceof Error ? err.message : err,
+      );
+    });
     this.emit({ type: "collab-accepted", collabId: summary.collabId, data: summary });
 
     return summary;
@@ -653,6 +713,207 @@ export class CollabManager {
     };
     this.handlers.add(wrapped);
     return () => this.handlers.delete(wrapped);
+  }
+
+  // ─── GSOC op-committed pings (sub-second real-time) ────────────
+
+  /**
+   * Mine a signer per peer for a collab, remember the listen address,
+   * and merge the outbound-to-peer map into our public profile so peers
+   * can find where to subscribe. Best-effort: failures are logged but
+   * not thrown — the poll-loop fallback still delivers ops.
+   *
+   * Idempotent per (collabId, peerAddress): subsequent calls reuse the
+   * cached mined signer.
+   */
+  private async provisionOutboundGsoc(
+    collabId: CollabId,
+    peers: CollabParticipant[],
+  ): Promise<void> {
+    if (!this.gsoc || peers.length === 0) return;
+
+    // Read the existing profile so we can merge without clobbering other
+    // fields. This is the authoritative advertise surface.
+    let profile: SwarmPublicProfile | null = null;
+    try {
+      profile = await this.client.readPublicProfile(this.myAddress);
+    } catch { /* no profile yet */ }
+    if (!profile) {
+      // No profile published yet — bail. The plugin publishes one on
+      // connect; a later collab.provisionOutboundGsoc call will catch up.
+      return;
+    }
+
+    const existingMap = { ...(profile.collabGsocOutbound ?? {}) };
+    const collabMap = { ...(existingMap[collabId] ?? {}) };
+    let profileDirty = false;
+
+    for (const peer of peers) {
+      if (peer.address === this.myAddress.toLowerCase()) continue;
+      const key = `${collabId}:${peer.address}`;
+      if (this.outboundGsoc.has(key) && collabMap[peer.address]) continue;
+
+      // Look up the peer's overlay from their profile — required for
+      // mining (signer address must land near their neighborhood).
+      let peerProfile: SwarmPublicProfile | null = null;
+      try {
+        peerProfile = await this.client.readPublicProfile(peer.address);
+      } catch { /* skip */ }
+      const overlay = peerProfile?.overlayAddress;
+      if (!overlay) continue;
+
+      try {
+        const identifierRaw = collabGsocIdentifier(this.myAddress, collabId);
+        const { signerHex, listenAddress, identifierHex } =
+          this.gsoc.mineSignerWithIdentifier(overlay, identifierRaw);
+        this.outboundGsoc.set(key, { signerHex, identifierHex });
+        if (collabMap[peer.address] !== listenAddress) {
+          collabMap[peer.address] = listenAddress;
+          profileDirty = true;
+        }
+      } catch (err) {
+        console.warn(
+          `[CollabManager] mine for ${collabId} peer ${peer.address.slice(0, 10)} failed:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+
+    if (!profileDirty) return;
+    existingMap[collabId] = collabMap;
+    const updatedProfile: SwarmPublicProfile = {
+      ...profile,
+      collabGsocOutbound: existingMap,
+      updatedAt: new Date().toISOString(),
+    };
+    try {
+      await this.client.publishPublicProfile(this.myAddress, updatedProfile);
+    } catch (err) {
+      console.warn(
+        "[CollabManager] publishPublicProfile for collab GSOC addrs failed:",
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+
+  /**
+   * Subscribe to each peer's advertised outbound-to-me GSOC address for
+   * a given collab, if we haven't already. Called lazily after mining
+   * completes and on rehydrate.
+   */
+  private async subscribeToPeerGsoc(summary: CollabSummary): Promise<void> {
+    if (!this.gsoc) return;
+    for (const peer of summary.participants) {
+      if (peer.address === this.myAddress.toLowerCase()) continue;
+      const subKey = `${summary.collabId}:${peer.address}`;
+      if (this.subscribedPeers.has(subKey)) continue;
+      this.subscribedPeers.add(subKey);
+
+      try {
+        const peerProfile = await this.client.readPublicProfile(peer.address);
+        const listenAddress = peerProfile?.collabGsocOutbound?.[summary.collabId]?.[this.myAddress.toLowerCase()];
+        if (!listenAddress) {
+          // Peer hasn't advertised an outbound-to-me GSOC address for
+          // this collab yet. They will, on their next provisionOutboundGsoc
+          // (e.g. on their create/accept). Drop from the dedup set so a
+          // later subscribe attempt can retry.
+          this.subscribedPeers.delete(subKey);
+          continue;
+        }
+        const identifierRaw = collabGsocIdentifier(peer.address, summary.collabId);
+        const { identifierHex } = this.gsoc.mineSignerWithIdentifier(
+          // overlay parameter is unused on the subscribe side — we
+          // already know the listen address. Pass a dummy; bee-js
+          // doesn't touch the target for identifier hashing.
+          "0".repeat(40),
+          identifierRaw,
+          0,
+        );
+        // Re-derive identifier only (don't mine — we throw away the
+        // signer). makeIdentifierHex is deterministic from the raw
+        // string, which is what we want for subscribe.
+        void identifierHex;
+
+        // Prefer identifier derivation without mining to avoid wasting
+        // CPU. Call the low-level identifier helper by re-mining with
+        // proximity=0 so it returns immediately. (mineSigner at prox=0
+        // is essentially a no-op hash computation.)
+        const subscription = this.gsoc.subscribeWithIdentifier(
+          subKey,
+          listenAddress,
+          identifierHex,
+          {
+            onNotification: (n) => this.handlePeerPing(summary, peer.address, n),
+            onError: (err) => {
+              console.warn(
+                `[CollabManager] GSOC subscribe error for ${subKey}:`,
+                err.message,
+              );
+            },
+          },
+        );
+        this.inboundGsocSubs.set(subKey, () => subscription.cancel());
+      } catch (err) {
+        this.subscribedPeers.delete(subKey);
+        console.warn(
+          `[CollabManager] subscribe to GSOC for ${subKey} failed:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+  }
+
+  private handlePeerPing(
+    summary: CollabSummary,
+    writerAddress: string,
+    notification: unknown,
+  ): void {
+    // Any ping from a peer in this collab is a signal that they wrote
+    // new ops. Queue an urgent pull for that peer and trigger pollOnce
+    // on the next microtask.
+    const n = notification as { type?: string; data?: { collabId?: string; writerAddress?: string } } | undefined;
+    const collabId = n?.data?.collabId ?? summary.collabId;
+    const writer = (n?.data?.writerAddress ?? writerAddress).toLowerCase();
+    if (collabId !== summary.collabId) return;
+    this.urgentPulls.add(`${summary.collabId}:${writer}`);
+    void this.pollOnce();
+  }
+
+  /**
+   * Send op-committed pings to every OTHER participant for a collab.
+   * Best-effort — failures don't block the personal push that already
+   * succeeded. Poll-loop is the fallback.
+   */
+  private async pingPeersForCollab(
+    summary: CollabSummary,
+    driveId: string,
+    docId: string,
+  ): Promise<void> {
+    if (!this.gsoc) return;
+    for (const peer of summary.participants) {
+      if (peer.address === this.myAddress.toLowerCase()) continue;
+      const key = `${summary.collabId}:${peer.address}`;
+      const mined = this.outboundGsoc.get(key);
+      if (!mined) continue; // haven't mined for this peer yet — next push will catch up
+      try {
+        await this.gsoc.sendWithSigner(
+          mined.signerHex,
+          mined.identifierHex,
+          "doc-updated",
+          {
+            collabId: summary.collabId,
+            writerAddress: this.myAddress.toLowerCase(),
+            driveId,
+            documentId: docId,
+          },
+        );
+      } catch (err) {
+        console.warn(
+          `[CollabManager] GSOC ping to ${peer.address.slice(0, 10)} failed:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
   }
 
   // ─── User-manifest integration (authoritative collab registry) ─
@@ -760,6 +1021,15 @@ export class CollabManager {
         );
         this.persist();
         this.emit({ type: "collab-updated", collabId: "*" as any });
+      }
+      // Provision outbound GSOC + subscribe to peer pings for every
+      // summary we know about (both freshly-recovered and
+      // already-present from localStorage). Runs in the background —
+      // both are best-effort; poll-loop covers the gap either way.
+      for (const summary of this.summaries.values()) {
+        if (summary.status === "pending") continue;
+        void this.provisionOutboundGsoc(summary.collabId, summary.participants).catch(() => {});
+        void this.subscribeToPeerGsoc(summary).catch(() => {});
       }
     } catch (err) {
       console.warn(
@@ -881,6 +1151,9 @@ export class CollabManager {
         const updated = { ...this.summaries.get(s.collabId)!, lastActivityAt: new Date().toISOString() };
         this.summaries.set(s.collabId, updated);
         this.persist();
+        // Fire-and-forget GSOC ping — receiver polls on ping; poll-loop
+        // covers if the ping drops or isn't wired up yet.
+        void this.pingPeersForCollab(updated, input.driveId, input.docId).catch(() => {});
       } catch (err) {
         console.warn(
           `[CollabManager] mirror push failed for ${s.collabId} doc ${input.docId.slice(0, 8)}:`,
