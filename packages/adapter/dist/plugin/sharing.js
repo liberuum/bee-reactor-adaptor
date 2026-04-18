@@ -72,20 +72,59 @@ export async function buildDriveShareBundle(client, driveId, docIds) {
     const preparedDocs = [];
     for (const docId of docIds) {
         try {
-            const manifest = await client.readManifest(docId);
-            if (!manifest || manifest.operationBatches.length === 0) {
-                console.warn(`[SwarmPlugin] Doc ${docId.slice(0, 8)} has no ops on Swarm, skipping`);
-                continue;
-            }
-            const allOps = [];
-            for (const batch of manifest.operationBatches) {
+            let allOps = [];
+            let documentType;
+            let docName;
+            // Prefer the reactor's local operation store as the source of ops:
+            // it has EVERY op the user has performed, including ones the
+            // SwarmChannel outbox hasn't flushed to Swarm yet. Reading from
+            // client.readManifest alone produced partial bundles — if the
+            // user hit Share while 6 recent ops were in-flight in the outbox,
+            // the recipient would only see the ops already persisted, missing
+            // the middle/tail of the history.
+            if (reactorClient) {
                 try {
-                    const data = await client.downloadData(batch.reference);
-                    const ops = JSON.parse(new TextDecoder().decode(data));
-                    allOps.push(...(Array.isArray(ops) ? ops : [ops]));
+                    const doc = await reactorClient.get(docId);
+                    documentType = doc?.header?.documentType;
+                    docName = doc?.header?.name;
+                    // Paginate through all global-scope ops. Page size is generous
+                    // enough that most docs fit in one round; we iterate defensively
+                    // in case a doc has thousands of ops.
+                    const view = { branch: "main", scopes: ["global"] };
+                    let page = await reactorClient.getOperations(docId, view, undefined, { cursor: "", limit: 1000 });
+                    while (page) {
+                        const results = Array.isArray(page.results) ? page.results : [];
+                        allOps.push(...results);
+                        if (!page.nextCursor || typeof page.next !== "function")
+                            break;
+                        page = await page.next();
+                    }
                 }
                 catch (err) {
-                    console.warn(`[SwarmPlugin] Failed batch ${batch.reference.slice(0, 8)}:`, err instanceof Error ? err.message : err);
+                    console.warn(`[SwarmPlugin] Local reactor read for ${docId.slice(0, 8)} failed, falling back to Swarm:`, err instanceof Error ? err.message : err);
+                    allOps = [];
+                }
+            }
+            // Fallback: if reactorClient isn't available or the local read
+            // produced nothing (rare — e.g. reactor still booting), read from
+            // Swarm. This keeps older integrations working even if the local
+            // store isn't ready.
+            if (allOps.length === 0) {
+                const manifest = await client.readManifest(docId);
+                if (!manifest || manifest.operationBatches.length === 0) {
+                    console.warn(`[SwarmPlugin] Doc ${docId.slice(0, 8)} has no ops on Swarm, skipping`);
+                    continue;
+                }
+                documentType = documentType ?? manifest.documentType;
+                for (const batch of manifest.operationBatches) {
+                    try {
+                        const data = await client.downloadData(batch.reference);
+                        const ops = JSON.parse(new TextDecoder().decode(data));
+                        allOps.push(...(Array.isArray(ops) ? ops : [ops]));
+                    }
+                    catch (err) {
+                        console.warn(`[SwarmPlugin] Failed batch ${batch.reference.slice(0, 8)}:`, err instanceof Error ? err.message : err);
+                    }
                 }
             }
             if (allOps.length === 0)
@@ -94,8 +133,8 @@ export async function buildDriveShareBundle(client, driveId, docIds) {
             preparedDocs.push({
                 docId,
                 ops: allOps,
-                docType: manifest.documentType,
-                docName: docEntry?.name ?? docId,
+                docType: documentType ?? "unknown",
+                docName: docName ?? docEntry?.name ?? docId,
             });
         }
         catch (err) {
@@ -321,9 +360,19 @@ export async function applyDocumentBundle(bundleData, opts) {
             if (action.timestampUtcMs && typeof action.timestampUtcMs === "number") {
                 action.timestampUtcMs = new Date(action.timestampUtcMs).toISOString();
             }
-            if (action.context?.signer) {
-                delete action.context;
-            }
+            // Preserve the original signer info on the action. Reactor-
+            // client's signAction early-returns if action.context.signer.
+            // signatures exists ("If the action already has valid
+            // signatures, it is returned unchanged"). Deleting context
+            // here was erasing the sender's signature, so execute went
+            // on to re-sign with the importing user's wallet — which is
+            // why imported docs showed the recipient as the author of
+            // every operation instead of the original creator.
+            //
+            // For actions lacking a signer entirely (e.g. legacy bundles
+            // from before signing was universal), leave action.context
+            // as-is: signActions will supply a fresh signature only for
+            // those, without touching already-signed actions in the batch.
             return action;
         });
         try {
