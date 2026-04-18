@@ -30,6 +30,9 @@ export function CollaborateList({
   const [pickerOpen, setPickerOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [detailCollabId, setDetailCollabId] = useState<string | null>(null);
+  // Briefly-set "pulsing" collab ids — flash when an op-applied event
+  // fires, so the row shows real-time collab activity the user can see.
+  const [pulsingIds, setPulsingIds] = useState<Set<string>>(new Set());
   const myAddress = (
     (globalThis as any).window?.ph?.swarm?.client?.getOwnerAddress?.()
     ?? (globalThis as any).window?.ph?.swarm?.signerEntry?.swarmAddress
@@ -46,9 +49,33 @@ export function CollaborateList({
     const refresh = () => setSummaries(readCollabs());
     const id = setInterval(refresh, 2000);
     window.addEventListener("storage", refresh);
+    // Real-time signal: CollabManager fires this after applying a peer's
+    // ops to the local reactor. We both refresh the summary list (so
+    // lastActivityAt bumps) and pulse the row for a second so the user
+    // gets a visible sign that collaboration is live.
+    const onApplied = (e: Event) => {
+      const collabId = (e as CustomEvent<{ collabId?: string }>).detail?.collabId;
+      refresh();
+      if (collabId) {
+        setPulsingIds((prev) => {
+          const next = new Set(prev);
+          next.add(collabId);
+          return next;
+        });
+        setTimeout(() => {
+          setPulsingIds((prev) => {
+            const next = new Set(prev);
+            next.delete(collabId);
+            return next;
+          });
+        }, 1500);
+      }
+    };
+    window.addEventListener("swarm:collab:op-applied", onApplied as EventListener);
     return () => {
       clearInterval(id);
       window.removeEventListener("storage", refresh);
+      window.removeEventListener("swarm:collab:op-applied", onApplied as EventListener);
     };
   }, []);
 
@@ -122,6 +149,7 @@ export function CollaborateList({
             <CollabRow
               key={s.collabId}
               summary={s}
+              pulsing={pulsingIds.has(s.collabId)}
               onOpen={() => onOpenCollab(s)}
               onManage={() => setDetailCollabId(s.collabId)}
               onLeave={() => handleLeave(s.collabId)}
@@ -168,11 +196,13 @@ export function CollaborateList({
 
 function CollabRow({
   summary,
+  pulsing,
   onOpen,
   onManage,
   onLeave,
 }: {
   summary: CollabSummary;
+  pulsing: boolean;
   onOpen: () => void;
   onManage: () => void;
   onLeave: () => void;
@@ -189,8 +219,18 @@ function CollabRow({
     summary.status === "error" ? "text-amber-600" :
     "text-gray-400";
 
+  const lastActivityRel = summary.lastActivityAt
+    ? formatRelativeAgo(summary.lastActivityAt)
+    : "";
+
   return (
-    <div className="mb-1 rounded-lg border border-transparent px-2.5 py-2.5 hover:bg-gray-50">
+    <div
+      className={`mb-1 rounded-lg border px-2.5 py-2.5 transition-colors ${
+        pulsing
+          ? "border-green-200 bg-green-50"
+          : "border-transparent hover:bg-gray-50"
+      }`}
+    >
       <button
         type="button"
         onClick={onOpen}
@@ -212,9 +252,17 @@ function CollabRow({
               : `You + ${otherCount} participant${otherCount !== 1 ? "s" : ""}`}
           </div>
         </div>
-        <span className={`shrink-0 text-[10px] uppercase tracking-wider ${statusColor}`}>
-          {statusLabel}
-        </span>
+        <div className="flex shrink-0 flex-col items-end gap-0.5">
+          <span className={`flex items-center gap-1 text-[10px] uppercase tracking-wider ${statusColor}`}>
+            {pulsing && (
+              <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-green-500" />
+            )}
+            {statusLabel}
+          </span>
+          {lastActivityRel && (
+            <span className="text-[10px] text-gray-400">{lastActivityRel}</span>
+          )}
+        </div>
       </button>
       <div className="mt-1 flex justify-end gap-2">
         <button
@@ -637,6 +685,20 @@ function CollabCreatePicker({
 // ─── localStorage readthrough ────────────────────────────────────
 
 const LS_KEY = "swarm:collabs";
+
+function formatRelativeAgo(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(diff) || diff < 0) return "";
+  const s = Math.floor(diff / 1000);
+  if (s < 5) return "now";
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
+}
 
 function readCollabs(): CollabSummary[] {
   try {
