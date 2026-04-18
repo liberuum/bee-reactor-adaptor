@@ -81,6 +81,15 @@ export class GsocNotifier {
   }
 
   /**
+   * Hash an identifier string into a 32-byte hex identifier. Exposed
+   * so subscribers can derive the same identifier the sender mined
+   * under, without paying for a fresh signer mine.
+   */
+  static hashIdentifier(raw: string): string {
+    return makeIdentifierHexSync(raw);
+  }
+
+  /**
    * Mine a GSOC signer with a caller-chosen identifier. Used by
    * subsystems (e.g. CollabManager) that need multiple independent
    * notification channels per (sender, receiver) pair — each

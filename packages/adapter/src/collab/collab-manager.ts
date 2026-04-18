@@ -820,24 +820,12 @@ export class CollabManager {
           this.subscribedPeers.delete(subKey);
           continue;
         }
+        // Derive the identifier deterministically — no need to mine on
+        // the subscribe side (we already know the sender's listen
+        // address from their profile). GsocNotifier.hashIdentifier is a
+        // pure hash of the raw string.
         const identifierRaw = collabGsocIdentifier(peer.address, summary.collabId);
-        const { identifierHex } = this.gsoc.mineSignerWithIdentifier(
-          // overlay parameter is unused on the subscribe side — we
-          // already know the listen address. Pass a dummy; bee-js
-          // doesn't touch the target for identifier hashing.
-          "0".repeat(40),
-          identifierRaw,
-          0,
-        );
-        // Re-derive identifier only (don't mine — we throw away the
-        // signer). makeIdentifierHex is deterministic from the raw
-        // string, which is what we want for subscribe.
-        void identifierHex;
-
-        // Prefer identifier derivation without mining to avoid wasting
-        // CPU. Call the low-level identifier helper by re-mining with
-        // proximity=0 so it returns immediately. (mineSigner at prox=0
-        // is essentially a no-op hash computation.)
+        const identifierHex = GsocNotifier.hashIdentifier(identifierRaw);
         const subscription = this.gsoc.subscribeWithIdentifier(
           subKey,
           listenAddress,
