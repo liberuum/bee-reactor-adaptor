@@ -6,6 +6,9 @@
  * Feeds + ACT handle persistent, encrypted chat history.
  */
 
+import type { CollabInviteAttachment } from "../collab/types.js";
+export type { CollabInviteAttachment } from "../collab/types.js";
+
 // ─── Chat Messages ─────────────────────────────────────────────
 
 export interface ChatMessage {
@@ -32,10 +35,14 @@ export interface ChatMessage {
 }
 
 /**
- * Chat attachment — either a raw file (image, audio, video, etc.)
- * or a Powerhouse document model share (operations-based).
+ * Chat attachment — either a raw file (image, audio, video, etc.),
+ * a Powerhouse document model share (operations-based, one-shot),
+ * or a live-collaboration invitation (multi-writer, persistent).
  */
-export type ChatAttachment = FileAttachment | DocumentShareAttachment;
+export type ChatAttachment =
+  | FileAttachment
+  | DocumentShareAttachment
+  | CollabInviteAttachment;
 
 /**
  * Raw file shared via Swarm — images, audio, video, PDFs, etc.

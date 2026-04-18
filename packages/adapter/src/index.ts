@@ -67,6 +67,21 @@ export type {
   ChatEventHandler,
 } from "./chat/index.js";
 
+// ─── Collaboration (live multi-writer) ────────────────────
+export { CollabManager } from "./collab/index.js";
+export type {
+  CreateCollabInput,
+  CollabId,
+  CollabKind,
+  CollabManifest,
+  CollabParticipant,
+  CollabSummary,
+  CollabInviteAttachment,
+  CollabEvent,
+  CollabEventType,
+  CollabEventHandler,
+} from "./collab/index.js";
+
 // ─── Types ──────────────────────────────────────────────────
 export type {
   BeeAdapterConfig,

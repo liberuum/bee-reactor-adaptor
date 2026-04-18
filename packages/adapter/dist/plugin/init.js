@@ -1,4 +1,5 @@
 import { ChatManager } from "../chat/chat-manager.js";
+import { CollabManager } from "../collab/collab-manager.js";
 import { SwarmConnectPlugin } from "../connect-plugin.js";
 import { state, setSwarmStatus, getUploadedBytes, persistBeeUrl, loadDriveMapping } from "./state.js";
 import { loadManifestIndex, clearSwarmStorage } from "./storage.js";
@@ -52,13 +53,16 @@ async function initChatManager(beeUrl, plugin, stampBatchId) {
         const bee = new Bee(beeUrl);
         const ownerAddress = swarmClient.getOwnerAddress();
         const chatManager = new ChatManager(swarmClient, bee, stampBatchId, ownerAddress);
+        const collabManager = new CollabManager(swarmClient, chatManager, ownerAddress);
         if (phAfterStart.swarm) {
             phAfterStart.swarm.chat = { manager: chatManager };
+            phAfterStart.swarm.collab = { manager: collabManager };
         }
         // Also mirror on globalThis so we can always find and shut down
         // this manager even if ph.swarm gets reassigned by a later
         // plugin.start(). See the shutdown candidates list above.
         globalThis.__swarmChatManager__ = chatManager;
+        globalThis.__swarmCollabManager__ = collabManager;
         // Persist incoming messages to localStorage at the plugin level.
         // This runs even when the chat panel is CLOSED, so the unread badge
         // on the sidebar can reflect new messages, and history survives

@@ -13,6 +13,8 @@ export { CompositeChannelFactory, SwarmChannel, SwarmChannelFactory, registerSwa
 export type { SwarmChannelConfig } from "./channel/index.js";
 export { ChatManager, PssMessenger, ChatHistory, GsocNotifier, SwarmFile, chatTopic, historyTopic, getFileCategory, INLINE_RENDERABLE, } from "./chat/index.js";
 export type { ChatMessage, ChatAttachment, FileAttachment, DocumentShareAttachment, FileCategory, ChatSession, ChatHistoryPage, ConversationSummary, GsocNotification, GsocNotificationType, ChatEvent, ChatEventType, ChatEventHandler, } from "./chat/index.js";
+export { CollabManager } from "./collab/index.js";
+export type { CreateCollabInput, CollabId, CollabKind, CollabManifest, CollabParticipant, CollabSummary, CollabInviteAttachment, CollabEvent, CollabEventType, CollabEventHandler, } from "./collab/index.js";
 export type { BeeAdapterConfig, SwarmDocumentManifest, SwarmUserManifest, UserDocumentEntry, UserDriveEntry, UserStampEntry, StampStatus, OperationBatchEntry, KeyframeEntry, SwarmPublicProfile, SwarmDriveManifest, DriveDocumentEntry, DriveFolderEntry, ShareManifest, SharedDocumentEntry, } from "./types.js";
 export { createEmptyManifest } from "./types.js";
 export { buildFolderTree } from "./folder-tree.js";
