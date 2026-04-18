@@ -1534,60 +1534,81 @@ export class CollabManager {
       docIds.unshift(summary.driveId);
     }
 
+    // Parallelize the per-(doc, peer) probes. Feed reads + ACT decrypts
+    // are network-bound and mostly independent; running them in parallel
+    // scales linearly with peer count. Applied ops for a SINGLE
+    // (peer, doc) still sequence in feedIndex order via
+    // pollPeerDoc's inner loop — only the outer fan-out parallelizes.
+    const jobs: Array<Promise<void>> = [];
     for (const docId of docIds) {
       for (const participant of summary.participants) {
         if (participant.address === this.myAddress.toLowerCase()) continue;
         if (!participant.beeNodePublicKey) continue;
+        jobs.push(this.pollPeerDoc(summary, docId, participant));
+      }
+    }
+    await Promise.all(jobs);
+  }
+
+  /**
+   * Probe a single (peer, doc) feed and apply any new batches. Called
+   * in parallel for each (peer, doc) tuple in a collab; the batches
+   * within one tuple are applied sequentially to preserve feedIndex
+   * order.
+   */
+  private async pollPeerDoc(
+    summary: CollabSummary,
+    docId: string,
+    participant: CollabParticipant,
+  ): Promise<void> {
+    try {
+      // Write path in handleLocalPush always passes a docId (even for
+      // drive ops, docId === driveId), so the read path matches that
+      // convention: always use the doc-scoped topic.
+      const latest = await this.opsFeed.getLatestIndex(
+        summary.collabId,
+        summary.driveId,
+        docId,
+        participant.address,
+      );
+      if (latest == null) return;
+      const cursorKey = `${LS_PEER_CURSOR_PREFIX}${summary.collabId}:${participant.address}:${docId}`;
+      const cursor = this.readCursor(cursorKey);
+      if (latest < cursor) return;
+      const batches = await this.opsFeed.readRange(
+        summary.collabId,
+        summary.driveId,
+        docId,
+        participant.address,
+        cursor,
+        latest,
+        participant.beeNodePublicKey,
+      );
+      if (batches.length === 0) return;
+      for (const { feedIndex, batch } of batches) {
         try {
-          // Write path in handleLocalPush always passes a docId (even for
-          // drive ops, docId === driveId), so the read path matches that
-          // convention: always use the doc-scoped topic.
-          const latest = await this.opsFeed.getLatestIndex(
-            summary.collabId,
-            summary.driveId,
+          await this.applyOpsAndAdvanceCursor({
+            collabId: summary.collabId,
+            writer: participant.address,
             docId,
-            participant.address,
-          );
-          if (latest == null) continue;
-          const cursorKey = `${LS_PEER_CURSOR_PREFIX}${summary.collabId}:${participant.address}:${docId}`;
-          const cursor = this.readCursor(cursorKey);
-          if (latest < cursor) continue;
-          const batches = await this.opsFeed.readRange(
-            summary.collabId,
-            summary.driveId,
-            docId,
-            participant.address,
-            cursor,
-            latest,
-            participant.beeNodePublicKey,
-          );
-          if (batches.length === 0) continue;
-          for (const { feedIndex, batch } of batches) {
-            try {
-              await this.applyOpsAndAdvanceCursor({
-                collabId: summary.collabId,
-                writer: participant.address,
-                docId,
-                branch: batch.branch ?? "main",
-                ops: JSON.parse(batch.opsJson),
-                feedIndex,
-              });
-            } catch (err) {
-              console.warn(
-                `[CollabManager] apply ops failed (${summary.collabId}, doc ${docId.slice(0, 8)}, idx ${feedIndex}):`,
-                err instanceof Error ? err.message : err,
-              );
-            }
-          }
+            branch: batch.branch ?? "main",
+            ops: JSON.parse(batch.opsJson),
+            feedIndex,
+          });
         } catch (err) {
-          // Peer's feed may not exist yet (they haven't made any edits).
-          // Log at debug level so unexpected errors are still visible.
-          console.debug(
-            `[CollabManager] pollSummary peer ${participant.address.slice(0, 10)} skipped:`,
+          console.warn(
+            `[CollabManager] apply ops failed (${summary.collabId}, doc ${docId.slice(0, 8)}, idx ${feedIndex}):`,
             err instanceof Error ? err.message : err,
           );
         }
       }
+    } catch (err) {
+      // Peer's feed may not exist yet (they haven't made any edits).
+      // Log at debug level so unexpected errors are still visible.
+      console.debug(
+        `[CollabManager] pollSummary peer ${participant.address.slice(0, 10)} skipped:`,
+        err instanceof Error ? err.message : err,
+      );
     }
   }
 
