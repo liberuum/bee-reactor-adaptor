@@ -642,6 +642,125 @@ describe("CollabManager — handleLocalPush routing", () => {
   });
 });
 
+// ─── peerActivity + recentActivity (current-state tracking) ──────
+
+describe("CollabManager — per-peer activity + recent-activity feed", () => {
+  let loadCalls: Array<{ docId: string; branch: string; ops: unknown[] }>;
+
+  beforeEach(() => {
+    loadCalls = [];
+    installGlobals((d, br, ops) => loadCalls.push({ docId: d, branch: br, ops }));
+  });
+  afterEach(() => teardownGlobals());
+
+  it("applyOpsAndAdvanceCursor bumps peerActivity.lastAppliedAt and opsApplied", async () => {
+    const mgr = new CollabManager(makeStubClient(), makeStubChat(), TEST_ADDRESS);
+    const s = mkSummary({ collabId: "drive:peer-activity" });
+    (mgr as any).summaries.set(s.collabId, s);
+
+    await (mgr as any).applyOpsAndAdvanceCursor({
+      collabId: s.collabId,
+      writer: PEER_ADDRESS,
+      docId: "doc-1",
+      branch: "main",
+      ops: [{ id: "op-1" }, { id: "op-2" }, { id: "op-3" }],
+      feedIndex: 0,
+    });
+
+    const updated = mgr.get(s.collabId)!;
+    expect(updated.peerActivity?.[PEER_ADDRESS.toLowerCase()]).toBeDefined();
+    expect(updated.peerActivity![PEER_ADDRESS.toLowerCase()].opsApplied).toBe(3);
+    expect(updated.peerActivity![PEER_ADDRESS.toLowerCase()].lastAppliedAt).toBeDefined();
+    mgr.shutdown();
+  });
+
+  it("opsApplied accumulates across batches from the same peer", async () => {
+    const mgr = new CollabManager(makeStubClient(), makeStubChat(), TEST_ADDRESS);
+    const s = mkSummary({ collabId: "drive:accum" });
+    (mgr as any).summaries.set(s.collabId, s);
+
+    await (mgr as any).applyOpsAndAdvanceCursor({
+      collabId: s.collabId, writer: PEER_ADDRESS, docId: "doc-1",
+      branch: "main", ops: [{ id: "op-1" }, { id: "op-2" }], feedIndex: 0,
+    });
+    await (mgr as any).applyOpsAndAdvanceCursor({
+      collabId: s.collabId, writer: PEER_ADDRESS, docId: "doc-1",
+      branch: "main", ops: [{ id: "op-3" }], feedIndex: 1,
+    });
+
+    expect(mgr.get(s.collabId)!.peerActivity![PEER_ADDRESS.toLowerCase()].opsApplied).toBe(3);
+    mgr.shutdown();
+  });
+
+  it("tracks peerActivity independently per peer", async () => {
+    const mgr = new CollabManager(makeStubClient(), makeStubChat(), TEST_ADDRESS);
+    const s = mkSummary({
+      collabId: "drive:multi-peer",
+      participants: [
+        { address: TEST_ADDRESS, beeNodePublicKey: "02aa".padEnd(66, "0"), joinedAt: "now" },
+        { address: PEER_ADDRESS, beeNodePublicKey: "02bb".padEnd(66, "0"), joinedAt: "now" },
+        { address: THIRD_ADDRESS, beeNodePublicKey: "02cc".padEnd(66, "0"), joinedAt: "now" },
+      ],
+    });
+    (mgr as any).summaries.set(s.collabId, s);
+
+    await (mgr as any).applyOpsAndAdvanceCursor({
+      collabId: s.collabId, writer: PEER_ADDRESS, docId: "doc-1",
+      branch: "main", ops: [{ id: "a" }], feedIndex: 0,
+    });
+    await (mgr as any).applyOpsAndAdvanceCursor({
+      collabId: s.collabId, writer: THIRD_ADDRESS, docId: "doc-1",
+      branch: "main", ops: [{ id: "b" }, { id: "c" }], feedIndex: 0,
+    });
+
+    const updated = mgr.get(s.collabId)!;
+    expect(updated.peerActivity![PEER_ADDRESS.toLowerCase()].opsApplied).toBe(1);
+    expect(updated.peerActivity![THIRD_ADDRESS.toLowerCase()].opsApplied).toBe(2);
+    expect(updated.peerActivity![TEST_ADDRESS.toLowerCase()]).toBeUndefined();
+    mgr.shutdown();
+  });
+
+  it("recentActivity gains an 'ops-applied' entry per apply", async () => {
+    const mgr = new CollabManager(makeStubClient(), makeStubChat(), TEST_ADDRESS);
+    const s = mkSummary({ collabId: "drive:activity-feed", recentActivity: [] });
+    (mgr as any).summaries.set(s.collabId, s);
+
+    await (mgr as any).applyOpsAndAdvanceCursor({
+      collabId: s.collabId, writer: PEER_ADDRESS, docId: "doc-1",
+      branch: "main", ops: [{ id: "a" }, { id: "b" }], feedIndex: 0,
+    });
+
+    const entries = mgr.get(s.collabId)!.recentActivity ?? [];
+    expect(entries).toHaveLength(1);
+    expect(entries[0].kind).toBe("ops-applied");
+    expect(entries[0].actor).toBe(PEER_ADDRESS.toLowerCase());
+    expect(entries[0].opsCount).toBe(2);
+    expect(entries[0].docId).toBe("doc-1");
+    mgr.shutdown();
+  });
+
+  it("recentActivity ring-buffers at RECENT_ACTIVITY_MAX entries", async () => {
+    const mgr = new CollabManager(makeStubClient(), makeStubChat(), TEST_ADDRESS);
+    const s = mkSummary({ collabId: "drive:ringbuffer", recentActivity: [] });
+    (mgr as any).summaries.set(s.collabId, s);
+
+    const N = 25; // > RECENT_ACTIVITY_MAX (20)
+    for (let i = 0; i < N; i++) {
+      await (mgr as any).applyOpsAndAdvanceCursor({
+        collabId: s.collabId, writer: PEER_ADDRESS, docId: "doc-1",
+        branch: "main", ops: [{ id: `op-${i}` }], feedIndex: i,
+      });
+    }
+
+    const entries = mgr.get(s.collabId)!.recentActivity ?? [];
+    expect(entries.length).toBeLessThanOrEqual(20);
+    // Newest entry should be last.
+    const last = entries[entries.length - 1];
+    expect(last.kind).toBe("ops-applied");
+    mgr.shutdown();
+  });
+});
+
 // ─── leave() + shutdown() ────────────────────────────────────────
 
 describe("CollabManager — leave + shutdown", () => {

@@ -21,6 +21,7 @@
 import type { SwarmClient } from "../swarm-client.js";
 import type { ChatManager } from "../chat/chat-manager.js";
 import type {
+  CollabActivityEntry,
   CollabEvent,
   CollabEventHandler,
   CollabEventType,
@@ -30,7 +31,7 @@ import type {
   CollabSummary,
   CollabInviteAttachment,
 } from "./types.js";
-import { buildCollabId } from "./types.js";
+import { buildCollabId, RECENT_ACTIVITY_MAX } from "./types.js";
 import { CollabOpsFeed } from "./collab-ops-feed.js";
 import type { CollabOpsBatch } from "./collab-ops-feed.js";
 import { CollabManifestFeed } from "./collab-manifest-feed.js";
@@ -44,6 +45,22 @@ import {
 import type { UserCollabEntry, SwarmPublicProfile } from "../types.js";
 import { GsocNotifier } from "../chat/gsoc-notifier.js";
 import type { Bee } from "@ethersphere/bee-js";
+
+/**
+ * Append a CollabActivityEntry to the bounded ring-buffer, trimming
+ * the front when we exceed RECENT_ACTIVITY_MAX. Returns a fresh array
+ * so callers can spread into an immutable summary update.
+ */
+function pushActivity(
+  existing: CollabActivityEntry[] | undefined,
+  entry: CollabActivityEntry,
+): CollabActivityEntry[] {
+  const prev = existing ?? [];
+  const next = prev.length >= RECENT_ACTIVITY_MAX
+    ? [...prev.slice(prev.length - RECENT_ACTIVITY_MAX + 1), entry]
+    : [...prev, entry];
+  return next;
+}
 
 /**
  * GSOC identifier for op-committed pings. Namespaced under "collab-notify"
@@ -266,6 +283,15 @@ export class CollabManager {
       currentGranteeRef: granteeRef,
       lastActivityAt: now,
       status: "active",
+      peerActivity: {},
+      recentActivity: [
+        { at: now, kind: "created", actor: this.myAddress.toLowerCase() },
+        ...participantProfiles.map((p) => ({
+          at: now,
+          kind: "participant-added" as const,
+          actor: p.address,
+        })),
+      ],
     };
 
     // 7. Send an invitation chat message to each participant. Message
@@ -380,6 +406,11 @@ export class CollabManager {
       currentGranteeHistRef: historyRef,
       manifestFeedIndex: feedIndex,
       lastActivityAt: now,
+      recentActivity: pushActivity(summary.recentActivity, {
+        at: now,
+        kind: "participant-revoked",
+        actor: addr,
+      }),
     };
     this.summaries.set(collabId, updated);
     this.persist();
@@ -454,6 +485,11 @@ export class CollabManager {
       currentGranteeHistRef: patched.historyRef,
       manifestFeedIndex: feedIndex,
       lastActivityAt: now,
+      recentActivity: pushActivity(summary.recentActivity, {
+        at: now,
+        kind: "participant-added",
+        actor: addr,
+      }),
     };
     this.summaries.set(collabId, updated);
     this.persist();
@@ -643,6 +679,10 @@ export class CollabManager {
       // participant set the first time handleLocalPush fires.
       lastActivityAt: now,
       status: "active",
+      peerActivity: {},
+      recentActivity: [
+        { at: now, kind: "accepted", actor: this.myAddress.toLowerCase() },
+      ],
     };
     this.summaries.set(summary.collabId, summary);
     this.persist();
@@ -1059,9 +1099,27 @@ export class CollabManager {
     }
     const liveSummary = this.summaries.get(input.collabId);
     if (liveSummary) {
+      const now = new Date().toISOString();
+      const writerKey = input.writer.toLowerCase();
+      const priorActivity = liveSummary.peerActivity?.[writerKey];
+      const nextPeerActivity = {
+        ...(liveSummary.peerActivity ?? {}),
+        [writerKey]: {
+          lastAppliedAt: now,
+          opsApplied: (priorActivity?.opsApplied ?? 0) + ops.length,
+        },
+      };
       this.summaries.set(input.collabId, {
         ...liveSummary,
-        lastActivityAt: new Date().toISOString(),
+        lastActivityAt: now,
+        peerActivity: nextPeerActivity,
+        recentActivity: pushActivity(liveSummary.recentActivity, {
+          at: now,
+          kind: "ops-applied",
+          actor: writerKey,
+          opsCount: ops.length,
+          docId: input.docId,
+        }),
       });
       this.persist();
     }

@@ -108,8 +108,46 @@ export interface CollabSummary {
   /** Most recent inbound op timestamp from any participant, or createdAt
    *  if nothing has arrived yet. Drives the "last activity" UI. */
   lastActivityAt: string;
+  /** Per-peer activity state: last time we applied ops from them and
+   *  cumulative count of ops we've applied in this session. Updated by
+   *  `applyOpsAndAdvanceCursor`. Drives per-participant "active Xm ago"
+   *  labels in the Manage panel + the collab-row counter. Keyed by
+   *  lowercase peer address. Missing entry = no activity yet. */
+  peerActivity?: Record<string, { lastAppliedAt: string; opsApplied: number }>;
+  /** Bounded ring-buffer of recent collab events: joins, revokes,
+   *  op-applied batches. Newest last. Drives the "Recent activity" feed
+   *  in the Manage panel. Capped at RECENT_ACTIVITY_MAX so the summary
+   *  doesn't balloon in localStorage for long-running collabs. */
+  recentActivity?: CollabActivityEntry[];
   /** Populated as this client starts writing/reading collab feeds. */
   status: "active" | "pending" | "error" | "revoked";
+}
+
+/** Max entries retained per collab in recentActivity. Older entries
+ *  fall off the front when new ones arrive. */
+export const RECENT_ACTIVITY_MAX = 20;
+
+/** One row in the "Recent activity" feed. Stored on the summary so a
+ *  fresh browser shows state immediately from localStorage. */
+export interface CollabActivityEntry {
+  /** ISO timestamp. */
+  at: string;
+  kind:
+    | "created"      // this client created the collab
+    | "accepted"     // this client joined an invite
+    | "left"         // this client left the collab
+    | "participant-added"   // initiator added someone
+    | "participant-revoked" // initiator revoked someone
+    | "ops-applied";        // peer's ops were applied locally
+  /** Who the event is about (peer address for ops/add/revoke). */
+  actor?: string;
+  /** Short summary for the UI. Optional; UI can recompute from the
+   *  kind + actor + count when absent. */
+  label?: string;
+  /** Populated for `ops-applied`: how many operations were in the batch. */
+  opsCount?: number;
+  /** Populated for `ops-applied`: which doc received the ops. */
+  docId?: string;
 }
 
 /** Adapter-level event stream for Connect's UI. */

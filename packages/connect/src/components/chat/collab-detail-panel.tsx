@@ -73,6 +73,26 @@ export function CollabDetailPanel({
     return () => { cancelled = true; };
   }, [isOpen, summary?.collabId, onUpdated, refreshToken]);
 
+  // Live updates: subscribe to the manager's event bus while the
+  // panel is open so peerActivity / recentActivity / participant
+  // changes show up without a manual close + reopen. We always fetch
+  // the latest summary from manager.get() inside the handler because
+  // CollabManager emits events BEFORE the summary prop has
+  // propagated down from the parent.
+  useEffect(() => {
+    if (!isOpen || !summary) return;
+    const manager = (globalThis as any).window?.ph?.swarm?.collab?.manager;
+    if (!manager?.on) return;
+    const handle = (e: { collabId?: string }) => {
+      if (e.collabId && e.collabId !== summary.collabId) return;
+      const fresh = manager.get?.(summary.collabId);
+      if (fresh) onUpdated(fresh);
+    };
+    const unsubA = manager.on("op-applied", handle);
+    const unsubB = manager.on("collab-updated", handle);
+    return () => { unsubA?.(); unsubB?.(); };
+  }, [isOpen, summary?.collabId, onUpdated]);
+
   useEffect(() => {
     if (!isOpen) return;
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
@@ -232,25 +252,28 @@ export function CollabDetailPanel({
               </ul>
             ) : (
               <ul className="divide-y divide-gray-100 rounded-md border border-gray-200">
-                {summary.participants.map((p) => (
-                  <ParticipantRow
-                    key={p.address}
-                    participant={p}
-                    isMe={p.address === myAddress.toLowerCase()}
-                    isInitiator={p.address === summary.initiator}
-                    viewerIsInitiator={isInitiator}
-                    // "Awaiting response" when there's no record of
-                    // ops arriving from this peer yet. Imperfect (they
-                    // might have joined silently), but useful signal
-                    // for the common case right after inviting.
-                    hasActivity={peerHasSeenActivity(summary.collabId, p.address)}
-                    confirming={confirmRevoke === p.address}
-                    busy={busyAddr === p.address}
-                    onRequestRevoke={() => setConfirmRevoke(p.address)}
-                    onCancelRevoke={() => setConfirmRevoke(null)}
-                    onConfirmRevoke={() => handleRevoke(p.address)}
-                  />
-                ))}
+                {summary.participants.map((p) => {
+                  const activity = summary.peerActivity?.[p.address.toLowerCase()];
+                  return (
+                    <ParticipantRow
+                      key={p.address}
+                      participant={p}
+                      isMe={p.address === myAddress.toLowerCase()}
+                      isInitiator={p.address === summary.initiator}
+                      viewerIsInitiator={isInitiator}
+                      lastAppliedAt={activity?.lastAppliedAt}
+                      opsApplied={activity?.opsApplied ?? 0}
+                      // "Awaiting response" when there's no record of
+                      // ops arriving from this peer yet.
+                      hasActivity={!!activity || peerHasSeenActivity(summary.collabId, p.address)}
+                      confirming={confirmRevoke === p.address}
+                      busy={busyAddr === p.address}
+                      onRequestRevoke={() => setConfirmRevoke(p.address)}
+                      onCancelRevoke={() => setConfirmRevoke(null)}
+                      onConfirmRevoke={() => handleRevoke(p.address)}
+                    />
+                  );
+                })}
               </ul>
             )}
           </div>
@@ -273,6 +296,11 @@ export function CollabDetailPanel({
               )}
             </div>
           )}
+
+          <RecentActivitySection
+            summary={summary}
+            myAddress={myAddress}
+          />
 
           <div className="rounded-md border border-gray-100 bg-gray-50 px-3 py-2 text-[11px] text-gray-500">
             <strong className="text-gray-700">How revoking works:</strong>{" "}
@@ -338,6 +366,8 @@ function ParticipantRow({
   isInitiator,
   viewerIsInitiator,
   hasActivity,
+  lastAppliedAt,
+  opsApplied,
   confirming,
   busy,
   onRequestRevoke,
@@ -349,6 +379,8 @@ function ParticipantRow({
   isInitiator: boolean;
   viewerIsInitiator: boolean;
   hasActivity: boolean;
+  lastAppliedAt?: string;
+  opsApplied: number;
   confirming: boolean;
   busy: boolean;
   onRequestRevoke: () => void;
@@ -361,11 +393,20 @@ function ParticipantRow({
   // Show the "awaiting" hint only for other participants (not the
   // viewer, not the owner) who haven't produced any activity yet.
   const awaiting = !isMe && !isInitiator && !hasActivity;
+  const activeNow =
+    lastAppliedAt !== undefined
+    && Date.now() - new Date(lastAppliedAt).getTime() < 60_000;
 
   return (
     <li className="flex items-center gap-2.5 px-3 py-2 text-[13px]">
-      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gray-100 text-[11px] font-semibold text-gray-600">
+      <div className="relative flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gray-100 text-[11px] font-semibold text-gray-600">
         {getInitials(label)}
+        {activeNow && (
+          <span
+            className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-white bg-green-500"
+            title="Active in the last minute"
+          />
+        )}
       </div>
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
@@ -389,8 +430,17 @@ function ParticipantRow({
             </span>
           )}
         </div>
-        <div className="truncate font-mono text-[10px] text-gray-400">
-          {participant.address}
+        <div className="flex items-center gap-2 text-[10px] text-gray-400">
+          <span className="truncate font-mono">{participant.address}</span>
+          {lastAppliedAt && (
+            <span
+              className="shrink-0 whitespace-nowrap font-sans text-gray-500"
+              title={`Last op applied ${new Date(lastAppliedAt).toLocaleString()} · ${opsApplied} ops this session`}
+            >
+              · {formatRelativeAgoShort(lastAppliedAt)}
+              {opsApplied > 0 ? ` · ${opsApplied} ops` : ""}
+            </span>
+          )}
         </div>
       </div>
 
@@ -430,9 +480,131 @@ function ParticipantRow({
   );
 }
 
+/**
+ * Recent activity feed — shows the last ~20 events that CollabManager
+ * has recorded for this collab (joins, revokes, op-applied batches).
+ * Backed by `summary.recentActivity`, so a fresh browser sees the same
+ * recent events after rehydrating from user-manifest.
+ */
+function RecentActivitySection({
+  summary,
+  myAddress,
+}: {
+  summary: CollabSummary;
+  myAddress: string;
+}) {
+  const entries = summary.recentActivity ?? [];
+  if (entries.length === 0) {
+    return (
+      <div>
+        <h4 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-gray-500">
+          Recent activity
+        </h4>
+        <div className="rounded-md border border-gray-100 bg-gray-50 px-3 py-2 text-[11px] text-gray-400">
+          No activity yet.
+        </div>
+      </div>
+    );
+  }
+  const me = myAddress.toLowerCase();
+  // Newest first in the UI (storage keeps oldest-first for the ring
+  // buffer).
+  const reversed = [...entries].reverse();
+  return (
+    <div>
+      <h4 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-gray-500">
+        Recent activity
+      </h4>
+      <ul className="max-h-40 space-y-1 overflow-y-auto rounded-md border border-gray-100 bg-gray-50 p-1.5">
+        {reversed.map((entry, i) => (
+          <li
+            key={`${entry.at}-${i}`}
+            className="flex items-start gap-2 rounded px-1.5 py-1 text-[11px]"
+          >
+            <span className="mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full" style={{ backgroundColor: activityColor(entry.kind) }} />
+            <span className="flex-1 text-gray-700">{describeActivity(entry, me, summary.initiator)}</span>
+            <span
+              className="shrink-0 whitespace-nowrap text-[10px] text-gray-400"
+              title={new Date(entry.at).toLocaleString()}
+            >
+              {formatRelativeAgoShort(entry.at)}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function describeActivity(
+  entry: NonNullable<CollabSummary["recentActivity"]>[number],
+  me: string,
+  initiator: string,
+): string {
+  const actor = (entry.actor ?? "").toLowerCase();
+  const actorLabel = !actor
+    ? "Someone"
+    : actor === me
+      ? "You"
+      : actor === initiator
+        ? "Owner"
+        : `${actor.slice(0, 8)}…${actor.slice(-4)}`;
+  switch (entry.kind) {
+    case "created":
+      return `${actorLabel} created the collaboration`;
+    case "accepted":
+      return `${actorLabel} joined`;
+    case "left":
+      return `${actorLabel} left`;
+    case "participant-added":
+      return `${actorLabel} added`;
+    case "participant-revoked":
+      return `${actorLabel} removed`;
+    case "ops-applied": {
+      const n = entry.opsCount ?? 0;
+      const docBit = entry.docId ? ` on doc ${entry.docId.slice(0, 8)}…` : "";
+      return `${actorLabel} applied ${n} op${n === 1 ? "" : "s"}${docBit}`;
+    }
+    default:
+      return `${actorLabel} did something`;
+  }
+}
+
+function activityColor(kind: NonNullable<CollabSummary["recentActivity"]>[number]["kind"]): string {
+  switch (kind) {
+    case "created":
+    case "accepted":
+      return "#10b981"; // green
+    case "participant-added":
+      return "#2563eb"; // blue
+    case "participant-revoked":
+    case "left":
+      return "#dc2626"; // red
+    case "ops-applied":
+      return "#a16207"; // amber
+    default:
+      return "#9ca3af"; // gray
+  }
+}
+
 function getInitials(name: string): string {
   if (name.startsWith("0x")) return name.slice(2, 4).toUpperCase();
   const parts = name.split(/[.\s]+/).filter(Boolean);
   if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
   return name.slice(0, 2).toUpperCase();
+}
+
+/** Compact relative time for inline labels ("now", "3m", "5h", "2d"). */
+function formatRelativeAgoShort(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(diff) || diff < 0) return "";
+  const s = Math.floor(diff / 1000);
+  if (s < 10) return "now";
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h`;
+  const d = Math.floor(h / 24);
+  return `${d}d`;
 }

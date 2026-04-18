@@ -231,6 +231,13 @@ function CollabRow({
     ? formatRelativeAgo(summary.lastActivityAt)
     : "";
 
+  // Show up to 4 participant avatars on the row; overflow collapses to "+N".
+  const MAX_AVATARS = 4;
+  const avatars = summary.participants.slice(0, MAX_AVATARS);
+  const overflow = Math.max(0, summary.participants.length - MAX_AVATARS);
+  // Count peers that have ever produced activity for this collab.
+  const activePeerCount = Object.keys(summary.peerActivity ?? {}).length;
+
   return (
     <div
       className={`mb-1 rounded-lg border px-2.5 py-2.5 transition-colors ${
@@ -254,10 +261,27 @@ function CollabRow({
           <div className="truncate text-sm font-semibold text-gray-900">
             {summary.title}
           </div>
-          <div className="mt-0.5 truncate text-xs text-gray-400">
-            {otherCount === 0
-              ? "Just you"
-              : `You + ${otherCount} participant${otherCount !== 1 ? "s" : ""}`}
+          <div className="mt-0.5 flex items-center gap-1.5">
+            <div className="flex -space-x-1.5">
+              {avatars.map((p) => (
+                <ParticipantAvatar key={p.address} address={p.address} />
+              ))}
+              {overflow > 0 && (
+                <span
+                  className="flex h-5 w-5 items-center justify-center rounded-full border-2 border-white bg-gray-200 text-[9px] font-semibold text-gray-600"
+                  title={`${overflow} more participant${overflow === 1 ? "" : "s"}`}
+                >
+                  +{overflow}
+                </span>
+              )}
+            </div>
+            <span className="truncate text-xs text-gray-400">
+              {otherCount === 0
+                ? "Just you"
+                : activePeerCount > 0
+                  ? `${activePeerCount} active · ${otherCount} invited`
+                  : `${otherCount} invited`}
+            </span>
           </div>
         </div>
         <div className="flex shrink-0 flex-col items-end gap-0.5">
@@ -693,6 +717,29 @@ function CollabCreatePicker({
 // ─── localStorage readthrough ────────────────────────────────────
 
 const LS_KEY = "swarm:collabs";
+
+/**
+ * Compact participant avatar for the collab row. Uses a color derived
+ * from the address so participants are visually distinct at a glance.
+ */
+function ParticipantAvatar({ address }: { address: string }) {
+  const initials = address.startsWith("0x") ? address.slice(2, 4).toUpperCase() : address.slice(0, 2).toUpperCase();
+  // Stable color per address: sum the first 4 hex chars mod 360 → hue.
+  const hue = Number.parseInt(address.replace(/^0x/i, "").slice(0, 4), 16) % 360;
+  const style: React.CSSProperties = {
+    backgroundColor: `hsl(${hue}, 60%, 88%)`,
+    color: `hsl(${hue}, 50%, 30%)`,
+  };
+  return (
+    <span
+      className="flex h-5 w-5 items-center justify-center rounded-full border-2 border-white text-[9px] font-semibold"
+      style={style}
+      title={address}
+    >
+      {initials}
+    </span>
+  );
+}
 
 function formatRelativeAgo(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime();
