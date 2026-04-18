@@ -7,7 +7,12 @@
  */
 import React, { useState } from "react";
 import { createPortal } from "react-dom";
-import type { ChatMessage, FileAttachment, DocumentShareAttachment } from "./types.js";
+import type {
+  ChatMessage,
+  FileAttachment,
+  DocumentShareAttachment,
+  CollabInviteAttachment,
+} from "./types.js";
 import { useAttachmentUrl, downloadAttachmentToDisk } from "./use-attachment-url.js";
 
 const ACCENT = "#2563eb";
@@ -102,6 +107,9 @@ function MessageBody({ message }: { message: ChatMessage }) {
           )}
           {message.attachment.kind === "document-share" && (
             <DocumentShareCard share={message.attachment} />
+          )}
+          {message.attachment.kind === "collab-invite" && (
+            <CollabInviteCard invite={message.attachment} />
           )}
         </div>
       )}
@@ -1039,6 +1047,135 @@ function DocumentShareCard({ share }: { share: DocumentShareAttachment }) {
               "Import into my drives"
             )}
           </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CollabInviteCard({ invite }: { invite: CollabInviteAttachment }) {
+  const cacheKey = `swarm:collabAccept:${invite.collabId}`;
+  const [joinedDriveId, setJoinedDriveId] = useState<string | null>(() => {
+    try {
+      return sessionStorage.getItem(cacheKey);
+    } catch { return null; }
+  });
+  const [status, setStatus] = useState<"idle" | "joining" | "declined" | "error">("idle");
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const handleJoin = async () => {
+    const collabManager = (globalThis as any).window?.ph?.swarm?.collab?.manager;
+    if (!collabManager) {
+      setStatus("error");
+      setErrorMsg("Collaboration is not initialized");
+      return;
+    }
+    setStatus("joining");
+    setErrorMsg(null);
+    try {
+      const summary = await collabManager.accept(invite);
+      if (summary?.driveId) setJoinedDriveId(summary.driveId);
+      setStatus("idle");
+    } catch (err) {
+      setStatus("error");
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleDecline = () => {
+    setStatus("declined");
+  };
+
+  const handleOpen = async () => {
+    if (!joinedDriveId) return;
+    try {
+      const reactorBrowser = await import("@powerhousedao/reactor-browser");
+      const reactorClient = (globalThis as any).window?.ph?.reactorClient;
+      const drive = await reactorClient?.get(joinedDriveId);
+      if (drive) reactorBrowser.setSelectedDrive(drive);
+    } catch (err) {
+      console.warn("[Chat] Could not open collab drive:", err);
+    }
+  };
+
+  const kindLabel = invite.collabKind === "document" ? "DOC" : "DRIVE";
+  const participantCount = invite.participants.length;
+
+  return (
+    <div className="max-w-[420px] overflow-hidden rounded border border-gray-200 bg-white">
+      <div className="flex">
+        <div
+          className="flex w-11 shrink-0 items-center justify-center text-[10px] font-bold tracking-wide text-white"
+          style={{ backgroundColor: "#0ea5e9" }}
+        >
+          {kindLabel}
+        </div>
+        <div className="min-w-0 flex-1 px-3 py-2">
+          <div className="truncate text-[13px] font-semibold text-gray-900">
+            Collaborate on "{invite.title}"
+          </div>
+          <div className="mt-0.5 text-[11px] text-gray-400">
+            {participantCount} participant{participantCount !== 1 ? "s" : ""}
+            {joinedDriveId && (
+              <span className="ml-1 text-emerald-600">· joined</span>
+            )}
+          </div>
+        </div>
+      </div>
+      {invite.caption && (
+        <div className="border-t border-gray-100 bg-gray-50 px-3 py-1.5 text-[11px] text-gray-600">
+          {invite.caption}
+        </div>
+      )}
+      {status === "error" && errorMsg && (
+        <div className="border-t border-red-100 bg-red-50 px-3 py-1.5 text-[11px] text-red-700">
+          {errorMsg}
+        </div>
+      )}
+      {status === "declined" && (
+        <div className="border-t border-gray-100 bg-gray-50 px-3 py-1.5 text-[11px] text-gray-500">
+          Invitation dismissed. The inviter still lists you as a participant.
+        </div>
+      )}
+      <div className="flex border-t border-gray-100 bg-white">
+        {joinedDriveId ? (
+          <button
+            type="button"
+            onClick={handleOpen}
+            className="flex-1 px-3 py-1.5 text-[11px] font-semibold hover:bg-gray-50"
+            style={{ color: ACCENT }}
+          >
+            Open drive
+          </button>
+        ) : status === "declined" ? null : (
+          <>
+            <button
+              type="button"
+              onClick={handleDecline}
+              disabled={status === "joining"}
+              className="flex-1 px-3 py-1.5 text-[11px] font-semibold text-gray-500 disabled:opacity-60 hover:bg-gray-50"
+            >
+              Decline
+            </button>
+            <button
+              type="button"
+              onClick={handleJoin}
+              disabled={status === "joining"}
+              className="flex flex-1 items-center justify-center gap-1.5 border-l border-gray-100 px-3 py-1.5 text-[11px] font-semibold disabled:opacity-60 hover:bg-gray-50"
+              style={{ color: ACCENT }}
+            >
+              {status === "joining" ? (
+                <>
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="animate-spin">
+                    <circle cx="12" cy="12" r="10" strokeDasharray="32" strokeDashoffset="8" />
+                  </svg>
+                  Joining…
+                </>
+              ) : (
+                "Join collaboration"
+              )}
+            </button>
+          </>
         )}
       </div>
     </div>

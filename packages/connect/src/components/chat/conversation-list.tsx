@@ -3,7 +3,8 @@
  * Settings-style cards, blue accent active state.
  */
 import React, { useState } from "react";
-import type { ConversationSummary } from "./types.js";
+import type { CollabSummary, ConversationSummary } from "./types.js";
+import { CollaborateList } from "./collaborate-list.js";
 
 const ACCENT = "#2563eb";
 
@@ -19,20 +20,25 @@ function getMySwarmId(): string {
     ?? "";
 }
 
+type LeftTab = "conversations" | "collaborate";
+
 export function ConversationList({
   conversations,
   activePeer,
   onSelect,
   onNewConversation,
+  onOpenCollab,
 }: {
   conversations: ConversationSummary[];
   activePeer: string | null;
   onSelect: (peerAddress: string) => void;
   onNewConversation: (peerAddress: string) => void;
+  onOpenCollab?: (summary: CollabSummary) => void;
 }) {
   const [newPeerInput, setNewPeerInput] = useState("");
   const [showNewChat, setShowNewChat] = useState(false);
   const [search, setSearch] = useState("");
+  const [leftTab, setLeftTab] = useState<LeftTab>("conversations");
 
   const handleStartChat = () => {
     const addr = newPeerInput.trim();
@@ -58,6 +64,16 @@ export function ConversationList({
         {/* Your Swarm ID — copyable for sharing */}
         <MySwarmIdCard />
 
+        {/* Top tab bar: Conversations / Collaborate */}
+        <LeftTabBar tab={leftTab} onChange={setLeftTab} />
+
+        {leftTab === "collaborate" ? (
+          <CollaborateList
+            conversations={conversations}
+            onOpenCollab={(s) => onOpenCollab?.(s)}
+          />
+        ) : (
+        <>
         {/* Section: New conversation card */}
         <div>
           <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-gray-400">
@@ -177,8 +193,43 @@ export function ConversationList({
         </div>
 
         <ClearChatsButton conversationCount={conversations.length} />
+        </>
+        )}
       </div>
     </aside>
+  );
+}
+
+function LeftTabBar({
+  tab,
+  onChange,
+}: {
+  tab: LeftTab;
+  onChange: (t: LeftTab) => void;
+}) {
+  const buttonClass = (active: boolean) =>
+    `flex-1 rounded-md px-2 py-1.5 text-[11px] font-semibold transition-colors ${
+      active
+        ? "bg-blue-50 text-blue-700"
+        : "text-gray-500 hover:bg-gray-50 hover:text-gray-700"
+    }`;
+  return (
+    <div className="flex gap-1 rounded-md border border-gray-100 bg-white p-1">
+      <button
+        type="button"
+        onClick={() => onChange("conversations")}
+        className={buttonClass(tab === "conversations")}
+      >
+        Conversations
+      </button>
+      <button
+        type="button"
+        onClick={() => onChange("collaborate")}
+        className={buttonClass(tab === "collaborate")}
+      >
+        Collaborate
+      </button>
+    </div>
   );
 }
 

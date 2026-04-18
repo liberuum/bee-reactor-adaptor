@@ -123,6 +123,16 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
           activePeer={activePeer}
           onSelect={openConversation}
           onNewConversation={openConversation}
+          onOpenCollab={async (summary) => {
+            try {
+              const reactorBrowser = await import("@powerhousedao/reactor-browser");
+              const reactorClient = (globalThis as any).window?.ph?.reactorClient;
+              const drive = await reactorClient?.get(summary.driveId);
+              if (drive) reactorBrowser.setSelectedDrive(drive);
+            } catch (err) {
+              console.warn("[Chat] Could not open collab drive:", err);
+            }
+          }}
         />
 
         <main className="flex min-w-0 flex-1 flex-col bg-white">
