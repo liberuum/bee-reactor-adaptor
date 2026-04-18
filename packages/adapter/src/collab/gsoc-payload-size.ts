@@ -58,7 +58,12 @@ export function checkOpsFit(
   }
   let size = 0;
   try {
-    size = JSON.stringify({ ops, scope, branch }).length;
+    // Measure UTF-8 byte length, not JS string .length (which is UTF-16
+    // code-unit count). JSON content with CJK, emoji, or other
+    // multi-byte characters serializes to more bytes on the wire than
+    // the string length suggests — a ~4000-char JSON of emoji could be
+    // 16KB of actual bytes and get rejected by the 4096B GSOC limit.
+    size = new TextEncoder().encode(JSON.stringify({ ops, scope, branch })).byteLength;
   } catch {
     return { fits: false, size: -1, budget: INLINE_OPS_BUDGET, tier: "refs" };
   }

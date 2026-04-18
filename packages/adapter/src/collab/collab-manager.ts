@@ -85,9 +85,6 @@ export class CollabManager {
 
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private pollInFlight = false;
-  /** Peers whose feeds should be pulled on the next pollOnce, triggered
-   *  by a GSOC ping. Skips the timer for that peer's feeds. */
-  private readonly urgentPulls = new Set<string>();
   private shuttingDown = false;
 
   constructor(
@@ -832,7 +829,14 @@ export class CollabManager {
           listenAddress,
           identifierHex,
           {
-            onNotification: (n) => this.handlePeerPing(summary, peer.address, n),
+            // Look up the summary fresh on each ping — the captured
+            // `summary` snapshot is stale after revoke/add, and we
+            // want to react against the current participant list.
+            onNotification: (n) => this.handlePeerPing(
+              this.summaries.get(summary.collabId) ?? summary,
+              peer.address,
+              n,
+            ),
             onError: (err) => {
               console.warn(
                 `[CollabManager] GSOC subscribe error for ${subKey}:`,
@@ -913,8 +917,7 @@ export class CollabManager {
       });
     } else {
       // Legacy / stripped ping — fall back to the poll-loop path which
-      // reads the feed. Still queue as urgent.
-      this.urgentPulls.add(`${summary.collabId}:${writer}`);
+      // reads the feed.
       void this.pollOnce();
     }
   }
@@ -935,50 +938,21 @@ export class CollabManager {
       feedIndex?: number;
     },
   ): Promise<void> {
-    const ph = (globalThis as any).window?.ph;
-    const reactorClient = ph?.reactorClient;
-    const reactor = ph?.reactor;
-    if (!reactorClient && !reactor?.load) return;
-
     try {
-      const raw = input.ops;
-      if (!Array.isArray(raw) || raw.length === 0) return;
-      // SwarmChannel pushes OperationWithContext[]; reactor.load needs
-      // bare Operation[]. Unwrap defensively.
-      const ops = raw.map((entry: any) => entry?.operation ?? entry);
-      if (reactor?.load) {
-        await reactor.load(input.docId, input.branch, ops);
-      } else {
-        await reactorClient.load(input.docId, input.branch, ops);
-      }
-      // Advance cursor so the poll loop doesn't redeliver the same batch.
-      if (input.feedIndex !== undefined) {
-        const cursorKey = `${LS_PEER_CURSOR_PREFIX}${summary.collabId}:${writer}:${input.docId}`;
-        const cursor = this.readCursor(cursorKey);
-        if (input.feedIndex + 1 > cursor) {
-          this.writeCursor(cursorKey, input.feedIndex + 1);
-        }
-      }
-      const liveSummary = this.summaries.get(summary.collabId);
-      if (liveSummary) {
-        const updated = { ...liveSummary, lastActivityAt: new Date().toISOString() };
-        this.summaries.set(summary.collabId, updated);
-        this.persist();
-      }
-      this.emit({ type: "op-applied", collabId: summary.collabId });
-      try {
-        (globalThis as any).window?.dispatchEvent(
-          new CustomEvent("swarm:collab:op-applied", {
-            detail: { collabId: summary.collabId },
-          }),
-        );
-      } catch { /* non-browser */ }
+      const applied = await this.applyOpsAndAdvanceCursor({
+        collabId: summary.collabId,
+        writer,
+        docId: input.docId,
+        branch: input.branch,
+        ops: input.ops,
+        feedIndex: input.feedIndex,
+      });
+      if (!applied) return;
     } catch (err) {
       console.warn(
         `[CollabManager] inline-ops apply failed for ${summary.collabId}, falling back to feed pull:`,
         err instanceof Error ? err.message : err,
       );
-      this.urgentPulls.add(`${summary.collabId}:${writer}`);
       void this.pollOnce();
     }
   }
@@ -1001,11 +975,6 @@ export class CollabManager {
       docId: string;
     },
   ): Promise<void> {
-    const ph = (globalThis as any).window?.ph;
-    const reactorClient = ph?.reactorClient;
-    const reactor = ph?.reactor;
-    if (!reactorClient && !reactor?.load) return;
-
     // Exponential backoff retries for chunk propagation.
     // Total budget: ~15s (0 + 0.5 + 1 + 2 + 4 + 8 = 15.5s).
     const waits = [0, 500, 1000, 2000, 4000, 8000];
@@ -1020,48 +989,91 @@ export class CollabManager {
       if (!batch) continue;
       try {
         const raw = JSON.parse(batch.opsJson);
-        if (!Array.isArray(raw) || raw.length === 0) return;
-        const ops = raw.map((entry: any) => entry?.operation ?? entry);
-        if (reactor?.load) {
-          await reactor.load(refs.docId, batch.branch ?? "main", ops);
-        } else {
-          await reactorClient.load(refs.docId, batch.branch ?? "main", ops);
-        }
-        // Advance cursor to just past this feedIndex so the next
-        // pollSummary doesn't redeliver the same batch.
-        const cursorKey = `${LS_PEER_CURSOR_PREFIX}${summary.collabId}:${writer}:${refs.docId}`;
-        const cursor = this.readCursor(cursorKey);
-        if (refs.feedIndex + 1 > cursor) {
-          this.writeCursor(cursorKey, refs.feedIndex + 1);
-        }
-        const liveSummary = this.summaries.get(summary.collabId);
-        if (liveSummary) {
-          const updated = { ...liveSummary, lastActivityAt: new Date().toISOString() };
-          this.summaries.set(summary.collabId, updated);
-          this.persist();
-        }
-        this.emit({ type: "op-applied", collabId: summary.collabId });
-        try {
-          (globalThis as any).window?.dispatchEvent(
-            new CustomEvent("swarm:collab:op-applied", {
-              detail: { collabId: summary.collabId },
-            }),
-          );
-        } catch { /* non-browser */ }
-        return;
+        const applied = await this.applyOpsAndAdvanceCursor({
+          collabId: summary.collabId,
+          writer,
+          docId: refs.docId,
+          branch: batch.branch ?? "main",
+          ops: raw,
+          feedIndex: refs.feedIndex,
+        });
+        if (applied) return;
       } catch (err) {
+        // reactor.load is idempotent per op id, so retrying is safe on
+        // transient errors (e.g. concurrent writes racing in PGlite).
+        // Continue to the next retry tick; if every attempt fails, fall
+        // through to pollOnce() below so the poll loop gets a chance
+        // on the next tick with a fresh feed read.
         console.warn(
-          `[CollabManager] fast-path apply failed for ${summary.collabId}:`,
+          `[CollabManager] fast-path apply failed for ${summary.collabId} (will retry):`,
           err instanceof Error ? err.message : err,
         );
-        return;
+        continue;
       }
     }
-    // All retries exhausted — fall back to poll-loop path. Queue an
-    // urgent pull and trigger pollOnce so we don't have to wait for
-    // the 5s timer.
-    this.urgentPulls.add(`${summary.collabId}:${writer}`);
+    // All retries exhausted — fall back to the poll loop's feed-read
+    // path on the next tick.
     void this.pollOnce();
+  }
+
+  /**
+   * Core apply pipeline shared by inline-ops, refs-fetch, and the
+   * poll-loop path: unwrap OperationWithContext → reactor.load →
+   * advance cursor → mark lastActivityAt → emit op-applied event.
+   *
+   * Returns true if ops were applied (even zero-length batches count
+   * as "successfully handled"), false if the reactor isn't available.
+   * Throws if reactor.load throws — callers decide whether to retry.
+   */
+  private async applyOpsAndAdvanceCursor(input: {
+    collabId: CollabId;
+    writer: string;
+    docId: string;
+    branch: string;
+    ops: unknown;
+    feedIndex?: number;
+  }): Promise<boolean> {
+    const ph = (globalThis as any).window?.ph;
+    const reactorClient = ph?.reactorClient;
+    const reactor = ph?.reactor;
+    if (!reactorClient && !reactor?.load) return false;
+
+    if (!Array.isArray(input.ops) || input.ops.length === 0) return true;
+    // SwarmChannel pushes OperationWithContext[]; reactor.load needs
+    // bare Operation[]. Unwrap defensively — fall back to the entry
+    // itself for already-flat payloads.
+    const ops = input.ops.map((entry: any) => entry?.operation ?? entry);
+
+    if (reactor?.load) {
+      await reactor.load(input.docId, input.branch, ops);
+    } else {
+      await reactorClient.load(input.docId, input.branch, ops);
+    }
+
+    if (input.feedIndex !== undefined) {
+      const cursorKey = `${LS_PEER_CURSOR_PREFIX}${input.collabId}:${input.writer}:${input.docId}`;
+      const cursor = this.readCursor(cursorKey);
+      if (input.feedIndex + 1 > cursor) {
+        this.writeCursor(cursorKey, input.feedIndex + 1);
+      }
+    }
+    const liveSummary = this.summaries.get(input.collabId);
+    if (liveSummary) {
+      this.summaries.set(input.collabId, {
+        ...liveSummary,
+        lastActivityAt: new Date().toISOString(),
+      });
+      this.persist();
+    }
+    this.emit({ type: "op-applied", collabId: input.collabId });
+    try {
+      (globalThis as any).window?.dispatchEvent(
+        new CustomEvent("swarm:collab:op-applied", {
+          detail: { collabId: input.collabId },
+        }),
+      );
+    } catch { /* non-browser */ }
+    return true;
   }
 
   /**
@@ -1418,47 +1430,70 @@ export class CollabManager {
     }
   }
 
+  /** Per-collabId in-flight grantee-chain creation. Without this,
+   *  two parallel handleLocalPush calls (e.g. SwarmChannel flushing
+   *  two docs at once) both create a fresh chain; whoever writes
+   *  summaries.set last wins, and the first writer's ops are uploaded
+   *  under an orphaned chain that peers can't decrypt. */
+  private readonly granteeChainInFlight = new Map<CollabId, Promise<string | null>>();
+
   /**
    * Return a live ACT grantee-chain head for writes on this collab. For
    * the initiator this is just the summary's currentGranteeHistRef. For
    * joiners, this creates a chain the first time we write (lazy), using
    * the participant list from the manifest feed.
+   *
+   * Concurrency-safe per collabId: parallel callers await the same
+   * pending chain-creation promise instead of each creating their own.
    */
   private async ensureGranteeChainForLocalWrite(s: CollabSummary): Promise<string | null> {
     if (s.currentGranteeHistRef) return s.currentGranteeHistRef;
 
-    const known = s.participants.filter((p) => p.beeNodePublicKey);
-    if (known.length < s.participants.length) {
-      // Missing some pubkeys — try a manifest refresh first.
-      const refreshed = await this.refreshManifest(s.collabId).catch(() => null);
-      if (refreshed?.currentGranteeHistRef) return refreshed.currentGranteeHistRef;
-      const newLive = refreshed ?? this.summaries.get(s.collabId) ?? s;
-      const liveKeys = newLive.participants.map((p) => p.beeNodePublicKey).filter((k) => !!k);
+    const pending = this.granteeChainInFlight.get(s.collabId);
+    if (pending) return pending;
+
+    const promise = (async (): Promise<string | null> => {
+      // Re-read the summary inside the lock in case another caller
+      // already wrote a chain while we were queuing.
+      const live = this.summaries.get(s.collabId) ?? s;
+      if (live.currentGranteeHistRef) return live.currentGranteeHistRef;
+
+      let workingSummary = live;
+      const known = live.participants.filter((p) => p.beeNodePublicKey);
+      if (known.length < live.participants.length) {
+        const refreshed = await this.refreshManifest(live.collabId).catch(() => null);
+        if (refreshed?.currentGranteeHistRef) return refreshed.currentGranteeHistRef;
+        workingSummary = refreshed ?? this.summaries.get(live.collabId) ?? live;
+      }
+
+      const liveKeys = workingSummary.participants
+        .map((p) => p.beeNodePublicKey)
+        .filter((k) => !!k);
       if (liveKeys.length < 2) return null;
+
       const { ref, historyRef } = await this.client.createGrantees(liveKeys);
+      // ACT's 1-second rule between chain touches — don't race the
+      // next write.
       await new Promise((r) => setTimeout(r, 1100));
+
       const updated: CollabSummary = {
-        ...newLive,
+        ...(this.summaries.get(workingSummary.collabId) ?? workingSummary),
         currentGranteeRef: ref,
         currentGranteeHistRef: historyRef,
       };
-      this.summaries.set(s.collabId, updated);
+      this.summaries.set(workingSummary.collabId, updated);
       this.persist();
       return historyRef;
-    }
+    })();
 
-    const liveKeys = known.map((p) => p.beeNodePublicKey);
-    if (liveKeys.length < 2) return null;
-    const { ref, historyRef } = await this.client.createGrantees(liveKeys);
-    await new Promise((r) => setTimeout(r, 1100));
-    const updated: CollabSummary = {
-      ...s,
-      currentGranteeRef: ref,
-      currentGranteeHistRef: historyRef,
-    };
-    this.summaries.set(s.collabId, updated);
-    this.persist();
-    return historyRef;
+    this.granteeChainInFlight.set(s.collabId, promise);
+    try {
+      return await promise;
+    } finally {
+      if (this.granteeChainInFlight.get(s.collabId) === promise) {
+        this.granteeChainInFlight.delete(s.collabId);
+      }
+    }
   }
 
   // ─── Poll loop: pull peers' ops and apply to local reactor ─────
@@ -1487,9 +1522,7 @@ export class CollabManager {
 
   private async pollSummary(summary: CollabSummary): Promise<void> {
     const ph = (globalThis as any).window?.ph;
-    const reactorClient = ph?.reactorClient;
-    const reactor = ph?.reactor; // low-level reactor module — exposes load()
-    if (!reactorClient) return;
+    if (!ph?.reactorClient) return;
 
     // Figure out which docs to poll. Drive-level = every doc currently in
     // the drive. Doc-level = just the one doc.
@@ -1501,7 +1534,6 @@ export class CollabManager {
       docIds.unshift(summary.driveId);
     }
 
-    let anyApplied = false;
     for (const docId of docIds) {
       for (const participant of summary.participants) {
         if (participant.address === this.myAddress.toLowerCase()) continue;
@@ -1532,27 +1564,14 @@ export class CollabManager {
           if (batches.length === 0) continue;
           for (const { feedIndex, batch } of batches) {
             try {
-              const raw = JSON.parse(batch.opsJson);
-              if (!Array.isArray(raw) || raw.length === 0) continue;
-              // SwarmChannel pushes OperationWithContext[] (each entry has
-              // `.operation` + `.context`); reactor.load expects bare
-              // Operation[]. Unwrap defensively — fall back to the entry
-              // itself for already-flat payloads.
-              const ops = raw.map((entry: any) => entry?.operation ?? entry);
-              // Dispatch to the reactor. reactor.load() is idempotent per op
-              // id, so re-runs from a re-pull don't corrupt state.
-              if (reactor?.load) {
-                await reactor.load(docId, batch.branch ?? "main", ops);
-              } else if (reactorClient?.load) {
-                await reactorClient.load(docId, batch.branch ?? "main", ops);
-              } else {
-                console.warn(
-                  "[CollabManager] No reactor.load available, ops queued but not applied",
-                );
-                continue;
-              }
-              anyApplied = true;
-              this.writeCursor(cursorKey, feedIndex + 1);
+              await this.applyOpsAndAdvanceCursor({
+                collabId: summary.collabId,
+                writer: participant.address,
+                docId,
+                branch: batch.branch ?? "main",
+                ops: JSON.parse(batch.opsJson),
+                feedIndex,
+              });
             } catch (err) {
               console.warn(
                 `[CollabManager] apply ops failed (${summary.collabId}, doc ${docId.slice(0, 8)}, idx ${feedIndex}):`,
@@ -1562,26 +1581,13 @@ export class CollabManager {
           }
         } catch (err) {
           // Peer's feed may not exist yet (they haven't made any edits).
-          // Keep walking — other peers / docs may be ahead.
-          void err;
+          // Log at debug level so unexpected errors are still visible.
+          console.debug(
+            `[CollabManager] pollSummary peer ${participant.address.slice(0, 10)} skipped:`,
+            err instanceof Error ? err.message : err,
+          );
         }
       }
-    }
-
-    if (anyApplied) {
-      const updated = { ...summary, lastActivityAt: new Date().toISOString() };
-      this.summaries.set(summary.collabId, updated);
-      this.persist();
-      this.emit({ type: "op-applied", collabId: summary.collabId });
-      // UI hook: fire a custom event so the toolbar History view can
-      // refresh without having to subscribe to collab events.
-      try {
-        (globalThis as any).window?.dispatchEvent(
-          new CustomEvent("swarm:collab:op-applied", {
-            detail: { collabId: summary.collabId },
-          }),
-        );
-      } catch { /* non-browser */ }
     }
   }
 

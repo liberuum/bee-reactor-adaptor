@@ -27,8 +27,7 @@ import { Topic, FeedIndex } from "@ethersphere/bee-js";
 import type { SwarmClient } from "../swarm-client.js";
 import type { CollabId } from "./types.js";
 import { collabDocOpsTopic, collabDriveOpsTopic } from "./types.js";
-
-const WRAPPER_BYTES = 64;
+import { WRAPPER_BYTES, parseFeedIndex, hexToBytes32, bytes32ToHex } from "./feed-bytes.js";
 
 export interface CollabOpsBatch {
   /** Raw op array serialized to JSON. */
@@ -40,52 +39,32 @@ export interface CollabOpsBatch {
   timestamp: string;
 }
 
-function hexToBytes32(hex: string): Uint8Array {
-  const clean = hex.replace(/^0x/i, "");
-  if (clean.length !== 64) {
-    throw new Error(`expected 32-byte hex, got length ${clean.length}`);
-  }
-  const bytes = new Uint8Array(32);
-  for (let i = 0; i < 32; i++) {
-    bytes[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
-  }
-  return bytes;
-}
-
-function bytes32ToHex(bytes: Uint8Array, offset = 0): string {
-  let out = "";
-  for (let i = 0; i < 32; i++) {
-    out += bytes[offset + i].toString(16).padStart(2, "0");
-  }
-  return out;
-}
-
-function parseFeedIndex(raw: unknown): number {
-  if (raw == null) return 0;
-  if (typeof raw === "number") return raw;
-  if (typeof raw === "object" && raw !== null && typeof (raw as any).toBigInt === "function") {
-    try { return Number((raw as any).toBigInt()); } catch { /* fall through */ }
-  }
-  const asString = typeof raw === "string" ? raw : String(raw);
-  const hex = asString.startsWith("0x") ? asString.slice(2) : asString;
-  if (!/^[0-9a-f]+$/i.test(hex)) return 0;
-  try {
-    return Number(BigInt("0x" + hex));
-  } catch {
-    return 0;
-  }
-}
-
 export class CollabOpsFeed {
   /** Last index we wrote per topic. Same staleness workaround as the
    *  manifest feed — bee-js's auto-pick pre-read can be stale on public
    *  nodes, so we track indices ourselves and write at an explicit index. */
   private lastWrittenIndex = new Map<string, number>();
 
+  /** Per-topic in-flight append — serializes concurrent appendBatch
+   *  calls for the same topic. Without this, two parallel calls both
+   *  see lastWrittenIndex as undefined, both do the pre-read, both
+   *  derive the same nextIndex, and both write to the same feed slot
+   *  (second overwrites first). */
+  private appendInFlight = new Map<string, Promise<unknown>>();
+
   constructor(private readonly client: SwarmClient) {}
 
   // ─── Topics ────────────────────────────────────────────────────
 
+  /**
+   * Resolve the Swarm feed topic for a per-peer collab ops feed.
+   *
+   * Note: production callers always pass `documentId`. Drive-level
+   * ops are stored under the doc-scoped topic with `docId === driveId`
+   * (see `handleLocalPush` + `pollSummary`'s `docIds.unshift(driveId)`).
+   * The `documentId`-omitted branch is retained for future flexibility
+   * and is exercised by the unit test.
+   */
   static topicFor(
     collabId: CollabId,
     driveId: string,
@@ -114,10 +93,36 @@ export class CollabOpsFeed {
     batch: CollabOpsBatch,
     granteeHistRef: string,
   ): Promise<{ actRef: string; actHistoryAddress: string; feedIndex: number }> {
-    // Upload ACT-protected batch payload to /bzz with erasure coding so
-    // it replicates across neighborhoods faster and survives single-node
-    // outages. Level 2 is a cheap availability win per
-    // swarm-protocol-reference.md §9.
+    const topic = CollabOpsFeed.topicFor(collabId, driveId, documentId);
+    const topicHex = topic.toHex();
+
+    // Per-topic serialization: chain on any in-flight append for this
+    // topic. This protects the lastWrittenIndex cache + the feed write
+    // from TOCTOU races when two handleLocalPush calls fire in parallel
+    // for the same doc.
+    const prev = this.appendInFlight.get(topicHex) ?? Promise.resolve();
+    const next = prev.then(
+      () => this.appendBatchLocked(topic, topicHex, batch, granteeHistRef),
+      () => this.appendBatchLocked(topic, topicHex, batch, granteeHistRef),
+    );
+    this.appendInFlight.set(topicHex, next);
+    try {
+      return await next;
+    } finally {
+      if (this.appendInFlight.get(topicHex) === next) {
+        this.appendInFlight.delete(topicHex);
+      }
+    }
+  }
+
+  private async appendBatchLocked(
+    topic: Topic,
+    topicHex: string,
+    batch: CollabOpsBatch,
+    granteeHistRef: string,
+  ): Promise<{ actRef: string; actHistoryAddress: string; feedIndex: number }> {
+    // Upload ACT-protected batch payload to /bzz. ACT chains the data
+    // to the current grantee list so only participants can decrypt.
     const { reference: actRef, historyAddress } = await this.client.uploadFile(
       JSON.stringify(batch),
       {
@@ -137,13 +142,8 @@ export class CollabOpsFeed {
       skipEncryption: true,
     });
 
-    // Feed write. The feed is owned by the writer's Swarm signer, so only
-    // this participant can append here; other participants read it.
-    // We pass the index explicitly so back-to-back writes don't collide
-    // on bee-js's stale auto-pick pre-read (same workaround as the
-    // manifest feed).
-    const topic = CollabOpsFeed.topicFor(collabId, driveId, documentId);
-    const topicHex = topic.toHex();
+    // Feed write at an explicit index (bee-js auto-pick can be stale
+    // on public nodes, producing two writes at the same SOC slot).
     let nextIndex = this.lastWrittenIndex.get(topicHex);
     if (nextIndex === undefined) {
       const reader = (this.client as any).bee.makeFeedReader(topic, this.client.getOwnerAddress());

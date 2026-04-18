@@ -109,6 +109,22 @@ export function CollaborateList({
     setSummaries(readCollabs());
   };
 
+  // Stable reference — the detail panel's manifest-refresh effect
+  // depends on this callback; recreating it every render causes an
+  // infinite refresh loop (2s poll timer → re-render → new callback
+  // → effect reruns → calls setSummaries → re-render → ...).
+  const handleCollabUpdated = useCallback((updated: CollabSummary) => {
+    setSummaries((prev) => {
+      const idx = prev.findIndex((s) => s.collabId === updated.collabId);
+      if (idx < 0) return [updated, ...prev];
+      const next = [...prev];
+      next[idx] = updated;
+      return next;
+    });
+  }, []);
+
+  const handleDetailClose = useCallback(() => setDetailCollabId(null), []);
+
   return (
     <div className="flex flex-1 flex-col gap-3 overflow-hidden">
       <div>
@@ -162,16 +178,8 @@ export function CollaborateList({
         isOpen={!!detailSummary}
         summary={detailSummary}
         myAddress={myAddress}
-        onClose={() => setDetailCollabId(null)}
-        onUpdated={(updated) => {
-          setSummaries((prev) => {
-            const idx = prev.findIndex((s) => s.collabId === updated.collabId);
-            if (idx < 0) return [updated, ...prev];
-            const next = [...prev];
-            next[idx] = updated;
-            return next;
-          });
-        }}
+        onClose={handleDetailClose}
+        onUpdated={handleCollabUpdated}
       />
 
       <CollabCreatePicker

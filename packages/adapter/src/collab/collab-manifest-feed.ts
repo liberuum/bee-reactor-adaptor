@@ -24,52 +24,18 @@ import { Topic, FeedIndex } from "@ethersphere/bee-js";
 import type { SwarmClient } from "../swarm-client.js";
 import type { CollabId, CollabManifest } from "./types.js";
 import { collabManifestTopic } from "./types.js";
-
-const WRAPPER_BYTES = 64;
-
-function hexToBytes32(hex: string): Uint8Array {
-  const clean = hex.replace(/^0x/i, "");
-  if (clean.length !== 64) {
-    throw new Error(`expected 32-byte hex, got length ${clean.length}`);
-  }
-  const bytes = new Uint8Array(32);
-  for (let i = 0; i < 32; i++) {
-    bytes[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
-  }
-  return bytes;
-}
-
-function bytes32ToHex(bytes: Uint8Array, offset = 0): string {
-  let out = "";
-  for (let i = 0; i < 32; i++) {
-    out += bytes[offset + i].toString(16).padStart(2, "0");
-  }
-  return out;
-}
-
-function parseFeedIndex(raw: unknown): number {
-  if (raw == null) return 0;
-  if (typeof raw === "number") return raw;
-  // bee-js's FeedIndex instances expose `.toBigInt()` in newer builds.
-  if (typeof raw === "object" && raw !== null && typeof (raw as any).toBigInt === "function") {
-    try { return Number((raw as any).toBigInt()); } catch { /* fall through */ }
-  }
-  // Older / non-FeedIndex objects may have a string representation.
-  const asString = typeof raw === "string" ? raw : String(raw);
-  const hex = asString.startsWith("0x") ? asString.slice(2) : asString;
-  if (!/^[0-9a-f]+$/i.test(hex)) return 0;
-  try {
-    return Number(BigInt("0x" + hex));
-  } catch {
-    return 0;
-  }
-}
+import { WRAPPER_BYTES, parseFeedIndex, hexToBytes32, bytes32ToHex } from "./feed-bytes.js";
 
 export class CollabManifestFeed {
   /** Last index we wrote per topic. Lets publish() return a correct
    *  feedIndex even when Bee's post-write feed reads are still showing
    *  stale state (which we hit against public nodes). */
   private lastWrittenIndex = new Map<string, number>();
+
+  /** Per-topic in-flight publish — same rationale as CollabOpsFeed's
+   *  appendInFlight lock. Prevents two concurrent publish() calls from
+   *  both deriving the same nextIndex and colliding on the same SOC. */
+  private publishInFlight = new Map<string, Promise<unknown>>();
 
   constructor(private readonly client: SwarmClient) {}
 
@@ -89,6 +55,28 @@ export class CollabManifestFeed {
   ): Promise<{ feedIndex: number; actRef: string; actHistoryAddress: string }> {
     const topic = CollabManifestFeed.topicFor(manifest.collabId);
     const topicHex = topic.toHex();
+
+    const prev = this.publishInFlight.get(topicHex) ?? Promise.resolve();
+    const next = prev.then(
+      () => this.publishLocked(topic, topicHex, manifest, granteeHistRef),
+      () => this.publishLocked(topic, topicHex, manifest, granteeHistRef),
+    );
+    this.publishInFlight.set(topicHex, next);
+    try {
+      return await next;
+    } finally {
+      if (this.publishInFlight.get(topicHex) === next) {
+        this.publishInFlight.delete(topicHex);
+      }
+    }
+  }
+
+  private async publishLocked(
+    topic: Topic,
+    topicHex: string,
+    manifest: CollabManifest,
+    granteeHistRef: string,
+  ): Promise<{ feedIndex: number; actRef: string; actHistoryAddress: string }> {
     const ownerAddress = this.client.getOwnerAddress();
 
     // Work out which index this write lands at. Prefer a local counter

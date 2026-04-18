@@ -17,22 +17,16 @@ import type { GsocNotification, GsocNotificationType } from "./types.js";
 const NOTIFY_IDENTIFIER_PREFIX = "ph:v2:notify:";
 
 /**
- * Convert a string to a 32-byte hex identifier.
- * Uses SHA-256 to hash the string into a deterministic 32-byte value
- * suitable for the bee-js Identifier type.
- */
-async function makeIdentifierHex(value: string): Promise<string> {
-  const encoded = new TextEncoder().encode(value);
-  const hash = await crypto.subtle.digest("SHA-256", encoded);
-  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, "0")).join("");
-}
-
-/**
- * Synchronous version using a simple hash for identifiers.
- * Falls back to zero-padded truncation of the input for sync contexts.
+ * Deterministic 32-byte identifier from an arbitrary string. XOR-folds
+ * UTF-8 bytes into a 32-byte buffer and emits the hex representation.
+ *
+ * Not collision-resistant in the cryptographic sense — two strings
+ * that are byte-level permutations produce the same identifier — but
+ * our identifier inputs are fixed-namespace templates (e.g.
+ * `ph:v2:collab-notify:<address>:<collabId>`), so permutation
+ * collisions don't arise in practice.
  */
 function makeIdentifierHexSync(value: string): string {
-  // Use a simple deterministic hash: XOR fold the string into 32 bytes
   const bytes = new Uint8Array(32);
   const encoded = new TextEncoder().encode(value);
   for (let i = 0; i < encoded.length; i++) {
@@ -48,6 +42,10 @@ export interface GsocSubscription {
 export class GsocNotifier {
   /** Cache of mined signers per peer overlay (mining takes 10-30s) */
   private minedSigners = new Map<string, string>();
+  /** Cache for mineSignerWithIdentifier, keyed by `${overlay}:${identifierRaw}`.
+   *  Mining is deterministic per (overlay, identifier) + proximity,
+   *  and the output is stable — no point re-mining within a session. */
+  private minedWithIdentifier = new Map<string, { signerHex: string; listenAddress: string; identifierHex: string }>();
   private subscriptions = new Map<string, GsocSubscription>();
 
   constructor(
@@ -105,6 +103,10 @@ export class GsocNotifier {
     identifierRaw: string,
     proximity = 12,
   ): { signerHex: string; listenAddress: string; identifierHex: string } {
+    const cacheKey = `${targetOverlay}:${identifierRaw}`;
+    const cached = this.minedWithIdentifier.get(cacheKey);
+    if (cached) return cached;
+
     const identifierHex = makeIdentifierHexSync(identifierRaw);
     const signer = this.bee.gsocMine(targetOverlay, identifierHex, proximity);
     // Normalize the signer to a PrivateKey object so we can derive the
@@ -113,9 +115,13 @@ export class GsocNotifier {
     const pk = signer instanceof PrivateKey ? signer : new PrivateKey(
       typeof signer === "string" ? signer : (signer as any).toHex?.() ?? String(signer),
     );
-    const signerHex = pk.toHex();
-    const listenAddress = pk.publicKey().address().toHex();
-    return { signerHex, listenAddress, identifierHex };
+    const result = {
+      signerHex: pk.toHex(),
+      listenAddress: pk.publicKey().address().toHex(),
+      identifierHex,
+    };
+    this.minedWithIdentifier.set(cacheKey, result);
+    return result;
   }
 
   /**
