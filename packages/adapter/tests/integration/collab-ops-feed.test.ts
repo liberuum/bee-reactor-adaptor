@@ -135,13 +135,17 @@ describe("CollabOpsFeed: cross-node ACT round trip", () => {
       timestamp: new Date().toISOString(),
     };
 
-    // Node A appends. Grantees must include BOTH pubkeys for Node B to read.
+    // Node A creates the grantee chain (both Bee pubkeys = readers) and
+    // appends the batch under that chain.
+    const { historyRef: histRef } = await clientA.createGrantees([beePubKeyA, beePubKeyB]);
+    await new Promise((r) => setTimeout(r, 1100)); // ACT 1s rule
+
     await opsFeedA.appendBatch(
       collabId,
       driveId,
       docId,
       batch,
-      [beePubKeyA, beePubKeyB],
+      histRef,
     );
 
     // Wait for propagation + ACT 1s rule and feed reachability.
@@ -212,11 +216,14 @@ describe("CollabOpsFeed: cross-node ACT round trip", () => {
       timestamp: new Date(Date.now() + i * 1000).toISOString(),
     }));
 
+    const { historyRef: histRef } = await clientA.createGrantees([beePubKeyA, beePubKeyB]);
+    await new Promise((r) => setTimeout(r, 1100));
+
     // Write each batch, then confirm Node A's own Bee can see it by
     // fetching its own latest feed index before proceeding. This isolates
     // "writes actually landed" from "cross-node propagation took too long".
     for (let i = 0; i < batches.length; i++) {
-      await opsFeedA.appendBatch(collabId, driveId, docId, batches[i], [beePubKeyA, beePubKeyB]);
+      await opsFeedA.appendBatch(collabId, driveId, docId, batches[i], histRef);
       // 3s spacing — generous vs ACT's 1s rule so the mantaray timestamp
       // always differs and the feed write has time to settle.
       await new Promise((r) => setTimeout(r, 3000));
@@ -271,6 +278,8 @@ describe("CollabOpsFeed: cross-node ACT round trip", () => {
     const opsFeedB = new CollabOpsFeed(clientB);
 
     const TOTAL = 2;
+    const { historyRef: histRef } = await clientA.createGrantees([beePubKeyA, beePubKeyB]);
+    await new Promise((r) => setTimeout(r, 1100));
     for (let i = 0; i < TOTAL; i++) {
       await opsFeedA.appendBatch(
         collabId,
@@ -284,7 +293,7 @@ describe("CollabOpsFeed: cross-node ACT round trip", () => {
           branch: "main",
           timestamp: new Date(Date.now() + i * 100).toISOString(),
         },
-        [beePubKeyA, beePubKeyB],
+        histRef,
       );
       await new Promise((r) => setTimeout(r, 1200));
     }

@@ -33,6 +33,8 @@ import type {
 import { buildCollabId } from "./types.js";
 import { CollabOpsFeed } from "./collab-ops-feed.js";
 import type { CollabOpsBatch } from "./collab-ops-feed.js";
+import { CollabManifestFeed } from "./collab-manifest-feed.js";
+import type { CollabManifest } from "./types.js";
 
 const LS_SUMMARIES_KEY = "swarm:collabs";
 const LS_PEER_CURSOR_PREFIX = "swarm:collabPeerCursor:";
@@ -48,6 +50,7 @@ export class CollabManager {
   private readonly summaries = new Map<CollabId, CollabSummary>();
   private readonly handlers = new Set<CollabEventHandler>();
   private readonly opsFeed: CollabOpsFeed;
+  private readonly manifestFeed: CollabManifestFeed;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private pollInFlight = false;
   private shuttingDown = false;
@@ -58,6 +61,7 @@ export class CollabManager {
     private readonly myAddress: string,
   ) {
     this.opsFeed = new CollabOpsFeed(client);
+    this.manifestFeed = new CollabManifestFeed(client);
     this.loadFromStorage();
     this.startPolling();
     // Install the push hook so SwarmChannel can notify us on every local
@@ -137,26 +141,11 @@ export class CollabManager {
       throw new Error("Could not build drive bundle (no operations).");
     }
 
-    // 3. Upload the bundle under ONE ACT chain with ALL participants as
-    //    grantees. Every participant's Bee node can decrypt the same ref.
+    // 3. Build the participant list (self + invited peers) and create
+    //    ONE ACT grantee chain covering everyone. This single chain is
+    //    used for the initial bundle, the manifest feed, AND all future
+    //    op-batch writes — rotating it is what "revocation" means.
     const myBeeNodePubKey = await this.client.getBeeNodePublicKey();
-    const granteeKeys = [
-      myBeeNodePubKey,
-      ...participantProfiles.map((p) => p.beeNodePublicKey),
-    ];
-    const { ref: granteeRef, historyRef } = await this.client.createGrantees(granteeKeys);
-    const { reference: bundleRef, historyAddress } = await this.client.uploadFile(
-      JSON.stringify(built.bundle),
-      {
-        act: true,
-        actHistoryAddress: historyRef,
-        skipEncryption: true, // ACT handles it
-      },
-    );
-    const bundleActHistoryAddress = historyAddress ?? historyRef;
-    void granteeRef; // kept locally; future revocation work uses this ref
-
-    // 4. Build the local summary.
     const now = new Date().toISOString();
     const selfParticipant: CollabParticipant = {
       address: this.myAddress.toLowerCase(),
@@ -172,25 +161,71 @@ export class CollabManager {
         displayName: p.displayName,
       })),
     ];
+    const granteeKeys = participantsFull.map((p) => p.beeNodePublicKey);
+    const { ref: granteeRef, historyRef } = await this.client.createGrantees(granteeKeys);
+    // ACT mantaray timestamps must differ by >= 1s between writes. Sleep
+    // so the initial bundle, the manifest, and the first op batch don't
+    // all collide.
+    await new Promise((r) => setTimeout(r, 1100));
 
+    // 4. Upload the initial drive bundle under that chain.
+    const { reference: bundleRef, historyAddress } = await this.client.uploadFile(
+      JSON.stringify(built.bundle),
+      {
+        act: true,
+        actHistoryAddress: historyRef,
+        skipEncryption: true,
+      },
+    );
+    const bundleActHistoryAddress = historyAddress ?? historyRef;
+    await new Promise((r) => setTimeout(r, 1100));
+
+    const title = target.documentId
+      ? (built.docs.find((d) => d.documentId === target.documentId)?.name ?? target.documentId!)
+      : built.driveName || target.driveId;
+
+    // 5. Publish the CollabManifest to its own feed. This feed is the
+    //    *live* source of truth for membership — revocation and
+    //    additions write new feed entries. Participants refresh from here.
+    const manifest: CollabManifest = {
+      version: 1,
+      collabId,
+      kind,
+      driveId: target.driveId,
+      documentId: target.documentId,
+      title,
+      participants: participantsFull,
+      initiator: this.myAddress.toLowerCase(),
+      createdAt: now,
+      updatedAt: now,
+      caption,
+    };
+    const { feedIndex: manifestFeedIndex } = await this.manifestFeed.publish(manifest, historyRef);
+
+    // 6. Build the local summary. Track current grantee refs so
+    //    subsequent writes (op batches, manifest rewrites) can reuse
+    //    them and so revocation can rotate them atomically.
     const summary: CollabSummary = {
       collabId,
       kind,
       driveId: target.driveId,
       documentId: target.documentId,
-      title: target.documentId
-        ? (built.docs.find((d) => d.documentId === target.documentId)?.name ?? target.documentId)
-        : built.driveName || target.driveId,
+      title,
       initiator: this.myAddress.toLowerCase(),
       participants: participantsFull,
-      manifestRef: bundleRef, // M1: the bundle IS the manifest
+      manifestRef: bundleRef,
       manifestActHistoryAddress: bundleActHistoryAddress,
       manifestPublisherBeeNodePubKey: myBeeNodePubKey,
+      manifestFeedIndex,
+      currentGranteeHistRef: historyRef,
+      currentGranteeRef: granteeRef,
       lastActivityAt: now,
       status: "active",
     };
 
-    // 5. Send an invitation chat message to each participant.
+    // 7. Send an invitation chat message to each participant. Message
+    //    carries initial-bundle refs (one-shot snapshot) AND the
+    //    manifest feed coordinates (for the live participant list).
     const docInfo = target.documentId
       ? built.docs.find((d) => d.documentId === target.documentId)
       : undefined;
@@ -200,7 +235,7 @@ export class CollabManager {
         kind: "collab-invite",
         collabId,
         collabKind: kind,
-        title: summary.title,
+        title,
         driveId: target.driveId,
         driveName: built.driveName,
         documentId: target.documentId,
@@ -221,16 +256,214 @@ export class CollabManager {
       };
       const text = caption
         ? caption
-        : `You are invited to collaborate on "${summary.title}".`;
+        : `You are invited to collaborate on "${title}".`;
       await this.chat.sendMessage(session, text, attachment);
     }
 
-    // 6. Persist + announce.
+    // 8. Persist + announce.
     this.summaries.set(collabId, summary);
     this.persist();
     this.emit({ type: "collab-created", collabId, data: summary });
 
     return summary;
+  }
+
+  /**
+   * Initiator-only: revoke a participant.
+   *
+   * Rebuilds the ACT grantee chain without that participant's Bee pubkey
+   * and publishes a new manifest revision. Future op-batch writes use the
+   * new chain, so the revoked peer's Bee node can no longer decrypt them.
+   * Content previously accessible to them stays accessible — ACT has no
+   * rewind. The revoke is about the *future*.
+   */
+  async revokeParticipant(collabId: CollabId, peerAddress: string): Promise<CollabSummary> {
+    const summary = this.summaries.get(collabId);
+    if (!summary) throw new Error(`Unknown collab: ${collabId}`);
+    if (summary.initiator !== this.myAddress.toLowerCase()) {
+      throw new Error("Only the collab initiator can revoke participants.");
+    }
+    const addr = peerAddress.toLowerCase();
+    if (addr === summary.initiator) {
+      throw new Error("The initiator cannot revoke themselves (leave instead).");
+    }
+    const target = summary.participants.find((p) => p.address === addr);
+    if (!target) throw new Error(`Participant not found: ${peerAddress}`);
+
+    const nextParticipants = summary.participants.filter((p) => p.address !== addr);
+    const granteeKeys = nextParticipants.map((p) => p.beeNodePublicKey);
+    const { ref: granteeRef, historyRef } = await this.client.createGrantees(granteeKeys);
+    await new Promise((r) => setTimeout(r, 1100));
+
+    const now = new Date().toISOString();
+    const manifest: CollabManifest = {
+      version: 1,
+      collabId,
+      kind: summary.kind,
+      driveId: summary.driveId,
+      documentId: summary.documentId,
+      title: summary.title,
+      participants: nextParticipants,
+      initiator: summary.initiator,
+      createdAt: summary.participants.find((p) => p.address === summary.initiator)?.joinedAt ?? now,
+      updatedAt: now,
+    };
+    const { feedIndex } = await this.manifestFeed.publish(manifest, historyRef);
+
+    const updated: CollabSummary = {
+      ...summary,
+      participants: nextParticipants,
+      currentGranteeRef: granteeRef,
+      currentGranteeHistRef: historyRef,
+      manifestFeedIndex: feedIndex,
+      lastActivityAt: now,
+    };
+    this.summaries.set(collabId, updated);
+    this.persist();
+    this.emit({ type: "collab-updated", collabId, data: updated });
+    return updated;
+  }
+
+  /**
+   * Initiator-only: add a participant.
+   *
+   * Resolves the new peer's profile, extends the ACT grantee chain via
+   * patchGrantees (incremental — no rewrite), and publishes a new
+   * manifest revision. The new participant receives a standard
+   * invitation chat message pointing at the current bundle + manifest.
+   */
+  async addParticipant(collabId: CollabId, peerAddress: string): Promise<CollabSummary> {
+    const summary = this.summaries.get(collabId);
+    if (!summary) throw new Error(`Unknown collab: ${collabId}`);
+    if (summary.initiator !== this.myAddress.toLowerCase()) {
+      throw new Error("Only the collab initiator can add participants.");
+    }
+    const addr = peerAddress.toLowerCase();
+    if (summary.participants.some((p) => p.address === addr)) {
+      throw new Error(`Participant already in the collab: ${peerAddress}`);
+    }
+    const profile = await this.client.readPublicProfile(addr);
+    if (!profile?.beeNodePublicKey) {
+      throw new Error(
+        `Participant ${peerAddress} has no public profile or Bee node pubkey — they need to connect to Swarm first.`,
+      );
+    }
+    if (!summary.currentGranteeHistRef || !summary.currentGranteeRef) {
+      throw new Error(
+        "Collab is missing its current grantee chain — refreshManifest() first.",
+      );
+    }
+
+    // Extend grantee chain (patch = incremental, no rebuild).
+    const patched = await this.client.grantAccess(
+      summary.currentGranteeRef,
+      summary.currentGranteeHistRef,
+      [profile.beeNodePublicKey],
+    );
+    await new Promise((r) => setTimeout(r, 1100));
+
+    const now = new Date().toISOString();
+    const newParticipant: CollabParticipant = {
+      address: addr,
+      beeNodePublicKey: profile.beeNodePublicKey,
+      joinedAt: now,
+      displayName: (profile as any).ensName ?? undefined,
+    };
+    const nextParticipants = [...summary.participants, newParticipant];
+    const manifest: CollabManifest = {
+      version: 1,
+      collabId,
+      kind: summary.kind,
+      driveId: summary.driveId,
+      documentId: summary.documentId,
+      title: summary.title,
+      participants: nextParticipants,
+      initiator: summary.initiator,
+      createdAt: summary.participants.find((p) => p.address === summary.initiator)?.joinedAt ?? now,
+      updatedAt: now,
+    };
+    const { feedIndex } = await this.manifestFeed.publish(manifest, patched.historyRef);
+
+    const updated: CollabSummary = {
+      ...summary,
+      participants: nextParticipants,
+      currentGranteeRef: patched.ref,
+      currentGranteeHistRef: patched.historyRef,
+      manifestFeedIndex: feedIndex,
+      lastActivityAt: now,
+    };
+    this.summaries.set(collabId, updated);
+    this.persist();
+
+    // Send the new participant a chat invitation so they know about it.
+    try {
+      const session = await this.chat.startSession(addr);
+      const attachment: CollabInviteAttachment = {
+        kind: "collab-invite",
+        collabId,
+        collabKind: summary.kind,
+        title: summary.title,
+        driveId: summary.driveId,
+        driveName: summary.title,
+        documentId: summary.documentId,
+        manifestRef: summary.manifestRef,
+        manifestActHistoryAddress: summary.manifestActHistoryAddress,
+        manifestPublisherBeeNodePubKey: summary.manifestPublisherBeeNodePubKey,
+        initialBundleRef: summary.manifestRef,
+        initialBundleActHistoryAddress: summary.manifestActHistoryAddress,
+        initialBundlePublisherBeeNodePubKey: summary.manifestPublisherBeeNodePubKey,
+        participants: nextParticipants.map((pp) => ({
+          address: pp.address,
+          displayName: pp.displayName,
+        })),
+        invitedBy: this.myAddress.toLowerCase(),
+        invitedAt: now,
+      };
+      await this.chat.sendMessage(session, `You were added to "${summary.title}".`, attachment);
+    } catch (err) {
+      console.warn(
+        `[CollabManager] addParticipant: chat invite send failed (continuing):`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+
+    this.emit({ type: "collab-updated", collabId, data: updated });
+    return updated;
+  }
+
+  /**
+   * Re-read the collab's manifest feed to pick up any participant changes
+   * the initiator has published since we last looked. Updates the local
+   * summary if a newer manifest index is available.
+   *
+   * Returns the post-refresh summary (unchanged if no newer index).
+   */
+  async refreshManifest(collabId: CollabId): Promise<CollabSummary | null> {
+    const summary = this.summaries.get(collabId);
+    if (!summary) return null;
+    const latest = await this.manifestFeed.readLatest(
+      collabId,
+      summary.initiator,
+      summary.manifestPublisherBeeNodePubKey,
+    );
+    if (!latest) return summary;
+    if (
+      summary.manifestFeedIndex != null &&
+      latest.feedIndex <= summary.manifestFeedIndex
+    ) {
+      return summary; // nothing new
+    }
+    const updated: CollabSummary = {
+      ...summary,
+      participants: latest.manifest.participants,
+      manifestFeedIndex: latest.feedIndex,
+      title: latest.manifest.title ?? summary.title,
+      lastActivityAt: new Date().toISOString(),
+    };
+    this.summaries.set(collabId, updated);
+    this.persist();
+    this.emit({ type: "collab-updated", collabId, data: updated });
+    return updated;
   }
 
   /**
@@ -281,22 +514,53 @@ export class CollabManager {
       joinedAt: now,
     };
 
-    // Reconstruct participants from the invite + ensure self is present.
-    const inviteParticipants: CollabParticipant[] = invite.participants.map((p) => ({
-      address: p.address.toLowerCase(),
-      // Bee node pubkeys aren't in the invite's participant list — they
-      // live in the invite fields for the initiator's identity only. We
-      // backfill lazily as needed when we start pulling their feeds.
-      beeNodePublicKey: p.address.toLowerCase() === invite.invitedBy.toLowerCase()
-        ? invite.manifestPublisherBeeNodePubKey
-        : "",
-      joinedAt: now,
-      displayName: p.displayName,
-    }));
-    const participants: CollabParticipant[] = [
-      mySelf,
-      ...inviteParticipants.filter((p) => p.address !== mySelf.address),
-    ];
+    // Try to read the authoritative participant list from the manifest
+    // feed. It's written ACT-protected by the initiator under the same
+    // grantee chain we're now a member of, so we can decrypt. Fall back
+    // to the invite's (slimmer) participant list if the feed isn't
+    // reachable yet (chunk not propagated).
+    let participants: CollabParticipant[] | null = null;
+    let manifestFeedIndex: number | undefined;
+    try {
+      const latest = await this.manifestFeed.readLatest(
+        invite.collabId,
+        invite.invitedBy,
+        invite.manifestPublisherBeeNodePubKey,
+      );
+      if (latest) {
+        // Ensure self is present — the manifest should list us, but if
+        // the invite arrived on a stale manifest (edge case: initiator
+        // invited us in a prior chain) patch self in.
+        const listed = latest.manifest.participants.map((p) => ({
+          ...p,
+          address: p.address.toLowerCase(),
+        }));
+        const hasSelf = listed.some((p) => p.address === mySelf.address);
+        participants = hasSelf ? listed : [...listed, mySelf];
+        manifestFeedIndex = latest.feedIndex;
+      }
+    } catch (err) {
+      console.warn(
+        "[CollabManager] accept: manifest feed read failed, falling back to invite participants:",
+        err instanceof Error ? err.message : err,
+      );
+    }
+    if (!participants) {
+      // Fallback: invite's slim list (only the initiator has a known
+      // pubkey, others will have empty pubkeys until refreshManifest).
+      const inviteParticipants: CollabParticipant[] = invite.participants.map((p) => ({
+        address: p.address.toLowerCase(),
+        beeNodePublicKey: p.address.toLowerCase() === invite.invitedBy.toLowerCase()
+          ? invite.manifestPublisherBeeNodePubKey
+          : "",
+        joinedAt: now,
+        displayName: p.displayName,
+      }));
+      participants = [
+        mySelf,
+        ...inviteParticipants.filter((p) => p.address !== mySelf.address),
+      ];
+    }
 
     const summary: CollabSummary = {
       collabId: invite.collabId,
@@ -309,6 +573,11 @@ export class CollabManager {
       manifestRef: invite.manifestRef,
       manifestActHistoryAddress: invite.manifestActHistoryAddress,
       manifestPublisherBeeNodePubKey: invite.manifestPublisherBeeNodePubKey,
+      manifestFeedIndex,
+      // Non-initiators don't own the grantee chain; they ingest ops but
+      // don't write collab feed entries until they make local edits.
+      // Their ACT chain for writes gets lazily created from the current
+      // participant set the first time handleLocalPush fires.
       lastActivityAt: now,
       status: "active",
     };
@@ -439,15 +708,11 @@ export class CollabManager {
 
     for (const s of relevant) {
       try {
-        const granteeKeys = s.participants
-          .map((p) => p.beeNodePublicKey)
-          .filter((k) => !!k);
-        if (granteeKeys.length < 2) {
-          // Participant list is incomplete (e.g. accepted invite with no
-          // bee pubkey for the initiator) — skip mirror until the
-          // participant list gets refreshed on next invite exchange.
-          continue;
-        }
+        // Ensure we have a grantee chain to write under. Initiator has
+        // one from create(); joiners lazily create one on first push,
+        // backfilling their own pubkey into the participant record.
+        const granteeHistRef = await this.ensureGranteeChainForLocalWrite(s);
+        if (!granteeHistRef) continue; // not enough info to mirror yet
         const batch: CollabOpsBatch = {
           opsJson: JSON.stringify(input.ops),
           startIndex,
@@ -456,17 +721,14 @@ export class CollabManager {
           branch: input.branch,
           timestamp: new Date().toISOString(),
         };
-        // Doc-level collab writes to a doc-scoped topic; drive-level writes
-        // to a doc-scoped topic as well, so every doc gets its own feed
-        // inside the drive collab. This keeps reads parallelizable per doc.
         await this.opsFeed.appendBatch(
           s.collabId,
           input.driveId,
           input.docId,
           batch,
-          granteeKeys,
+          granteeHistRef,
         );
-        const updated = { ...s, lastActivityAt: new Date().toISOString() };
+        const updated = { ...this.summaries.get(s.collabId)!, lastActivityAt: new Date().toISOString() };
         this.summaries.set(s.collabId, updated);
         this.persist();
       } catch (err) {
@@ -476,6 +738,49 @@ export class CollabManager {
         );
       }
     }
+  }
+
+  /**
+   * Return a live ACT grantee-chain head for writes on this collab. For
+   * the initiator this is just the summary's currentGranteeHistRef. For
+   * joiners, this creates a chain the first time we write (lazy), using
+   * the participant list from the manifest feed.
+   */
+  private async ensureGranteeChainForLocalWrite(s: CollabSummary): Promise<string | null> {
+    if (s.currentGranteeHistRef) return s.currentGranteeHistRef;
+
+    const known = s.participants.filter((p) => p.beeNodePublicKey);
+    if (known.length < s.participants.length) {
+      // Missing some pubkeys — try a manifest refresh first.
+      const refreshed = await this.refreshManifest(s.collabId).catch(() => null);
+      if (refreshed?.currentGranteeHistRef) return refreshed.currentGranteeHistRef;
+      const newLive = refreshed ?? this.summaries.get(s.collabId) ?? s;
+      const liveKeys = newLive.participants.map((p) => p.beeNodePublicKey).filter((k) => !!k);
+      if (liveKeys.length < 2) return null;
+      const { ref, historyRef } = await this.client.createGrantees(liveKeys);
+      await new Promise((r) => setTimeout(r, 1100));
+      const updated: CollabSummary = {
+        ...newLive,
+        currentGranteeRef: ref,
+        currentGranteeHistRef: historyRef,
+      };
+      this.summaries.set(s.collabId, updated);
+      this.persist();
+      return historyRef;
+    }
+
+    const liveKeys = known.map((p) => p.beeNodePublicKey);
+    if (liveKeys.length < 2) return null;
+    const { ref, historyRef } = await this.client.createGrantees(liveKeys);
+    await new Promise((r) => setTimeout(r, 1100));
+    const updated: CollabSummary = {
+      ...s,
+      currentGranteeRef: ref,
+      currentGranteeHistRef: historyRef,
+    };
+    this.summaries.set(s.collabId, updated);
+    this.persist();
+    return historyRef;
   }
 
   // ─── Poll loop: pull peers' ops and apply to local reactor ─────

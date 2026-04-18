@@ -72,9 +72,6 @@ function parseFeedIndex(raw: unknown): number {
 }
 
 export class CollabOpsFeed {
-  /** granteeRef cache keyed by `${collabId}:${driveId}[:${docId}]`. */
-  private granteeCache = new Map<string, { granteeRef: string; granteeHistRef: string }>();
-
   constructor(private readonly client: SwarmClient) {}
 
   // ─── Topics ────────────────────────────────────────────────────
@@ -90,57 +87,33 @@ export class CollabOpsFeed {
     return Topic.fromString(raw);
   }
 
-  // ─── Grantee management ────────────────────────────────────────
-
-  /**
-   * Ensure a grantee list exists for this collab feed. Cached per
-   * (collabId, driveId, docId?) because the same grantee chain covers every
-   * write to the same feed (participants only change when the manifest is
-   * rewritten, which is a future milestone).
-   */
-  private async ensureGrantees(
-    key: string,
-    granteeBeePubKeys: string[],
-  ): Promise<{ granteeRef: string; granteeHistRef: string }> {
-    const cached = this.granteeCache.get(key);
-    if (cached) return cached;
-    const { ref: granteeRef, historyRef: granteeHistRef } =
-      await this.client.createGrantees(granteeBeePubKeys);
-    const record = { granteeRef, granteeHistRef };
-    this.granteeCache.set(key, record);
-    // ACT has a 1-second rule: the grantee list must exist for >= 1s before
-    // it can be used as an actHistoryAddress. Match chat-history.ts.
-    await new Promise((r) => setTimeout(r, 1100));
-    return record;
-  }
-
   // ─── Write side ────────────────────────────────────────────────
 
   /**
    * Append a batch of ops to this writer's per-collab feed.
    *
-   * @param granteeBeePubKeys - every participant's Bee node pubkey (including self).
+   * @param granteeHistRef ACT grantee-chain head that the caller has
+   *        already created (via SwarmClient.createGrantees). The caller
+   *        (CollabManager) owns this lifecycle so revocation can rotate
+   *        the chain without losing track of it.
    */
   async appendBatch(
     collabId: CollabId,
     driveId: string,
     documentId: string | undefined,
     batch: CollabOpsBatch,
-    granteeBeePubKeys: string[],
+    granteeHistRef: string,
   ): Promise<void> {
-    const key = `${collabId}:${driveId}:${documentId ?? "_drive"}`;
-    const grantees = await this.ensureGrantees(key, granteeBeePubKeys);
-
     // Upload ACT-protected batch payload to /bzz.
     const { reference: actRef, historyAddress } = await this.client.uploadFile(
       JSON.stringify(batch),
       {
         act: true,
-        actHistoryAddress: grantees.granteeHistRef,
+        actHistoryAddress: granteeHistRef,
         skipEncryption: true, // ACT handles it
       },
     );
-    const actHist = historyAddress ?? grantees.granteeHistRef;
+    const actHist = historyAddress ?? granteeHistRef;
 
     // Wrapper chunk: [actRef (32B) || actHist (32B)]. Uploaded plaintext so
     // the feed reader can read {actRef, actHist} pair without pre-shared state.

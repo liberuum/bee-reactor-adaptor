@@ -89,15 +89,27 @@ export interface CollabSummary {
   title: string;
   initiator: string;
   participants: CollabParticipant[];
-  /** Swarm refs needed to reread/refresh the manifest later. */
+  /** Swarm refs for the one-shot initial drive bundle (ACT-protected). */
   manifestRef: string;
   manifestActHistoryAddress: string;
   manifestPublisherBeeNodePubKey: string;
+  /** Feed index of the latest manifest revision we know about. Used to
+   *  detect new revisions on refresh and to compare membership changes. */
+  manifestFeedIndex?: number;
+  /** ACT grantee chain head covering the current participant set. Used
+   *  by the owner of the collab op feeds (the writer) when appending new
+   *  batches. Updated on every participant add/remove by the initiator,
+   *  and by any participant learning a newer manifest from the feed. */
+  currentGranteeHistRef?: string;
+  /** The grantee ref returned alongside currentGranteeHistRef. Kept for
+   *  future patchGrantees calls (incremental add/remove without
+   *  rebuilding the whole list). */
+  currentGranteeRef?: string;
   /** Most recent inbound op timestamp from any participant, or createdAt
    *  if nothing has arrived yet. Drives the "last activity" UI. */
   lastActivityAt: string;
   /** Populated as this client starts writing/reading collab feeds. */
-  status: "active" | "pending" | "error";
+  status: "active" | "pending" | "error" | "revoked";
 }
 
 /** Adapter-level event stream for Connect's UI. */
