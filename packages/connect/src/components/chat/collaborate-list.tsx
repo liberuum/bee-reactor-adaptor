@@ -143,8 +143,8 @@ export function CollaborateList({
             New collaboration
           </button>
           <p className="mt-2.5 text-[11px] leading-snug text-gray-400">
-            Pick a drive and invite peers by <strong className="text-gray-600">Swarm ID</strong>.
-            They receive an invitation in chat and can accept with one click.
+            Pick a drive and invite peers by their <strong className="text-gray-600">peer address</strong>.
+            They'll get a one-click invite in chat.
           </p>
         </div>
       </div>
@@ -445,13 +445,13 @@ function CollabCreatePicker({
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="flex max-h-full w-full max-w-lg flex-col overflow-hidden rounded-lg bg-white shadow-2xl"
+        className="flex max-h-full w-[min(100%,32rem)] flex-col overflow-hidden rounded-lg bg-white shadow-2xl"
       >
         <div className="flex shrink-0 items-center justify-between border-b border-gray-200 px-4 py-3">
           <div>
             <h3 className="text-sm font-semibold text-gray-900">Start a collaboration</h3>
             <p className="mt-0.5 text-[11px] text-gray-400">
-              Pick a drive and invite peers · live multi-writer via Swarm ACT
+              Pick a drive and invite peers · real-time, end-to-end encrypted
             </p>
           </div>
           <button
@@ -601,7 +601,7 @@ function CollabCreatePicker({
                 value={manualAddress}
                 onChange={(e) => setManualAddress(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && addManual()}
-                placeholder="0x... (Swarm ID, not wallet)"
+                placeholder="0x… peer address (not your wallet)"
                 className="flex-1 rounded-md border border-gray-300 bg-white px-2.5 py-1.5 font-mono text-[12px] outline-none focus:border-blue-400"
               />
               <button

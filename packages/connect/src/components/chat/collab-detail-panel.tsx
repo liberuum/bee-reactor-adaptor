@@ -31,6 +31,8 @@ export function CollabDetailPanel({
   const [busyAddr, setBusyAddr] = useState<string | null>(null);
   const [addBusy, setAddBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [lastRefreshError, setLastRefreshError] = useState<string | null>(null);
+  const [refreshToken, setRefreshToken] = useState(0);
   const [addInput, setAddInput] = useState("");
   const [showAdd, setShowAdd] = useState(false);
   const [confirmRevoke, setConfirmRevoke] = useState<string | null>(null);
@@ -39,6 +41,7 @@ export function CollabDetailPanel({
     if (!isOpen) {
       setAddInput("");
       setError(null);
+      setLastRefreshError(null);
       setBusyAddr(null);
       setAddBusy(false);
       setConfirmRevoke(null);
@@ -53,6 +56,7 @@ export function CollabDetailPanel({
     if (!manager?.refreshManifest) return;
     let cancelled = false;
     setRefreshing(true);
+    setLastRefreshError(null);
     manager
       .refreshManifest(summary.collabId)
       .then((updated: CollabSummary | null) => {
@@ -61,14 +65,13 @@ export function CollabDetailPanel({
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        setError(
-          "Could not refresh membership from Swarm: " +
-            (err instanceof Error ? err.message : String(err)),
-        );
+        const msg = err instanceof Error ? err.message : String(err);
+        setError(`Could not refresh the member list: ${msg}`);
+        setLastRefreshError(msg);
       })
       .finally(() => { if (!cancelled) setRefreshing(false); });
     return () => { cancelled = true; };
-  }, [isOpen, summary?.collabId, onUpdated]);
+  }, [isOpen, summary?.collabId, onUpdated, refreshToken]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -103,7 +106,7 @@ export function CollabDetailPanel({
     if (!manager || !summary) return;
     const addr = addInput.trim().toLowerCase();
     if (!addr.startsWith("0x") || addr.length < 10) {
-      setError("Paste a Swarm ID starting with 0x");
+      setError("Paste a peer address starting with 0x");
       return;
     }
     setAddBusy(true);
@@ -134,7 +137,7 @@ export function CollabDetailPanel({
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="flex max-h-full w-full max-w-lg flex-col overflow-hidden rounded-lg bg-white shadow-2xl"
+        className="flex max-h-full w-[min(100%,32rem)] flex-col overflow-hidden rounded-lg bg-white shadow-2xl"
       >
         <div className="flex shrink-0 items-start justify-between border-b border-gray-200 px-4 py-3">
           <div className="min-w-0">
@@ -191,7 +194,7 @@ export function CollabDetailPanel({
                     type="text"
                     value={addInput}
                     onChange={(e) => setAddInput(e.target.value)}
-                    placeholder="0x... (Swarm ID)"
+                    placeholder="0x… peer address"
                     disabled={addBusy}
                     className="flex-1 rounded-md border border-gray-300 bg-white px-2.5 py-1.5 font-mono text-[12px] outline-none focus:border-blue-400 disabled:opacity-60"
                     autoFocus
@@ -215,41 +218,67 @@ export function CollabDetailPanel({
                   </button>
                 </div>
                 <p className="mt-2 text-[11px] text-gray-500">
-                  They'll receive an invitation in chat and be granted read +
-                  write access via a new ACT chain rotation.
+                  They'll get a one-click invite in chat. Once they join, you
+                  can both edit together in real time.
                 </p>
               </div>
             )}
 
-            <ul className="divide-y divide-gray-100 rounded-md border border-gray-200">
-              {summary.participants.map((p) => (
-                <ParticipantRow
-                  key={p.address}
-                  participant={p}
-                  isMe={p.address === myAddress.toLowerCase()}
-                  isInitiator={p.address === summary.initiator}
-                  viewerIsInitiator={isInitiator}
-                  confirming={confirmRevoke === p.address}
-                  busy={busyAddr === p.address}
-                  onRequestRevoke={() => setConfirmRevoke(p.address)}
-                  onCancelRevoke={() => setConfirmRevoke(null)}
-                  onConfirmRevoke={() => handleRevoke(p.address)}
-                />
-              ))}
-            </ul>
+            {refreshing && summary.participants.length === 0 ? (
+              <ul className="divide-y divide-gray-100 rounded-md border border-gray-200">
+                <ParticipantRowSkeleton />
+                <ParticipantRowSkeleton />
+                <ParticipantRowSkeleton />
+              </ul>
+            ) : (
+              <ul className="divide-y divide-gray-100 rounded-md border border-gray-200">
+                {summary.participants.map((p) => (
+                  <ParticipantRow
+                    key={p.address}
+                    participant={p}
+                    isMe={p.address === myAddress.toLowerCase()}
+                    isInitiator={p.address === summary.initiator}
+                    viewerIsInitiator={isInitiator}
+                    // "Awaiting response" when there's no record of
+                    // ops arriving from this peer yet. Imperfect (they
+                    // might have joined silently), but useful signal
+                    // for the common case right after inviting.
+                    hasActivity={peerHasSeenActivity(summary.collabId, p.address)}
+                    confirming={confirmRevoke === p.address}
+                    busy={busyAddr === p.address}
+                    onRequestRevoke={() => setConfirmRevoke(p.address)}
+                    onCancelRevoke={() => setConfirmRevoke(null)}
+                    onConfirmRevoke={() => handleRevoke(p.address)}
+                  />
+                ))}
+              </ul>
+            )}
           </div>
 
           {error && (
-            <div className="rounded-md border border-red-100 bg-red-50 px-3 py-2 text-[11px] text-red-700">
-              {error}
+            <div className="flex items-start gap-2 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-[11px] text-red-700">
+              <span className="flex-1">{error}</span>
+              {lastRefreshError && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setError(null);
+                    setLastRefreshError(null);
+                    setRefreshToken((t) => t + 1);
+                  }}
+                  className="shrink-0 rounded-md border border-red-200 bg-white px-2 py-0.5 text-[10px] font-semibold text-red-700 hover:bg-red-100"
+                >
+                  Retry
+                </button>
+              )}
             </div>
           )}
 
           <div className="rounded-md border border-gray-100 bg-gray-50 px-3 py-2 text-[11px] text-gray-500">
-            <strong className="text-gray-700">How revocation works:</strong>{" "}
-            removing someone rotates the encryption chain. Future operations
-            can't be decrypted by them. Content they already have stays
-            readable on their device — Swarm ACT can't rewind history.
+            <strong className="text-gray-700">How revoking works:</strong>{" "}
+            removing someone rotates the encryption key so they can't see
+            future edits. Content they already have on their device stays
+            readable — encryption can't reach back in time.
           </div>
         </div>
 
@@ -271,11 +300,44 @@ export function CollabDetailPanel({
   );
 }
 
+/**
+ * Best-effort signal that a participant has been active in a collab.
+ * We look for any pollSummary cursor in localStorage — CollabManager
+ * writes one the first time it applies an op batch from that peer.
+ * No cursor yet = we've never seen ops from them; either they haven't
+ * accepted the invite or they've accepted but haven't edited anything.
+ */
+function peerHasSeenActivity(collabId: string, peerAddress: string): boolean {
+  try {
+    const ls = (globalThis as any).window?.localStorage;
+    if (!ls) return false;
+    const prefix = `swarm:collabPeerCursor:${collabId}:${peerAddress.toLowerCase()}:`;
+    for (let i = 0; i < ls.length; i++) {
+      const key = ls.key(i);
+      if (key && key.startsWith(prefix)) return true;
+    }
+  } catch { /* no localStorage */ }
+  return false;
+}
+
+function ParticipantRowSkeleton() {
+  return (
+    <li className="flex items-center gap-2.5 px-3 py-2">
+      <div className="h-8 w-8 shrink-0 animate-pulse rounded-full bg-gray-200" />
+      <div className="flex-1 space-y-1">
+        <div className="h-3 w-32 animate-pulse rounded bg-gray-200" />
+        <div className="h-2.5 w-48 animate-pulse rounded bg-gray-100" />
+      </div>
+    </li>
+  );
+}
+
 function ParticipantRow({
   participant,
   isMe,
   isInitiator,
   viewerIsInitiator,
+  hasActivity,
   confirming,
   busy,
   onRequestRevoke,
@@ -286,6 +348,7 @@ function ParticipantRow({
   isMe: boolean;
   isInitiator: boolean;
   viewerIsInitiator: boolean;
+  hasActivity: boolean;
   confirming: boolean;
   busy: boolean;
   onRequestRevoke: () => void;
@@ -295,6 +358,9 @@ function ParticipantRow({
   const canRevoke = viewerIsInitiator && !isInitiator && !isMe;
   const short = `${participant.address.slice(0, 10)}…${participant.address.slice(-4)}`;
   const label = participant.displayName ?? short;
+  // Show the "awaiting" hint only for other participants (not the
+  // viewer, not the owner) who haven't produced any activity yet.
+  const awaiting = !isMe && !isInitiator && !hasActivity;
 
   return (
     <li className="flex items-center gap-2.5 px-3 py-2 text-[13px]">
@@ -312,6 +378,14 @@ function ParticipantRow({
           {isMe && (
             <span className="rounded bg-gray-100 px-1 text-[9px] font-semibold uppercase tracking-wider text-gray-500">
               You
+            </span>
+          )}
+          {awaiting && (
+            <span
+              className="rounded bg-amber-50 px-1 text-[9px] font-semibold uppercase tracking-wider text-amber-700"
+              title="No activity yet — they may not have accepted the invitation"
+            >
+              Awaiting
             </span>
           )}
         </div>

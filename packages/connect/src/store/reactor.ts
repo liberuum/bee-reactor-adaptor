@@ -581,6 +581,49 @@ export async function createReactor(localPackage?: DocumentModelLib) {
       toast("Swarm storage cleared", { type: "connect-success" });
     });
 
+    // Collaboration event toasts. CollabManager has its own event bus
+    // (distinct from ph.swarm.on), so subscribe via the manager handle
+    // once the plugin wires it onto window.ph.swarm.collab.manager.
+    const wireCollabToasts = () => {
+      const manager = (window.ph as any)?.swarm?.collab?.manager;
+      if (!manager?.on) return false;
+      manager.on("collab-created", (e: any) => {
+        const title = e.data?.title ?? "your new collaboration";
+        toast(`Invitations sent for "${title}"`, { type: "connect-success" });
+      });
+      manager.on("collab-accepted", (e: any) => {
+        const title = e.data?.title ?? "the collaboration";
+        toast(`You joined "${title}"`, { type: "connect-success" });
+      });
+      manager.on("collab-updated", (e: any) => {
+        // Only toast the first membership change per collab per minute
+        // to avoid spamming when a lot of peers are added at once.
+        const last = (window as any).__lastCollabUpdateToast ?? new Map();
+        const now = Date.now();
+        const key = e.collabId ?? "*";
+        if ((last.get(key) ?? 0) > now - 60_000) return;
+        last.set(key, now);
+        (window as any).__lastCollabUpdateToast = last;
+        toast("Collaboration membership updated", { type: "connect-success" });
+      });
+      manager.on("invite-received", (e: any) => {
+        const title = e.data?.title ?? "a collaboration";
+        toast(`You were invited to "${title}"`, { type: "connect-success" });
+      });
+      return true;
+    };
+    if (!wireCollabToasts()) {
+      // CollabManager comes up slightly after plugin:ready in some
+      // paths (e.g. reconnect). Poll briefly, then give up.
+      let collabAttempts = 0;
+      const collabInterval = setInterval(() => {
+        collabAttempts++;
+        if (wireCollabToasts() || collabAttempts >= 10) {
+          clearInterval(collabInterval);
+        }
+      }, 2000);
+    }
+
     logger.info("[SwarmPlugin] Toast notifications active");
 
     // Retry every 3s for up to 30s to catch drives that hydrate late
