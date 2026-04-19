@@ -34,17 +34,22 @@ export class ApplyPipeline {
     opsFeed;
     pollKick;
     isShuttingDown;
+    appliedOpsTracker;
     constructor(store, events, opsFeed, 
     /** Signals the caller to schedule a poll-loop tick as a fallback. */
     pollKick, 
     /** Set to `true` by the owning manager during shutdown so retry
      *  loops bail promptly. */
-    isShuttingDown) {
+    isShuttingDown, 
+    /** Remembers op IDs we apply from peer-sync paths so PushHook
+     *  doesn't mirror them back to the collab feed as echoes. */
+    appliedOpsTracker) {
         this.store = store;
         this.events = events;
         this.opsFeed = opsFeed;
         this.pollKick = pollKick;
         this.isShuttingDown = isShuttingDown;
+        this.appliedOpsTracker = appliedOpsTracker;
     }
     /**
      * Zero-RTT apply. On failure, falls back to a poll-loop kick — the
@@ -137,6 +142,17 @@ export class ApplyPipeline {
             }
             return entry;
         });
+        // Record that each of these ops arrived from a peer (not local
+        // execution) BEFORE reactor.load fires. SwarmChannel may see the
+        // reactor's write immediately and call handleLocalPush before
+        // this function even returns — we need the IDs in the tracker by
+        // then so PushHook filters them out. See AppliedOpsTracker for
+        // the full echo-loop story.
+        for (const op of ops) {
+            const id = op?.id;
+            if (typeof id === "string")
+                this.appliedOpsTracker.markAppliedViaSync(id);
+        }
         try {
             await reactor.load(input.docId, input.branch, ops);
         }

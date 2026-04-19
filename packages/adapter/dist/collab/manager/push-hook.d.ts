@@ -4,15 +4,23 @@
  * {@link CollabFeedFlusher}, which owns the debounced ACT feed write
  * + GSOC ping.
  *
- * Why a separate module:
- *   - This file is the one SwarmChannel talks to via
- *     `__swarmCollabManager__.handleLocalPush`. Keeping it tiny
- *     isolates the IPC surface from the transport details.
- *   - Filtering (scope=document drops, self-author filter) is about
- *     *what* to mirror; flushing is about *when*. Two clean
- *     responsibilities, two small modules.
+ * Two filtering concerns live here:
+ *
+ *   1. Drop reactor-machinery ops. `scope="document"` carries
+ *      CREATE_DOCUMENT / UPGRADE_DOCUMENT which every participant
+ *      produces independently when the drive/doc is first
+ *      materialized. Mirroring them hands peers an op at index 0 for
+ *      a document they already have at revision 3+, triggering a
+ *      RevisionMismatchError in their reactor.
+ *
+ *   2. Don't echo peer-authored ops. SwarmChannel's outbox grows on
+ *      every reactor write — including ops loaded via sync. The
+ *      {@link AppliedOpsTracker} remembers IDs we applied from peer
+ *      pings/polls, so we can tell "locally authored" apart from
+ *      "we just finished ingesting this from a peer".
  */
 import type { OperationWithContext } from "../../swarm-operation-store.js";
+import type { AppliedOpsTracker } from "./applied-ops-tracker.js";
 import type { CollabFeedFlusher } from "./feed-flusher.js";
 import type { SummaryStore } from "./store.js";
 export interface LocalPushInput {
@@ -28,9 +36,9 @@ export interface LocalPushInput {
 export declare class PushHook {
     private readonly store;
     private readonly flusher;
-    private readonly myAddress;
+    private readonly appliedOpsTracker;
     private readonly isShuttingDown;
-    constructor(store: SummaryStore, flusher: CollabFeedFlusher, myAddress: string, isShuttingDown: () => boolean);
+    constructor(store: SummaryStore, flusher: CollabFeedFlusher, appliedOpsTracker: AppliedOpsTracker, isShuttingDown: () => boolean);
     handleLocalPush(input: LocalPushInput): Promise<void>;
     /**
      * Find collabs that should mirror a given (driveId, docId):

@@ -16,6 +16,7 @@
  */
 import type { CollabOpsFeed } from "../collab-ops-feed.js";
 import type { CollabId, CollabSummary } from "../types.js";
+import type { AppliedOpsTracker } from "./applied-ops-tracker.js";
 import type { CollabEventBus } from "./event-bus.js";
 import { SummaryStore } from "./store.js";
 export interface InlineOpsInput {
@@ -55,12 +56,18 @@ export declare class ApplyPipeline {
     /** Set to `true` by the owning manager during shutdown so retry
      *  loops bail promptly. */
     private readonly isShuttingDown;
+    /** Remembers op IDs we apply from peer-sync paths so PushHook
+     *  doesn't mirror them back to the collab feed as echoes. */
+    private readonly appliedOpsTracker;
     constructor(store: SummaryStore, events: CollabEventBus, opsFeed: CollabOpsFeed, 
     /** Signals the caller to schedule a poll-loop tick as a fallback. */
     pollKick: PollKick, 
     /** Set to `true` by the owning manager during shutdown so retry
      *  loops bail promptly. */
-    isShuttingDown: () => boolean);
+    isShuttingDown: () => boolean, 
+    /** Remembers op IDs we apply from peer-sync paths so PushHook
+     *  doesn't mirror them back to the collab feed as echoes. */
+    appliedOpsTracker: AppliedOpsTracker);
     /**
      * Zero-RTT apply. On failure, falls back to a poll-loop kick — the
      * caller needn't re-throw.

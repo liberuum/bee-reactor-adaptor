@@ -38,6 +38,7 @@ export declare class CollabManager {
     private readonly pollLoop;
     private readonly pushHook;
     private readonly flusher;
+    private readonly appliedOpsTracker;
     private readonly lifecycle;
     private readonly userManifestSync;
     private shuttingDown;

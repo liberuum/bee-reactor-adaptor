@@ -783,7 +783,7 @@ describe("CollabManager — handleLocalPush routing", () => {
     mgr.shutdown();
   });
 
-  it("skips ops authored by other participants (don't echo peer ops back to the collab feed)", async () => {
+  it("skips ops we already applied via peer sync (don't echo back to collab feed)", async () => {
     const mgr = new CollabManager(makeStubClient(), makeStubChat(), TEST_ADDRESS);
     const s = mkSummary({
       driveId: "drive-no-echo",
@@ -795,25 +795,32 @@ describe("CollabManager — handleLocalPush routing", () => {
       .spyOn(opsFeedOf(mgr), "appendBatch")
       .mockResolvedValue({ actRef: "r", actHistoryAddress: "h", feedIndex: 0 });
 
-    // SwarmChannel pushes peer-authored ops too (they land in the
-    // reactor's outbox after a sync apply). We must not mirror them or
-    // the original author sees their own op echoed back.
+    // Simulate receiving two ops from a peer via GSOC. The tracker
+    // now holds their IDs so SwarmChannel's subsequent outbox push
+    // (for the same ops, since reactor.load added them to the
+    // receiver's opstore) won't echo them back to the collab feed.
+    const tracker = (mgr as any).appliedOpsTracker;
+    tracker.markAppliedViaSync("peer-op");
+    tracker.markAppliedViaSync("peer-op-2");
+
+    // Pure peer batch — all ops tracked as sync'd — should NOT mirror.
     await mgr.handleLocalPush({
       driveId: "drive-no-echo",
       docId: "doc-1",
-      ops: [mkAuthoredOp("peer-op", 0, PEER_ADDRESS)],
+      ops: [mkAuthoredOp("peer-op", 0)],
       scope: "global",
       branch: "main",
     });
     await flushNow(mgr);
     expect(spy).not.toHaveBeenCalled();
 
-    // Mixed batch: one peer op, one mine — only mine should make it through.
+    // Mixed batch: one sync'd, one fresh local — only the fresh one
+    // should make it through.
     await mgr.handleLocalPush({
       driveId: "drive-no-echo",
       docId: "doc-1",
       ops: [
-        mkAuthoredOp("peer-op-2", 1, PEER_ADDRESS),
+        mkAuthoredOp("peer-op-2", 1),
         mkAuthoredOp("my-op", 2),
       ],
       scope: "global",
@@ -821,7 +828,6 @@ describe("CollabManager — handleLocalPush routing", () => {
     });
     await flushNow(mgr);
     expect(spy).toHaveBeenCalledOnce();
-    // Batch appended should contain only the authored op.
     const appendedBatch = spy.mock.calls[0][3] as { opsJson: string };
     const serialized = JSON.parse(appendedBatch.opsJson) as Array<{ operation: { id: string } }>;
     expect(serialized).toHaveLength(1);

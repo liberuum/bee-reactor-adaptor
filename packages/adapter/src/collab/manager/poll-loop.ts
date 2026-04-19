@@ -78,10 +78,26 @@ export class PollLoop {
   private async pollSummary(summary: CollabSummary): Promise<void> {
     if (!getReactorClient()) return;
 
-    // Opportunistic re-subscribe: catches the initiator→joiner case
-    // where the initiator creates the collab before the joiner has
-    // published their outbound-to-initiator GSOC address. Each call is
-    // a no-op for peers we've already subscribed to.
+    // Opportunistic re-mine + re-subscribe. Three silent-failure
+    // windows this catches:
+    //
+    //  1. `provisionOutbound` at accept/create time reads our own
+    //     profile first; if the plugin hasn't published it yet (race
+    //     with plugin init), provisioning bails and never retries.
+    //     Without this tick, our outbound-to-peer map stays missing
+    //     and peers can't subscribe to our pings.
+    //
+    //  2. On create, the initiator's `subscribeToPeers` runs before
+    //     the joiner has accepted, so the listen address isn't yet
+    //     in the joiner's profile. Retrying each tick catches them
+    //     within ~5s of their accept completing.
+    //
+    //  3. On rehydrate, if a peer's profile was unreachable (stamp
+    //     lookup blip, chunk not propagated), we want to retry.
+    //
+    // Both methods are internally idempotent — `outbound` and
+    // `subscribedPeers` dedup completed work — so the tick is cheap.
+    void this.gsoc.provisionOutbound(summary.collabId, summary.participants).catch(() => {});
     void this.gsoc.subscribeToPeers(summary).catch(() => {});
 
     const docIds = summary.kind === "document" && summary.documentId

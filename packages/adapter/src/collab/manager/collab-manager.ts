@@ -33,6 +33,7 @@ import type {
   CollabInviteAttachment,
   CollabSummary,
 } from "../types.js";
+import { AppliedOpsTracker } from "./applied-ops-tracker.js";
 import { ApplyPipeline } from "./apply-pipeline.js";
 import { CollabEventBus } from "./event-bus.js";
 import { CollabFeedFlusher } from "./feed-flusher.js";
@@ -61,6 +62,7 @@ export class CollabManager {
   private readonly pollLoop: PollLoop;
   private readonly pushHook: PushHook;
   private readonly flusher: CollabFeedFlusher;
+  private readonly appliedOpsTracker: AppliedOpsTracker;
   private readonly lifecycle: CollabLifecycle;
   private readonly userManifestSync: UserManifestSync;
 
@@ -79,6 +81,11 @@ export class CollabManager {
     this.store = new SummaryStore();
     this.events = new CollabEventBus();
     this.opsFeed = new CollabOpsFeed(client);
+    // Tracks op IDs we applied via peer-sync paths (GSOC inline
+    // ping, /bzz refs, feed poll). PushHook consults it to avoid
+    // echoing sync'd ops back to the collab feed. Shared between
+    // ApplyPipeline (writer) and PushHook (reader).
+    this.appliedOpsTracker = new AppliedOpsTracker();
 
     // ApplyPipeline takes a pollKick callback so it can fall back to
     // the poll loop without a direct reference (breaks import cycles).
@@ -89,6 +96,7 @@ export class CollabManager {
       this.opsFeed,
       pollKick,
       isShuttingDown,
+      this.appliedOpsTracker,
     );
 
     this.gsoc = new GsocCoordinator(
@@ -146,7 +154,7 @@ export class CollabManager {
     this.pushHook = new PushHook(
       this.store,
       this.flusher,
-      myAddress,
+      this.appliedOpsTracker,
       isShuttingDown,
     );
 

@@ -22,6 +22,7 @@
  * public API, and forwards calls.
  */
 import { CollabOpsFeed } from "../collab-ops-feed.js";
+import { AppliedOpsTracker } from "./applied-ops-tracker.js";
 import { ApplyPipeline } from "./apply-pipeline.js";
 import { CollabEventBus } from "./event-bus.js";
 import { CollabFeedFlusher } from "./feed-flusher.js";
@@ -41,6 +42,7 @@ export class CollabManager {
     pollLoop;
     pushHook;
     flusher;
+    appliedOpsTracker;
     lifecycle;
     userManifestSync;
     shuttingDown = false;
@@ -53,10 +55,15 @@ export class CollabManager {
         this.store = new SummaryStore();
         this.events = new CollabEventBus();
         this.opsFeed = new CollabOpsFeed(client);
+        // Tracks op IDs we applied via peer-sync paths (GSOC inline
+        // ping, /bzz refs, feed poll). PushHook consults it to avoid
+        // echoing sync'd ops back to the collab feed. Shared between
+        // ApplyPipeline (writer) and PushHook (reader).
+        this.appliedOpsTracker = new AppliedOpsTracker();
         // ApplyPipeline takes a pollKick callback so it can fall back to
         // the poll loop without a direct reference (breaks import cycles).
         const pollKick = () => this.pollLoop?.kick();
-        this.applyPipeline = new ApplyPipeline(this.store, this.events, this.opsFeed, pollKick, isShuttingDown);
+        this.applyPipeline = new ApplyPipeline(this.store, this.events, this.opsFeed, pollKick, isShuttingDown, this.appliedOpsTracker);
         this.gsoc = new GsocCoordinator(client, myAddress, gsoc ?? null, this.store, this.events, this.applyPipeline, pollKick);
         this.userManifestSync = new UserManifestSync(client, myAddress, this.store, this.events, this.gsoc);
         this.lifecycle = new CollabLifecycle(client, chat, myAddress, this.store, this.events, this.gsoc, this.userManifestSync);
@@ -69,7 +76,7 @@ export class CollabManager {
         // `actRef`. Kills the mantaray-1-sec-bucket race that was silently
         // dropping batches under rapid typing.
         this.flusher = new CollabFeedFlusher(client, this.opsFeed, this.store, this.gsoc, (collabId) => this.lifecycle.refreshManifest(collabId));
-        this.pushHook = new PushHook(this.store, this.flusher, myAddress, isShuttingDown);
+        this.pushHook = new PushHook(this.store, this.flusher, this.appliedOpsTracker, isShuttingDown);
         this.pollLoop.start();
         // Install the push hook so SwarmChannel can notify us on every
         // local op flush. Stable global so channels created before this

@@ -17,6 +17,7 @@
 
 import type { CollabOpsFeed } from "../collab-ops-feed.js";
 import type { CollabId, CollabSummary } from "../types.js";
+import type { AppliedOpsTracker } from "./applied-ops-tracker.js";
 import type { CollabEventBus } from "./event-bus.js";
 import { dispatchWindowEvent, getReactor } from "./reactor-bridge.js";
 import { pushActivity, SummaryStore } from "./store.js";
@@ -74,6 +75,9 @@ export class ApplyPipeline {
     /** Set to `true` by the owning manager during shutdown so retry
      *  loops bail promptly. */
     private readonly isShuttingDown: () => boolean,
+    /** Remembers op IDs we apply from peer-sync paths so PushHook
+     *  doesn't mirror them back to the collab feed as echoes. */
+    private readonly appliedOpsTracker: AppliedOpsTracker,
   ) {}
 
   /**
@@ -185,6 +189,17 @@ export class ApplyPipeline {
       }
       return entry;
     });
+
+    // Record that each of these ops arrived from a peer (not local
+    // execution) BEFORE reactor.load fires. SwarmChannel may see the
+    // reactor's write immediately and call handleLocalPush before
+    // this function even returns — we need the IDs in the tracker by
+    // then so PushHook filters them out. See AppliedOpsTracker for
+    // the full echo-loop story.
+    for (const op of ops) {
+      const id = (op as { id?: unknown })?.id;
+      if (typeof id === "string") this.appliedOpsTracker.markAppliedViaSync(id);
+    }
 
     try {
       await reactor.load(input.docId, input.branch, ops);

@@ -4,23 +4,30 @@
  * {@link CollabFeedFlusher}, which owns the debounced ACT feed write
  * + GSOC ping.
  *
- * Why a separate module:
- *   - This file is the one SwarmChannel talks to via
- *     `__swarmCollabManager__.handleLocalPush`. Keeping it tiny
- *     isolates the IPC surface from the transport details.
- *   - Filtering (scope=document drops, self-author filter) is about
- *     *what* to mirror; flushing is about *when*. Two clean
- *     responsibilities, two small modules.
+ * Two filtering concerns live here:
+ *
+ *   1. Drop reactor-machinery ops. `scope="document"` carries
+ *      CREATE_DOCUMENT / UPGRADE_DOCUMENT which every participant
+ *      produces independently when the drive/doc is first
+ *      materialized. Mirroring them hands peers an op at index 0 for
+ *      a document they already have at revision 3+, triggering a
+ *      RevisionMismatchError in their reactor.
+ *
+ *   2. Don't echo peer-authored ops. SwarmChannel's outbox grows on
+ *      every reactor write — including ops loaded via sync. The
+ *      {@link AppliedOpsTracker} remembers IDs we applied from peer
+ *      pings/polls, so we can tell "locally authored" apart from
+ *      "we just finished ingesting this from a peer".
  */
 export class PushHook {
     store;
     flusher;
-    myAddress;
+    appliedOpsTracker;
     isShuttingDown;
-    constructor(store, flusher, myAddress, isShuttingDown) {
+    constructor(store, flusher, appliedOpsTracker, isShuttingDown) {
         this.store = store;
         this.flusher = flusher;
-        this.myAddress = myAddress;
+        this.appliedOpsTracker = appliedOpsTracker;
         this.isShuttingDown = isShuttingDown;
     }
     async handleLocalPush(input) {
@@ -28,24 +35,19 @@ export class PushHook {
             return;
         if (!input.ops?.length)
             return;
-        // Skip reactor-machinery ops entirely. scope="document" carries
-        // CREATE_DOCUMENT + UPGRADE_DOCUMENT — per-node bootstrap that
-        // every participant produces independently when the drive/doc is
-        // first materialized (via applyDocumentBundle on joiners, via
-        // addDrive on the initiator). Mirroring them would hand a peer an
-        // op at index 0 for a document they already have at revision 3+,
-        // triggering a RevisionMismatchError in their reactor. We only
-        // mirror scope="global" content edits (ADD_FILE, SET_NAME, etc.).
+        // (1) Skip reactor-machinery ops entirely.
         if (input.scope === "document")
             return;
-        // Mirror only ops we actually authored. SwarmChannel's outbox
-        // grows whenever the reactor writes ops — including sync'd ops
-        // from peers applied via `reactor.load`. Without this filter we
-        // echo every received op back to the collab feed, which shows up
-        // as a phantom "peer applied 1 op" row on the original sender's
-        // UI and wastes bandwidth.
-        const authoredOps = input.ops.filter((o) => opAuthor(o) === this.myAddress.toLowerCase());
-        if (authoredOps.length === 0)
+        // (2) Drop ops we applied from peer-sync paths — those would echo
+        // back to the author as phantom "peer applied 1 op" rows and
+        // waste bandwidth re-encrypting the same batch.
+        const localOps = input.ops.filter((o) => {
+            const id = o.operation?.id;
+            if (typeof id !== "string")
+                return true; // legacy payload, keep it
+            return !this.appliedOpsTracker.wasAppliedViaSync(id);
+        });
+        if (localOps.length === 0)
             return;
         const relevant = this.findCollabsCoveringDoc(input.driveId, input.docId);
         if (relevant.length === 0)
@@ -54,7 +56,7 @@ export class PushHook {
             this.flusher.queue(summary, {
                 driveId: input.driveId,
                 docId: input.docId,
-                ops: authoredOps,
+                ops: localOps,
                 scope: input.scope,
                 branch: input.branch,
             });
@@ -76,16 +78,5 @@ export class PushHook {
         }
         return out;
     }
-}
-/**
- * Extract the authoring wallet address from an OperationWithContext.
- * The reactor stores the author under
- * `action.context.signer.user.address`; returns a lowercased string
- * for stable comparison. Returns null if the path isn't present (e.g.
- * legacy ops without signer context).
- */
-function opAuthor(op) {
-    const signer = op.operation?.action?.context?.signer?.user?.address;
-    return typeof signer === "string" ? signer.toLowerCase() : null;
 }
 //# sourceMappingURL=push-hook.js.map
