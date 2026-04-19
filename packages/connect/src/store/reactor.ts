@@ -522,7 +522,25 @@ export async function createReactor(localPackage?: DocumentModelLib) {
       // pulledRecoveryDrives so the 3s retry loop doesn't re-fire pulls.
       const phAny = window.ph as any;
       const needPull = swarmOnlyDriveIds.filter((id) => !pulledRecoveryDrives.has(id));
-      if (needPull.length > 0 && !phAny?._skipSwarmRecovery) {
+      // Persistent skip window: `clearSwarmStorage` writes this to
+      // localStorage so the skip survives the page reload that follows
+      // the clear (Bee feed propagation can lag 30-60s, and a raw
+      // reload in that window would re-pull the "deleted" drives).
+      const skipUntilRaw = (() => {
+        try {
+          return window.localStorage.getItem("swarm:recoveryDisabledUntil");
+        } catch {
+          return null;
+        }
+      })();
+      const skipUntil = skipUntilRaw ? parseInt(skipUntilRaw, 10) : 0;
+      const skipByClearFlag = Number.isFinite(skipUntil) && skipUntil > Date.now();
+      if (skipByClearFlag === false && skipUntilRaw) {
+        // Window expired — prune the key so stale entries don't linger.
+        try { window.localStorage.removeItem("swarm:recoveryDisabledUntil"); } catch {}
+      }
+
+      if (needPull.length > 0 && !phAny?._skipSwarmRecovery && !skipByClearFlag) {
         console.log(
           `[SwarmChannel] Recovery mode — pulling ${needPull.length} Swarm-only drive(s):`,
           needPull.map((id) => id.slice(0, 8)),
@@ -536,6 +554,10 @@ export async function createReactor(localPackage?: DocumentModelLib) {
           }
         }
         for (const id of needPull) pulledRecoveryDrives.add(id);
+      } else if (skipByClearFlag) {
+        console.log(
+          `[SwarmChannel] Skipping recovery — storage was cleared, window active for ${Math.round((skipUntil - Date.now()) / 1000)}s more`,
+        );
       } else if (phAny?._skipSwarmRecovery) {
         console.log("[SwarmChannel] Skipping recovery — storage was just cleared");
         phAny._skipSwarmRecovery = false;

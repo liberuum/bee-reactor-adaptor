@@ -126,6 +126,52 @@ export async function clearSwarmStorage(
     );
   }
 
+  // Delete every drive from the local reactor. Without this, recovery
+  // would re-pull drives from Swarm on reload even though the user just
+  // asked for a clean slate. We do this BEFORE writing the empty
+  // manifest so an interrupted clear still leaves the local state
+  // matching user intent (empty).
+  const reactorClient = phRef?.reactorClient;
+  if (reactorClient && currentManifest?.drives) {
+    for (const driveId of Object.keys(currentManifest.drives)) {
+      try {
+        await reactorClient.deleteDocument(driveId);
+        console.log(`[SwarmPlugin] Deleted local drive ${driveId.slice(0, 8)}`);
+      } catch (err) {
+        console.warn(
+          `[SwarmPlugin] deleteDocument(${driveId.slice(0, 8)}) failed:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+  }
+
+  // Set a persistent "skip recovery" window so the next page load
+  // doesn't re-pull drives from a stale Swarm feed while propagation
+  // is still catching up. Bee feed index updates can lag 30-60s after
+  // a write even though the data chunk itself is confirmed.
+  try {
+    const until = Date.now() + 5 * 60 * 1000; // 5 minutes
+    (globalThis as { window?: { localStorage?: Storage } }).window
+      ?.localStorage?.setItem("swarm:recoveryDisabledUntil", String(until));
+  } catch { /* localStorage unavailable */ }
+
+  // Wipe the collab summaries + cursors so a stale collab doesn't
+  // re-anchor to a cleared drive on reload. Chat peers + chat history
+  // are preserved by design — clearing storage shouldn't destroy
+  // conversations.
+  try {
+    const ls = (globalThis as { window?: { localStorage?: Storage } }).window
+      ?.localStorage;
+    if (ls) {
+      ls.removeItem("swarm:collabs");
+      for (let i = ls.length - 1; i >= 0; i--) {
+        const k = ls.key(i);
+        if (k && k.startsWith("swarm:collabPeerCursor:")) ls.removeItem(k);
+      }
+    }
+  } catch { /* localStorage unavailable */ }
+
   // Clear each drive manifest feed (best-effort per drive — keep going
   // if one fails, so one bad feed doesn't block clearing the rest).
   if (currentManifest?.drives) {
