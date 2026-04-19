@@ -37,6 +37,7 @@ export declare class CollabManager {
     private readonly gsoc;
     private readonly pollLoop;
     private readonly pushHook;
+    private readonly flusher;
     private readonly lifecycle;
     private readonly userManifestSync;
     private shuttingDown;
@@ -44,7 +45,15 @@ export declare class CollabManager {
     /** Optional — pass a notifier to enable GSOC op-committed pings.
      *  Pre-plugin-init paths and unit tests can omit it. */
     gsoc?: GsocNotifier | null);
-    shutdown(): void;
+    /**
+     * Stop timers, detach the global hook, and drain pending debounced
+     * feed writes. Async so callers can `await shutdown()` when they
+     * need to be sure queued ops have landed (e.g. `beforeunload`
+     * handlers). Timers are stopped first so they can't fire during or
+     * after the flush; the flush is best-effort (shutdown can't block
+     * on network).
+     */
+    shutdown(): Promise<void>;
     create(input: CreateCollabInput): Promise<CollabSummary>;
     accept(invite: CollabInviteAttachment): Promise<CollabSummary>;
     addParticipant(collabId: CollabId, peerAddress: string): Promise<CollabSummary>;

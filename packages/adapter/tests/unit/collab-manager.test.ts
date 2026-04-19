@@ -587,6 +587,16 @@ describe("CollabManager — handleLocalPush routing", () => {
   }
 
   /**
+   * Force any pending debounced batches to flush now. Tests assert on
+   * `appendBatch` calls which only fire after the 1.5s debounce OR
+   * after an explicit `flushAll`. The production flow has `shutdown`
+   * drain the queue; tests skip that and call flushAll directly.
+   */
+  async function flushNow(mgr: CollabManager): Promise<void> {
+    await (mgr as any).flusher.flushAll();
+  }
+
+  /**
    * Build an op-with-context payload authored by the test's signer.
    * PushHook filters out ops whose `action.context.signer.user.address`
    * differs from the manager's address — so simpler `{operation:{id,
@@ -660,6 +670,7 @@ describe("CollabManager — handleLocalPush routing", () => {
       scope: "global",
       branch: "main",
     });
+    await flushNow(mgr);
 
     expect(spy).toHaveBeenCalledOnce();
     expect(spy.mock.calls[0][1]).toBe("drive-shared"); // driveId
@@ -689,6 +700,7 @@ describe("CollabManager — handleLocalPush routing", () => {
       scope: "global",
       branch: "main",
     });
+    await flushNow(mgr);
     expect(spy).not.toHaveBeenCalled();
 
     await mgr.handleLocalPush({
@@ -698,6 +710,7 @@ describe("CollabManager — handleLocalPush routing", () => {
       scope: "global",
       branch: "main",
     });
+    await flushNow(mgr);
     expect(spy).toHaveBeenCalledOnce();
     mgr.shutdown();
   });
@@ -722,8 +735,51 @@ describe("CollabManager — handleLocalPush routing", () => {
         branch: "main",
       }),
     ).resolves.not.toThrow();
+    // handleLocalPush queues the batch; the failure surfaces only
+    // when the debounced flush fires (or flushAll forces it).
+    await flushNow(mgr);
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
+    mgr.shutdown();
+  });
+
+  it("coalesces rapid pushes into a single debounced feed write", async () => {
+    const mgr = new CollabManager(makeStubClient(), makeStubChat(), TEST_ADDRESS);
+    const s = mkSummary({
+      driveId: "drive-coalesce",
+      currentGranteeHistRef: "hist",
+      currentGranteeRef: "grantee",
+    });
+    storeOf(mgr).set(s.collabId, s);
+    const spy = vi
+      .spyOn(opsFeedOf(mgr), "appendBatch")
+      .mockResolvedValue({ actRef: "r", actHistoryAddress: "h", feedIndex: 0 });
+
+    // Simulate a burst of 5 edits on the same (drive, doc). In the
+    // pre-debounce world this would have triggered 5 ACT writes on
+    // the same grantee chain inside one second — the mantaray
+    // timestamp bucket collision that was silently dropping batches.
+    for (let i = 0; i < 5; i++) {
+      await mgr.handleLocalPush({
+        driveId: "drive-coalesce",
+        docId: "doc-1",
+        ops: [mkAuthoredOp(`op-${i}`, i)],
+        scope: "global",
+        branch: "main",
+      });
+    }
+
+    // Nothing flushed yet — the debounce timer is still counting.
+    expect(spy).not.toHaveBeenCalled();
+
+    // Force the flush. One write, carrying all 5 ops.
+    await flushNow(mgr);
+    expect(spy).toHaveBeenCalledOnce();
+    const batch = spy.mock.calls[0][3] as { opsJson: string };
+    const serialized = JSON.parse(batch.opsJson) as Array<{ operation: { id: string } }>;
+    expect(serialized.map((o) => o.operation.id)).toEqual(
+      ["op-0", "op-1", "op-2", "op-3", "op-4"],
+    );
     mgr.shutdown();
   });
 
@@ -749,6 +805,7 @@ describe("CollabManager — handleLocalPush routing", () => {
       scope: "global",
       branch: "main",
     });
+    await flushNow(mgr);
     expect(spy).not.toHaveBeenCalled();
 
     // Mixed batch: one peer op, one mine — only mine should make it through.
@@ -762,6 +819,7 @@ describe("CollabManager — handleLocalPush routing", () => {
       scope: "global",
       branch: "main",
     });
+    await flushNow(mgr);
     expect(spy).toHaveBeenCalledOnce();
     // Batch appended should contain only the authored op.
     const appendedBatch = spy.mock.calls[0][3] as { opsJson: string };

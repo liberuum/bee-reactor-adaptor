@@ -40,11 +40,13 @@ export declare class CollabOpsFeed {
      *  manifest feed — bee-js's auto-pick pre-read can be stale on public
      *  nodes, so we track indices ourselves and write at an explicit index. */
     private lastWrittenIndex;
-    /** Per-topic in-flight append — serializes concurrent appendBatch
-     *  calls for the same topic. Without this, two parallel calls both
-     *  see lastWrittenIndex as undefined, both do the pre-read, both
-     *  derive the same nextIndex, and both write to the same feed slot
-     *  (second overwrites first). */
+    /** Per-collab in-flight append — serializes concurrent appendBatch
+     *  calls that share an ACT grantee chain (every doc under the same
+     *  collab does). Without this, parallel writes on the same chain
+     *  collide on mantaray's 1-second timestamp bucket and one of them
+     *  becomes unreadable. Keyed by collabId because that's the
+     *  stable-per-chain identifier — granteeHistRef changes on every
+     *  write. */
     private appendInFlight;
     constructor(client: SwarmClient);
     /**

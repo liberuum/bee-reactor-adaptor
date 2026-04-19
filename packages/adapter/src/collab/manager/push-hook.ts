@@ -1,24 +1,22 @@
 /**
- * PushHook — local-push mirroring to collab feeds.
+ * PushHook — entry point for SwarmChannel's "we just pushed ops
+ * locally" callback. Filters the batch and hands off to the
+ * {@link CollabFeedFlusher}, which owns the debounced ACT feed write
+ * + GSOC ping.
  *
- * Called by SwarmChannel on every successful personal-feed push. For
- * each active collab that covers this (driveId, docId), we:
- *   1. Ensure an ACT grantee chain exists for our writes (initiator
- *      gets one at create-time; joiners lazily build one on first push).
- *   2. Append the same batch to the collab's ACT-protected per-peer
- *      feed under that grantee chain.
- *   3. Fire a best-effort GSOC ping so peers get sub-second delivery.
- *
- * Errors are logged but not thrown — the primary personal-feed push
- * already succeeded; the collab mirror retries on the next push.
+ * Why a separate module:
+ *   - This file is the one SwarmChannel talks to via
+ *     `__swarmCollabManager__.handleLocalPush`. Keeping it tiny
+ *     isolates the IPC surface from the transport details.
+ *   - Filtering (scope=document drops, self-author filter) is about
+ *     *what* to mirror; flushing is about *when*. Two clean
+ *     responsibilities, two small modules.
  */
 
-import type { SwarmClient } from "../../swarm-client.js";
 import type { OperationWithContext } from "../../swarm-operation-store.js";
-import type { CollabOpsFeed, CollabOpsBatch } from "../collab-ops-feed.js";
-import type { CollabId, CollabSummary } from "../types.js";
-import type { GsocCoordinator } from "./gsoc-coordinator.js";
-import { SummaryStore } from "./store.js";
+import type { CollabSummary } from "../types.js";
+import type { CollabFeedFlusher } from "./feed-flusher.js";
+import type { SummaryStore } from "./store.js";
 
 export interface LocalPushInput {
   driveId: string;
@@ -31,30 +29,11 @@ export interface LocalPushInput {
   branch: string;
 }
 
-/**
- * Caller-supplied way to resolve a fresh manifest read. Break the
- * import cycle between push-hook and lifecycle (which owns
- * refreshManifest) by taking the callback explicitly.
- */
-export type RefreshManifest = (
-  collabId: CollabId,
-) => Promise<CollabSummary | null>;
-
 export class PushHook {
-  /** Per-collabId in-flight grantee-chain creation. Without this,
-   *  two parallel handleLocalPush calls (e.g. SwarmChannel flushing
-   *  two docs at once) both create a fresh chain; whoever writes
-   *  summaries.set last wins, and the first writer's ops are uploaded
-   *  under an orphaned chain that peers can't decrypt. */
-  private readonly granteeChainInFlight = new Map<CollabId, Promise<string | null>>();
-
   constructor(
-    private readonly client: SwarmClient,
-    private readonly opsFeed: CollabOpsFeed,
     private readonly store: SummaryStore,
-    private readonly gsoc: GsocCoordinator,
+    private readonly flusher: CollabFeedFlusher,
     private readonly myAddress: string,
-    private readonly refreshManifest: RefreshManifest,
     private readonly isShuttingDown: () => boolean,
   ) {}
 
@@ -78,17 +57,22 @@ export class PushHook {
     // echo every received op back to the collab feed, which shows up
     // as a phantom "peer applied 1 op" row on the original sender's
     // UI and wastes bandwidth.
-    const authoredOps = input.ops.filter((o) => opAuthor(o) === this.myAddress.toLowerCase());
+    const authoredOps = input.ops.filter(
+      (o) => opAuthor(o) === this.myAddress.toLowerCase(),
+    );
     if (authoredOps.length === 0) return;
 
     const relevant = this.findCollabsCoveringDoc(input.driveId, input.docId);
     if (relevant.length === 0) return;
 
-    const startIndex = authoredOps[0]?.operation.index ?? 0;
-    const endIndex = authoredOps[authoredOps.length - 1]?.operation.index ?? 0;
-
     for (const summary of relevant) {
-      await this.mirrorToCollab(summary, { ...input, ops: authoredOps }, startIndex, endIndex);
+      this.flusher.queue(summary, {
+        driveId: input.driveId,
+        docId: input.docId,
+        ops: authoredOps,
+        scope: input.scope,
+        branch: input.branch,
+      });
     }
   }
 
@@ -109,128 +93,14 @@ export class PushHook {
     }
     return out;
   }
-
-  private async mirrorToCollab(
-    summary: CollabSummary,
-    input: LocalPushInput,
-    startIndex: number,
-    endIndex: number,
-  ): Promise<void> {
-    try {
-      const granteeHistRef = await this.ensureGranteeChainForLocalWrite(summary);
-      if (!granteeHistRef) return; // not enough info to mirror yet
-
-      const batch: CollabOpsBatch = {
-        opsJson: JSON.stringify(input.ops),
-        startIndex,
-        endIndex,
-        scope: input.scope,
-        branch: input.branch,
-        timestamp: new Date().toISOString(),
-      };
-      const writeResult = await this.opsFeed.appendBatch(
-        summary.collabId,
-        input.driveId,
-        input.docId,
-        batch,
-        granteeHistRef,
-      );
-
-      const live = this.store.get(summary.collabId);
-      if (live) {
-        this.store.set(summary.collabId, {
-          ...live,
-          lastActivityAt: new Date().toISOString(),
-        });
-      }
-
-      // Fire-and-forget GSOC ping — feed write already succeeded, the
-      // ping is a speed optimization for receivers.
-      void this.gsoc
-        .pingOpCommitted(this.store.get(summary.collabId) ?? summary, input.driveId, input.docId, {
-          ...writeResult,
-          ops: input.ops,
-          scope: input.scope,
-          branch: input.branch,
-        })
-        .catch(() => {});
-    } catch (err) {
-      console.warn(
-        `[CollabManager] mirror push failed for ${summary.collabId} doc ${input.docId.slice(0, 8)}:`,
-        err instanceof Error ? err.message : err,
-      );
-    }
-  }
-
-  /**
-   * Return a live ACT grantee-chain head for writes on this collab. For
-   * the initiator this is just the summary's `currentGranteeHistRef`.
-   * For joiners, this lazily creates a chain the first time we write,
-   * using the participant list from the manifest feed.
-   *
-   * Concurrency-safe per collabId: parallel callers await the same
-   * pending chain-creation promise instead of each creating their own.
-   */
-  private async ensureGranteeChainForLocalWrite(
-    summary: CollabSummary,
-  ): Promise<string | null> {
-    if (summary.currentGranteeHistRef) return summary.currentGranteeHistRef;
-
-    const pending = this.granteeChainInFlight.get(summary.collabId);
-    if (pending) return pending;
-
-    const promise = this.buildGranteeChain(summary);
-    this.granteeChainInFlight.set(summary.collabId, promise);
-    try {
-      return await promise;
-    } finally {
-      if (this.granteeChainInFlight.get(summary.collabId) === promise) {
-        this.granteeChainInFlight.delete(summary.collabId);
-      }
-    }
-  }
-
-  private async buildGranteeChain(
-    summary: CollabSummary,
-  ): Promise<string | null> {
-    // Re-read the summary inside the "lock" in case another caller
-    // already wrote a chain while we were queuing.
-    const live = this.store.get(summary.collabId) ?? summary;
-    if (live.currentGranteeHistRef) return live.currentGranteeHistRef;
-
-    let workingSummary = live;
-    const knownKeys = live.participants.filter((p) => p.beeNodePublicKey);
-    if (knownKeys.length < live.participants.length) {
-      const refreshed = await this.refreshManifest(live.collabId).catch(() => null);
-      if (refreshed?.currentGranteeHistRef) return refreshed.currentGranteeHistRef;
-      workingSummary = refreshed ?? this.store.get(live.collabId) ?? live;
-    }
-
-    const liveKeys = workingSummary.participants
-      .map((p) => p.beeNodePublicKey)
-      .filter((k) => !!k);
-    if (liveKeys.length < 2) return null;
-
-    const { ref, historyRef } = await this.client.createGrantees(liveKeys);
-    // ACT's 1-second rule between chain touches — don't race the next
-    // write into the same mantaray timestamp bucket.
-    await new Promise((r) => setTimeout(r, 1100));
-
-    const latest = this.store.get(workingSummary.collabId) ?? workingSummary;
-    this.store.set(workingSummary.collabId, {
-      ...latest,
-      currentGranteeRef: ref,
-      currentGranteeHistRef: historyRef,
-    });
-    return historyRef;
-  }
 }
 
 /**
  * Extract the authoring wallet address from an OperationWithContext.
- * The reactor stores the author under `action.context.signer.user.address`;
- * returns a lowercased string for stable comparison. Returns null if
- * the path isn't present (e.g. legacy ops without signer context).
+ * The reactor stores the author under
+ * `action.context.signer.user.address`; returns a lowercased string
+ * for stable comparison. Returns null if the path isn't present (e.g.
+ * legacy ops without signer context).
  */
 function opAuthor(op: OperationWithContext): string | null {
   const signer = (op as unknown as {

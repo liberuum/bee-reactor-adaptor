@@ -25,17 +25,26 @@
 import { Topic, FeedIndex } from "@ethersphere/bee-js";
 import { collabDocOpsTopic, collabDriveOpsTopic } from "./types.js";
 import { WRAPPER_BYTES, parseFeedIndex, hexToBytes32, bytes32ToHex } from "./feed-bytes.js";
+/** ACT mantaray groups writes by 1-second timestamp buckets. Two
+ *  uploadFile(act:true) calls on the same grantee chain inside one
+ *  second land at the same slot — the second silently overwrites the
+ *  first, and the original batch becomes unretrievable via its
+ *  returned actRef. We sleep this long after every ACT upload so the
+ *  next write on the same chain lands in a fresh bucket. */
+const ACT_CHAIN_COOLDOWN_MS = 1100;
 export class CollabOpsFeed {
     client;
     /** Last index we wrote per topic. Same staleness workaround as the
      *  manifest feed — bee-js's auto-pick pre-read can be stale on public
      *  nodes, so we track indices ourselves and write at an explicit index. */
     lastWrittenIndex = new Map();
-    /** Per-topic in-flight append — serializes concurrent appendBatch
-     *  calls for the same topic. Without this, two parallel calls both
-     *  see lastWrittenIndex as undefined, both do the pre-read, both
-     *  derive the same nextIndex, and both write to the same feed slot
-     *  (second overwrites first). */
+    /** Per-collab in-flight append — serializes concurrent appendBatch
+     *  calls that share an ACT grantee chain (every doc under the same
+     *  collab does). Without this, parallel writes on the same chain
+     *  collide on mantaray's 1-second timestamp bucket and one of them
+     *  becomes unreadable. Keyed by collabId because that's the
+     *  stable-per-chain identifier — granteeHistRef changes on every
+     *  write. */
     appendInFlight = new Map();
     constructor(client) {
         this.client = client;
@@ -68,19 +77,21 @@ export class CollabOpsFeed {
     async appendBatch(collabId, driveId, documentId, batch, granteeHistRef) {
         const topic = CollabOpsFeed.topicFor(collabId, driveId, documentId);
         const topicHex = topic.toHex();
-        // Per-topic serialization: chain on any in-flight append for this
-        // topic. This protects the lastWrittenIndex cache + the feed write
-        // from TOCTOU races when two handleLocalPush calls fire in parallel
-        // for the same doc.
-        const prev = this.appendInFlight.get(topicHex) ?? Promise.resolve();
+        // Per-collab (= per-chain) serialization: chain on any in-flight
+        // append for this collab. Two benefits:
+        //   1. Protects lastWrittenIndex + feed SOC slot from TOCTOU races.
+        //   2. Enforces the mantaray 1-sec cooldown between ACT writes on
+        //      the shared grantee chain — without it, parallel batches on
+        //      different docs of the same collab collide silently.
+        const prev = this.appendInFlight.get(collabId) ?? Promise.resolve();
         const next = prev.then(() => this.appendBatchLocked(topic, topicHex, batch, granteeHistRef), () => this.appendBatchLocked(topic, topicHex, batch, granteeHistRef));
-        this.appendInFlight.set(topicHex, next);
+        this.appendInFlight.set(collabId, next);
         try {
             return await next;
         }
         finally {
-            if (this.appendInFlight.get(topicHex) === next) {
-                this.appendInFlight.delete(topicHex);
+            if (this.appendInFlight.get(collabId) === next) {
+                this.appendInFlight.delete(collabId);
             }
         }
     }
@@ -93,6 +104,12 @@ export class CollabOpsFeed {
             skipEncryption: true, // ACT handles it
         });
         const actHist = historyAddress ?? granteeHistRef;
+        // Cool down before returning so the NEXT appendBatch on the same
+        // collab chain (serialized through our `appendInFlight` map) lands
+        // in a fresh mantaray timestamp bucket. Without this, rapid edits
+        // collide and batches become unretrievable via their returned
+        // actRef — peers see the feed entry but get 404 on /bzz fetch.
+        await new Promise((r) => setTimeout(r, ACT_CHAIN_COOLDOWN_MS));
         // Wrapper chunk: [actRef (32B) || actHist (32B)]. Uploaded plaintext so
         // the feed reader can read {actRef, actHist} pair without pre-shared state.
         const wrapper = new Uint8Array(WRAPPER_BYTES);

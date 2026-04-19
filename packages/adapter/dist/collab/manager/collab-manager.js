@@ -24,6 +24,7 @@
 import { CollabOpsFeed } from "../collab-ops-feed.js";
 import { ApplyPipeline } from "./apply-pipeline.js";
 import { CollabEventBus } from "./event-bus.js";
+import { CollabFeedFlusher } from "./feed-flusher.js";
 import { GsocCoordinator } from "./gsoc-coordinator.js";
 import { CollabLifecycle } from "./lifecycle.js";
 import { PollLoop } from "./poll-loop.js";
@@ -39,6 +40,7 @@ export class CollabManager {
     gsoc;
     pollLoop;
     pushHook;
+    flusher;
     lifecycle;
     userManifestSync;
     shuttingDown = false;
@@ -60,7 +62,14 @@ export class CollabManager {
         this.lifecycle = new CollabLifecycle(client, chat, myAddress, this.store, this.events, this.gsoc, this.userManifestSync);
         this.userManifestSync.wireManifestFeed(this.lifecycle.getManifestFeed());
         this.pollLoop = new PollLoop(this.store, this.opsFeed, this.applyPipeline, this.gsoc, myAddress, isShuttingDown);
-        this.pushHook = new PushHook(client, this.opsFeed, this.store, this.gsoc, myAddress, (collabId) => this.lifecycle.refreshManifest(collabId), isShuttingDown);
+        // Feed writes are debounced through this flusher — the reason
+        // chat is reliable (see ChatManager.queueMessageForHistory). Every
+        // local push queues here, a 1.5s timer coalesces bursts into one
+        // ACT write, and the ping fires after the write with a valid
+        // `actRef`. Kills the mantaray-1-sec-bucket race that was silently
+        // dropping batches under rapid typing.
+        this.flusher = new CollabFeedFlusher(client, this.opsFeed, this.store, this.gsoc, (collabId) => this.lifecycle.refreshManifest(collabId));
+        this.pushHook = new PushHook(this.store, this.flusher, myAddress, isShuttingDown);
         this.pollLoop.start();
         // Install the push hook so SwarmChannel can notify us on every
         // local op flush. Stable global so channels created before this
@@ -85,7 +94,15 @@ export class CollabManager {
         // backfills from Swarm. Runs in background, not awaited.
         void this.userManifestSync.rehydrate();
     }
-    shutdown() {
+    /**
+     * Stop timers, detach the global hook, and drain pending debounced
+     * feed writes. Async so callers can `await shutdown()` when they
+     * need to be sure queued ops have landed (e.g. `beforeunload`
+     * handlers). Timers are stopped first so they can't fire during or
+     * after the flush; the flush is best-effort (shutdown can't block
+     * on network).
+     */
+    async shutdown() {
         this.shuttingDown = true;
         this.pollLoop.shutdown();
         this.gsoc.shutdown();
@@ -93,6 +110,10 @@ export class CollabManager {
         if (g.__swarmCollabManager__ === this) {
             g.__swarmCollabManager__ = null;
         }
+        try {
+            await this.flusher.flushAll();
+        }
+        catch { /* best effort */ }
     }
     // ─── Collab lifecycle ──────────────────────────────────────────
     async create(input) {

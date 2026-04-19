@@ -35,6 +35,7 @@ import type {
 } from "../types.js";
 import { ApplyPipeline } from "./apply-pipeline.js";
 import { CollabEventBus } from "./event-bus.js";
+import { CollabFeedFlusher } from "./feed-flusher.js";
 import { GsocCoordinator } from "./gsoc-coordinator.js";
 import type { CollabManagerHook } from "./host-types.js";
 import { CollabLifecycle, type CreateCollabInput } from "./lifecycle.js";
@@ -59,6 +60,7 @@ export class CollabManager {
   private readonly gsoc: GsocCoordinator;
   private readonly pollLoop: PollLoop;
   private readonly pushHook: PushHook;
+  private readonly flusher: CollabFeedFlusher;
   private readonly lifecycle: CollabLifecycle;
   private readonly userManifestSync: UserManifestSync;
 
@@ -127,13 +129,24 @@ export class CollabManager {
       isShuttingDown,
     );
 
-    this.pushHook = new PushHook(
+    // Feed writes are debounced through this flusher — the reason
+    // chat is reliable (see ChatManager.queueMessageForHistory). Every
+    // local push queues here, a 1.5s timer coalesces bursts into one
+    // ACT write, and the ping fires after the write with a valid
+    // `actRef`. Kills the mantaray-1-sec-bucket race that was silently
+    // dropping batches under rapid typing.
+    this.flusher = new CollabFeedFlusher(
       client,
       this.opsFeed,
       this.store,
       this.gsoc,
-      myAddress,
       (collabId) => this.lifecycle.refreshManifest(collabId),
+    );
+
+    this.pushHook = new PushHook(
+      this.store,
+      this.flusher,
+      myAddress,
       isShuttingDown,
     );
 
@@ -163,7 +176,15 @@ export class CollabManager {
     void this.userManifestSync.rehydrate();
   }
 
-  shutdown(): void {
+  /**
+   * Stop timers, detach the global hook, and drain pending debounced
+   * feed writes. Async so callers can `await shutdown()` when they
+   * need to be sure queued ops have landed (e.g. `beforeunload`
+   * handlers). Timers are stopped first so they can't fire during or
+   * after the flush; the flush is best-effort (shutdown can't block
+   * on network).
+   */
+  async shutdown(): Promise<void> {
     this.shuttingDown = true;
     this.pollLoop.shutdown();
     this.gsoc.shutdown();
@@ -171,6 +192,9 @@ export class CollabManager {
     if (g.__swarmCollabManager__ === (this as unknown as CollabManagerHook)) {
       g.__swarmCollabManager__ = null;
     }
+    try {
+      await this.flusher.flushAll();
+    } catch { /* best effort */ }
   }
 
   // ─── Collab lifecycle ──────────────────────────────────────────
