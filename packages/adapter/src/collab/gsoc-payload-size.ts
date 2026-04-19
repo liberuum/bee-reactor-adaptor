@@ -49,7 +49,7 @@ export interface OpsFitCheck {
  * handleLocalPush tick, and unit-testable without a Bee node.
  */
 export function checkOpsFit(
-  ops: unknown[] | null | undefined,
+  ops: readonly unknown[] | null | undefined,
   scope = "global",
   branch = "main",
 ): OpsFitCheck {

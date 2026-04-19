@@ -394,10 +394,17 @@ export async function shareDocumentsWithUser(
  * @param opts.cacheKey - sessionStorage key so repeated imports of the
  *                       same share reuse the already-created drive
  * @param opts.displayName - Name shown to the user in the drive list
+ * @param opts.preserveIds - Collab-accept path: reuse the sender's drive
+ *   and doc IDs instead of minting fresh ones. Required for live collab
+ *   so both sides agree on the feed-topic IDs and reactor doc IDs.
  */
 export async function applyDocumentBundle(
   bundleData: Uint8Array,
-  opts: { cacheKey: string; displayName: string },
+  opts: {
+    cacheKey: string;
+    displayName: string;
+    preserveIds?: { driveId: string };
+  },
 ): Promise<{ success: boolean; driveId?: string; imported: string[]; error?: string }> {
   const ph = (globalThis as any).window?.ph;
   const reactorClient = ph?.reactorClient;
@@ -406,6 +413,7 @@ export async function applyDocumentBundle(
   }
 
   const { addDrive } = await import("@powerhousedao/reactor-browser");
+  const { driveCreateDocument } = await import("@powerhousedao/shared/document-drive");
 
   let bundleRaw: any;
   try {
@@ -426,20 +434,49 @@ export async function applyDocumentBundle(
   const bundlePreferredEditor: string | undefined = bundleRaw.preferredEditor;
   const bundleDocFolders: Record<string, string> = bundleRaw.docFolders ?? {};
 
-  // Reuse an existing import drive if we've processed this share before
+  // Reuse an existing import drive if we've processed this share before,
+  // or if preserveIds is set and the drive with that canonical ID already
+  // exists locally (receiver rejoining a collab they previously accepted).
   let localDriveId: string | undefined;
-  try {
-    const cached = sessionStorage.getItem(opts.cacheKey);
-    if (cached) {
-      await reactorClient.get(cached);
-      localDriveId = cached;
-    }
-  } catch { /* fall through to create */ }
+  if (opts.preserveIds?.driveId) {
+    // Canonical-ID path: if the drive already exists under that ID we're
+    // rejoining a collab; otherwise fall through to the create branch
+    // below which will mint it with this exact ID. Never consult the
+    // sessionStorage cache in this mode — a stale entry could point to a
+    // locally-minted drive ID that mismatches the canonical one.
+    try {
+      await reactorClient.get(opts.preserveIds.driveId);
+      localDriveId = opts.preserveIds.driveId;
+    } catch { /* doesn't exist yet — fall through to create */ }
+  } else {
+    try {
+      const cached = sessionStorage.getItem(opts.cacheKey);
+      if (cached) {
+        await reactorClient.get(cached);
+        localDriveId = cached;
+      }
+    } catch { /* fall through to create */ }
+  }
 
   if (!localDriveId) {
     try {
-      const d = await addDrive({ global: { name: opts.displayName } }, bundlePreferredEditor);
-      localDriveId = d?.header?.id;
+      if (opts.preserveIds?.driveId) {
+        // Collab-accept: create a drive with the sender's canonical ID so
+        // both sides read/write the same collab feed topics.
+        const driveDoc = driveCreateDocument({
+          global: { name: opts.displayName || "", icon: null, nodes: [] },
+        });
+        driveDoc.header.id = opts.preserveIds.driveId;
+        driveDoc.header.slug = opts.preserveIds.driveId;
+        if (bundlePreferredEditor) {
+          driveDoc.header.meta = { preferredEditor: bundlePreferredEditor };
+        }
+        const d = await reactorClient.create(driveDoc);
+        localDriveId = d?.header?.id ?? opts.preserveIds.driveId;
+      } else {
+        const d = await addDrive({ global: { name: opts.displayName } }, bundlePreferredEditor);
+        localDriveId = d?.header?.id;
+      }
       if (!localDriveId) {
         return { success: false, imported: [], error: "Failed to create drive." };
       }
@@ -494,25 +531,41 @@ export async function applyDocumentBundle(
         continue;
       }
       const initialState = docModelModule.utils.createState();
-      const newDocId = crypto.randomUUID();
-      const shellDoc = {
-        header: {
-          id: newDocId,
-          documentType,
-          name: docName || origDocId,
-          slug: newDocId,
-          branch: "main",
-          createdAtUtcIso: new Date().toISOString(),
-          lastModifiedAtUtcIso: new Date().toISOString(),
-          revision: { global: 0 },
-          sig: { publicKey: "", nonce: "" },
-        },
-        state: initialState,
-        initialState,
-        operations: { global: [], local: [] },
-      };
-
-      await reactorClient.createDocumentInDrive(localDriveId, shellDoc);
+      // preserveIds (collab-accept path) keeps the sender's doc ID so
+      // reactor.load on incoming ops targets the same doc ID that the
+      // sender used when emitting them. For regular sharing we mint a
+      // fresh ID so multi-share recipients don't collide on each other.
+      const newDocId = opts.preserveIds ? origDocId : crypto.randomUUID();
+      // If preserveIds and the doc already exists locally (receiver
+      // rejoining), skip re-creation — execute() is idempotent by opId
+      // so we could technically re-apply ops, but we avoid a duplicate
+      // createDocumentInDrive call that would throw.
+      let alreadyExists = false;
+      if (opts.preserveIds) {
+        try {
+          await reactorClient.get(newDocId);
+          alreadyExists = true;
+        } catch { /* expected if new */ }
+      }
+      if (!alreadyExists) {
+        const shellDoc = {
+          header: {
+            id: newDocId,
+            documentType,
+            name: docName || origDocId,
+            slug: newDocId,
+            branch: "main",
+            createdAtUtcIso: new Date().toISOString(),
+            lastModifiedAtUtcIso: new Date().toISOString(),
+            revision: { global: 0 },
+            sig: { publicKey: "", nonce: "" },
+          },
+          state: initialState,
+          initialState,
+          operations: { global: [], local: [] },
+        };
+        await reactorClient.createDocumentInDrive(localDriveId, shellDoc);
+      }
       if (userOps.length > 0) {
         await reactorClient.execute(newDocId, "main", userOps);
       }

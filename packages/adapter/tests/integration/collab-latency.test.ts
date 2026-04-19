@@ -24,7 +24,7 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { Bee } from "@ethersphere/bee-js";
 import { SwarmClient } from "../../src/swarm-client.js";
-import { CollabManager } from "../../src/collab/collab-manager.js";
+import { CollabManager } from "../../src/collab/manager/index.js";
 import { GsocNotifier } from "../../src/chat/gsoc-notifier.js";
 import { CollabManifestFeed } from "../../src/collab/collab-manifest-feed.js";
 import type { CollabSummary, CollabParticipant } from "../../src/collab/types.js";
@@ -202,8 +202,8 @@ describe("Collab end-to-end latency", () => {
       status: "active",
     };
     const summaryB: CollabSummary = { ...summaryA };
-    (managerA as any).summaries.set(collabId, summaryA);
-    (managerB as any).summaries.set(collabId, summaryB);
+    (managerA as any).store.set(collabId, summaryA);
+    (managerB as any).store.set(collabId, summaryB);
 
     return { managerA, managerB };
   }
@@ -217,11 +217,17 @@ describe("Collab end-to-end latency", () => {
     try {
       let loadCalledAt = 0;
       (globalThis as any).window.ph = {
-        reactorClient: {
-          load: async (d: string, br: string, ops: any[]) => {
-            loadCalledAt = Date.now();
-            void d; void br; void ops;
+        reactorClientModule: {
+          reactorModule: {
+            reactor: {
+              load: async (d: string, br: string, ops: any[]) => {
+                loadCalledAt = Date.now();
+                void d; void br; void ops;
+              },
+            },
           },
+        },
+        reactorClient: {
           get: async () => ({ state: { global: { nodes: [] } } }),
         },
       };
@@ -260,24 +266,30 @@ describe("Collab end-to-end latency", () => {
     try {
       let loadCalledAt = 0;
       (globalThis as any).window.ph = {
-        reactorClient: {
-          load: async (d: string, br: string, ops: any[]) => {
-            loadCalledAt = Date.now();
-            void d; void br; void ops;
+        reactorClientModule: {
+          reactorModule: {
+            reactor: {
+              load: async (d: string, br: string, ops: any[]) => {
+                loadCalledAt = Date.now();
+                void d; void br; void ops;
+              },
+            },
           },
+        },
+        reactorClient: {
           get: async () => ({ state: { global: { nodes: [] } } }),
         },
       };
 
       // Give GSOC provisioning time to complete on both sides before
-      // measuring. provisionOutboundGsoc is kicked off by the pair
+      // measuring. gsoc.provisionOutbound is kicked off by the pair
       // setup indirectly — but to be thorough, call it explicitly here
       // so mining + profile publish happen before the test body runs.
-      await (managerA as any).provisionOutboundGsoc(collabId, [
+      await (managerA as any).gsoc.provisionOutbound(collabId, [
         { address: addrA, beeNodePublicKey: beePubA, joinedAt: "" },
         { address: addrB, beeNodePublicKey: beePubB, joinedAt: "" },
       ]);
-      await (managerB as any).provisionOutboundGsoc(collabId, [
+      await (managerB as any).gsoc.provisionOutbound(collabId, [
         { address: addrA, beeNodePublicKey: beePubA, joinedAt: "" },
         { address: addrB, beeNodePublicKey: beePubB, joinedAt: "" },
       ]);
@@ -286,8 +298,8 @@ describe("Collab end-to-end latency", () => {
       await new Promise((r) => setTimeout(r, 8_000));
 
       // B subscribes to A's outbound-to-B GSOC.
-      const summaryB = (managerB as any).summaries.get(collabId);
-      await (managerB as any).subscribeToPeerGsoc(summaryB);
+      const summaryB = (managerB as any).store.get(collabId);
+      await (managerB as any).gsoc.subscribeToPeers(summaryB);
       // Brief wait so the WebSocket is established.
       await new Promise((r) => setTimeout(r, 2_000));
 
@@ -329,25 +341,31 @@ describe("Collab end-to-end latency", () => {
     try {
       let loadCalledAt = 0;
       (globalThis as any).window.ph = {
-        reactorClient: {
-          load: async (d: string, br: string, ops: any[]) => {
-            loadCalledAt = Date.now();
-            void d; void br; void ops;
+        reactorClientModule: {
+          reactorModule: {
+            reactor: {
+              load: async (d: string, br: string, ops: any[]) => {
+                loadCalledAt = Date.now();
+                void d; void br; void ops;
+              },
+            },
           },
+        },
+        reactorClient: {
           get: async () => ({ state: { global: { nodes: [] } } }),
         },
       };
-      await (managerA as any).provisionOutboundGsoc(collabId, [
+      await (managerA as any).gsoc.provisionOutbound(collabId, [
         { address: addrA, beeNodePublicKey: beePubA, joinedAt: "" },
         { address: addrB, beeNodePublicKey: beePubB, joinedAt: "" },
       ]);
-      await (managerB as any).provisionOutboundGsoc(collabId, [
+      await (managerB as any).gsoc.provisionOutbound(collabId, [
         { address: addrA, beeNodePublicKey: beePubA, joinedAt: "" },
         { address: addrB, beeNodePublicKey: beePubB, joinedAt: "" },
       ]);
       await new Promise((r) => setTimeout(r, 8_000));
-      const summaryB = (managerB as any).summaries.get(collabId);
-      await (managerB as any).subscribeToPeerGsoc(summaryB);
+      const summaryB = (managerB as any).store.get(collabId);
+      await (managerB as any).gsoc.subscribeToPeers(summaryB);
       await new Promise((r) => setTimeout(r, 2_000));
 
       // Build ops that exceed the inline budget (10KB blob). The ping

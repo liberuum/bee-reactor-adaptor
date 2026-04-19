@@ -15,7 +15,7 @@ import type {
 import type { PHDocumentHeader } from "document-model";
 import type { SwarmClient } from "../swarm-client.js";
 import { ChatManager } from "../chat/chat-manager.js";
-import { CollabManager } from "../collab/collab-manager.js";
+import { CollabManager } from "../collab/manager/index.js";
 import { SwarmConnectPlugin } from "../connect-plugin.js";
 import { state, setSwarmStatus, getUploadedBytes, persistBeeUrl, loadDriveMapping } from "./state.js";
 import { loadManifestIndex, clearSwarmStorage } from "./storage.js";

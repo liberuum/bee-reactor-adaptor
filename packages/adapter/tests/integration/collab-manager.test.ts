@@ -16,7 +16,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { Bee } from "@ethersphere/bee-js";
 import { SwarmClient } from "../../src/swarm-client.js";
-import { CollabManager } from "../../src/collab/collab-manager.js";
+import { CollabManager } from "../../src/collab/manager/index.js";
 import type { CollabSummary } from "../../src/collab/types.js";
 import { buildCollabId } from "../../src/collab/types.js";
 
@@ -70,11 +70,20 @@ function installLocalStorageShim() {
 function installPhStub(loadSpy: (docId: string, branch: string, ops: any[]) => void) {
   const g = globalThis as any;
   g.window = g.window ?? {};
+  // IReactor.load() is on `reactorClientModule.reactorModule.reactor` in
+  // Connect — mirror that layout so the manager's reactor-bridge resolves
+  // to our spy. `reactorClient.get` is kept for listDocIdsInDrive.
   g.window.ph = {
-    reactorClient: {
-      load: async (docId: string, branch: string, ops: any[]) => {
-        loadSpy(docId, branch, ops);
+    reactorClientModule: {
+      reactorModule: {
+        reactor: {
+          load: async (docId: string, branch: string, ops: any[]) => {
+            loadSpy(docId, branch, ops);
+          },
+        },
       },
+    },
+    reactorClient: {
       get: async (driveId: string) => ({
         state: { global: { nodes: [] } },
         header: { id: driveId, name: "stub-drive" },
@@ -176,8 +185,8 @@ describe("CollabManager: push + pull round trip", () => {
     // Direct injection into the managers' private summaries map — the
     // intent is to skip the invite handshake (which needs a full
     // ChatManager + reactor) and exercise just the data plane.
-    (managerA as any).summaries.set(collabId, summaryA);
-    (managerB as any).summaries.set(collabId, summaryB);
+    (managerA as any).store.set(collabId, summaryA);
+    (managerB as any).store.set(collabId, summaryB);
 
     // Stub B's reactor.load so the poll loop's apply path captures calls.
     const loadCalls: Array<{ docId: string; branch: string; ops: any[] }> = [];
@@ -344,7 +353,7 @@ describe("CollabManager: push + pull round trip", () => {
       }, historyRef);
       await new Promise((r) => setTimeout(r, 1100));
 
-      (managerA as any).summaries.set(collabId, {
+      (managerA as any).store.set(collabId, {
         collabId,
         kind: "drive",
         driveId,
@@ -387,7 +396,7 @@ describe("CollabManager: push + pull round trip", () => {
     };
     const mgr = new CollabManager(clientA, chatStub, addrA);
     const fakeId = buildCollabId("drive", `drive-leave-${Date.now()}`);
-    (mgr as any).summaries.set(fakeId, {
+    (mgr as any).store.set(fakeId, {
       collabId: fakeId,
       kind: "drive",
       driveId: fakeId.slice("drive:".length),
@@ -400,7 +409,7 @@ describe("CollabManager: push + pull round trip", () => {
       lastActivityAt: new Date().toISOString(),
       status: "active",
     });
-    (mgr as any).persist();
+    (mgr as any).store.persist();
 
     await mgr.leave(fakeId);
 
