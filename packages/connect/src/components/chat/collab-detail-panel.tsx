@@ -141,7 +141,7 @@ export function CollabDetailPanel({
       if (parsed.invalid.length > 0) {
         setError(`Couldn't parse ${parsed.invalid.length} address${parsed.invalid.length === 1 ? "" : "es"} — check they start with 0x and have 40 hex chars.`);
       } else {
-        setError("Paste a peer address starting with 0x.");
+        setError("Paste a Swarm ID starting with 0x.");
       }
       return;
     }
@@ -349,7 +349,7 @@ export function CollabDetailPanel({
                         handleAdd();
                       }
                     }}
-                    placeholder="0x… peer address(es)"
+                    placeholder="0x… Swarm ID(s)"
                     disabled={addBusy}
                     className="flex-1 rounded-md border border-gray-300 bg-white px-2.5 py-1.5 font-mono text-[12px] outline-none focus:border-blue-400 disabled:opacity-60"
                     autoFocus

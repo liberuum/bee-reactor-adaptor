@@ -170,7 +170,7 @@ export function CollaborateList({
             </kbd>
           </button>
           <p className="mt-2.5 text-[11px] leading-snug text-gray-400">
-            Pick a drive and invite peers by their <strong className="text-gray-600">peer address</strong>.
+            Pick a drive and invite peers by their <strong className="text-gray-600">Swarm ID</strong>.
             They'll get a one-click invite in chat.
           </p>
         </div>
@@ -675,7 +675,7 @@ function CollabCreatePicker({
                 onKeyDown={(e) => {
                   if (e.key === "Enter") { e.preventDefault(); addManual(); }
                 }}
-                placeholder="0x… peer address(es) — paste several, comma or newline separated"
+                placeholder="0x… Swarm ID(s) — paste several, comma or newline separated"
                 className="flex-1 rounded-md border border-gray-300 bg-white px-2.5 py-1.5 font-mono text-[12px] outline-none focus:border-blue-400"
               />
               <button

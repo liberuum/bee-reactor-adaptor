@@ -126,8 +126,8 @@ export function ConversationList({
               </div>
             )}
             <p className="mt-2.5 text-[11px] leading-snug text-gray-400">
-              Paste the peer's <strong className="text-gray-600">peer address</strong> (not a wallet address).
-              They can find theirs under Settings → Swarm → Your peer address.
+              Paste the peer's <strong className="text-gray-600">Swarm ID</strong> — not a wallet address.
+              Share yours with them from the card above.
             </p>
           </div>
         </div>
@@ -322,7 +322,7 @@ function MySwarmIdCard() {
   return (
     <div>
       <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-gray-400">
-        Your peer address
+        Your Swarm ID
       </h3>
       <button
         type="button"
