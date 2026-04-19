@@ -16,8 +16,8 @@ import { ShareManager } from "./share-manager.js";
  * Sharing and profiles are delegated to ShareManager.
  */
 export declare class SwarmClient {
-    private readonly bee;
-    private readonly batchId;
+    readonly bee: Bee;
+    readonly batchId: string;
     private readonly useFeedMode;
     private readonly feedTopicPrefix;
     /** The wallet-derived key used for app-layer AES-256-GCM encryption */
@@ -335,6 +335,13 @@ export declare class SwarmClient {
      * via /bzz with ACT headers rather than /bytes.
      */
     readFeedReference(topic: Topic, ownerAddress: string): Promise<string | null>;
+    /**
+     * Write a /bytes reference to a feed at an explicit index. Used by
+     * callers that manage their own index counter — bee-js's auto-pick
+     * relies on a pre-read that is eventually-consistent on public nodes,
+     * so back-to-back writes can collide on the same index.
+     */
+    writeFeedPayloadAtIndex(topic: Topic, payload: string, index: number): Promise<void>;
     /**
      * Write a /bytes reference to a feed using the native reference format.
      * Uses uploadReference (32-byte binary) — 69% smaller SOC than the legacy

@@ -1,5 +1,5 @@
 import { ChatManager } from "../chat/chat-manager.js";
-import { CollabManager } from "../collab/collab-manager.js";
+import { CollabManager } from "../collab/manager/index.js";
 import { SwarmConnectPlugin } from "../connect-plugin.js";
 import { state, setSwarmStatus, getUploadedBytes, persistBeeUrl, loadDriveMapping } from "./state.js";
 import { loadManifestIndex, clearSwarmStorage } from "./storage.js";
@@ -53,7 +53,12 @@ async function initChatManager(beeUrl, plugin, stampBatchId) {
         const bee = new Bee(beeUrl);
         const ownerAddress = swarmClient.getOwnerAddress();
         const chatManager = new ChatManager(swarmClient, bee, stampBatchId, ownerAddress);
-        const collabManager = new CollabManager(swarmClient, chatManager, ownerAddress);
+        // Dedicated GSOC notifier for collab op-committed pings. Using its
+        // own instance keeps collab subscriptions (under the `collab-notify`
+        // identifier prefix) from cross-talking with chat's notifier.
+        const { GsocNotifier } = await import("../chat/gsoc-notifier.js");
+        const collabGsoc = new GsocNotifier(bee, stampBatchId, ownerAddress);
+        const collabManager = new CollabManager(swarmClient, chatManager, ownerAddress, collabGsoc);
         if (phAfterStart.swarm) {
             phAfterStart.swarm.chat = { manager: chatManager };
             phAfterStart.swarm.collab = { manager: collabManager };

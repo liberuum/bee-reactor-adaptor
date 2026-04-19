@@ -11,7 +11,7 @@
  * the Swarm-specific metadata that enables recovery on a new device.
  */
 import type { SwarmClient } from "../swarm-client.js";
-import type { SwarmUserManifest } from "../types.js";
+import type { SwarmUserManifest, UserCollabEntry } from "../types.js";
 /**
  * Read the user manifest, preferring our in-process cache from the last
  * successful write. Falls back to Swarm when no cache entry exists.
@@ -60,6 +60,27 @@ export declare function ensureChatPeerInUserManifest(client: SwarmClient, ownerA
  * on Swarm; we simply stop advertising that they exist).
  */
 export declare function clearChatPeersInUserManifest(client: SwarmClient, ownerAddress: string): Promise<void>;
+/**
+ * Upsert a collab entry on the user manifest. Idempotent: updates the
+ * entry in place if the collabId already exists. Serialized through the
+ * same per-owner mutex as drive + chat-peer writes so concurrent
+ * create/accept calls on a fresh browser can't clobber each other.
+ */
+export declare function ensureCollabInUserManifest(client: SwarmClient, ownerAddress: string, entry: UserCollabEntry): Promise<void>;
+/**
+ * Remove a collab entry from the user manifest. Used on `leave()` so a
+ * fresh-browser recovery doesn't re-surface a collab the user has
+ * opted out of. Does NOT affect the collab's manifest feed (the
+ * initiator still lists this user as a participant until they
+ * explicitly revoke).
+ */
+export declare function removeCollabFromUserManifest(client: SwarmClient, ownerAddress: string, collabId: string): Promise<void>;
+/**
+ * Return the user manifest's current collab registry, or an empty
+ * object if the feed hasn't been populated yet. Used by CollabManager's
+ * boot-time rehydrate path.
+ */
+export declare function listCollabsFromUserManifest(client: SwarmClient, ownerAddress: string): Promise<Record<string, UserCollabEntry>>;
 /**
  * Reconcile the user manifest against the reactor's local drive list.
  *

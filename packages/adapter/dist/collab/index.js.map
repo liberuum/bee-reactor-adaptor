@@ -1,1 +1,1 @@
-{"version":3,"file":"index.js","sourceRoot":"","sources":["../../src/collab/index.ts"],"names":[],"mappings":"AAAA,cAAc,YAAY,CAAC;AAC3B,OAAO,EAAE,aAAa,EAAE,MAAM,qBAAqB,CAAC;AAEpD,OAAO,EAAE,aAAa,EAAE,MAAM,sBAAsB,CAAC"}
+{"version":3,"file":"index.js","sourceRoot":"","sources":["../../src/collab/index.ts"],"names":[],"mappings":"AAAA,cAAc,YAAY,CAAC;AAC3B,OAAO,EAAE,aAAa,EAAE,MAAM,oBAAoB,CAAC;AAEnD,OAAO,EAAE,aAAa,EAAE,MAAM,sBAAsB,CAAC;AAErD,OAAO,EAAE,kBAAkB,EAAE,MAAM,2BAA2B,CAAC;AAC/D,OAAO,EAAE,kBAAkB,EAAE,cAAc,EAAE,cAAc,EAAE,MAAM,oBAAoB,CAAC"}

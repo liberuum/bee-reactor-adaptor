@@ -24,87 +24,75 @@
  */
 import { Topic, FeedIndex } from "@ethersphere/bee-js";
 import { collabDocOpsTopic, collabDriveOpsTopic } from "./types.js";
-const WRAPPER_BYTES = 64;
-function hexToBytes32(hex) {
-    const clean = hex.replace(/^0x/i, "");
-    if (clean.length !== 64) {
-        throw new Error(`expected 32-byte hex, got length ${clean.length}`);
-    }
-    const bytes = new Uint8Array(32);
-    for (let i = 0; i < 32; i++) {
-        bytes[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
-    }
-    return bytes;
-}
-function bytes32ToHex(bytes, offset = 0) {
-    let out = "";
-    for (let i = 0; i < 32; i++) {
-        out += bytes[offset + i].toString(16).padStart(2, "0");
-    }
-    return out;
-}
-function parseFeedIndex(raw) {
-    if (typeof raw === "number")
-        return raw;
-    if (typeof raw !== "string")
-        return 0;
-    const hex = raw.startsWith("0x") ? raw.slice(2) : raw;
-    try {
-        return Number(BigInt("0x" + hex));
-    }
-    catch {
-        return 0;
-    }
-}
+import { WRAPPER_BYTES, parseFeedIndex, hexToBytes32, bytes32ToHex } from "./feed-bytes.js";
 export class CollabOpsFeed {
     client;
-    /** granteeRef cache keyed by `${collabId}:${driveId}[:${docId}]`. */
-    granteeCache = new Map();
+    /** Last index we wrote per topic. Same staleness workaround as the
+     *  manifest feed — bee-js's auto-pick pre-read can be stale on public
+     *  nodes, so we track indices ourselves and write at an explicit index. */
+    lastWrittenIndex = new Map();
+    /** Per-topic in-flight append — serializes concurrent appendBatch
+     *  calls for the same topic. Without this, two parallel calls both
+     *  see lastWrittenIndex as undefined, both do the pre-read, both
+     *  derive the same nextIndex, and both write to the same feed slot
+     *  (second overwrites first). */
+    appendInFlight = new Map();
     constructor(client) {
         this.client = client;
     }
     // ─── Topics ────────────────────────────────────────────────────
+    /**
+     * Resolve the Swarm feed topic for a per-peer collab ops feed.
+     *
+     * Note: production callers always pass `documentId`. Drive-level
+     * ops are stored under the doc-scoped topic with `docId === driveId`
+     * (see `handleLocalPush` + `pollSummary`'s `docIds.unshift(driveId)`).
+     * The `documentId`-omitted branch is retained for future flexibility
+     * and is exercised by the unit test.
+     */
     static topicFor(collabId, driveId, documentId) {
         const raw = documentId
             ? collabDocOpsTopic(collabId, driveId, documentId)
             : collabDriveOpsTopic(collabId, driveId);
         return Topic.fromString(raw);
     }
-    // ─── Grantee management ────────────────────────────────────────
-    /**
-     * Ensure a grantee list exists for this collab feed. Cached per
-     * (collabId, driveId, docId?) because the same grantee chain covers every
-     * write to the same feed (participants only change when the manifest is
-     * rewritten, which is a future milestone).
-     */
-    async ensureGrantees(key, granteeBeePubKeys) {
-        const cached = this.granteeCache.get(key);
-        if (cached)
-            return cached;
-        const { ref: granteeRef, historyRef: granteeHistRef } = await this.client.createGrantees(granteeBeePubKeys);
-        const record = { granteeRef, granteeHistRef };
-        this.granteeCache.set(key, record);
-        // ACT has a 1-second rule: the grantee list must exist for >= 1s before
-        // it can be used as an actHistoryAddress. Match chat-history.ts.
-        await new Promise((r) => setTimeout(r, 1100));
-        return record;
-    }
     // ─── Write side ────────────────────────────────────────────────
     /**
      * Append a batch of ops to this writer's per-collab feed.
      *
-     * @param granteeBeePubKeys - every participant's Bee node pubkey (including self).
+     * @param granteeHistRef ACT grantee-chain head that the caller has
+     *        already created (via SwarmClient.createGrantees). The caller
+     *        (CollabManager) owns this lifecycle so revocation can rotate
+     *        the chain without losing track of it.
      */
-    async appendBatch(collabId, driveId, documentId, batch, granteeBeePubKeys) {
-        const key = `${collabId}:${driveId}:${documentId ?? "_drive"}`;
-        const grantees = await this.ensureGrantees(key, granteeBeePubKeys);
-        // Upload ACT-protected batch payload to /bzz.
+    async appendBatch(collabId, driveId, documentId, batch, granteeHistRef) {
+        const topic = CollabOpsFeed.topicFor(collabId, driveId, documentId);
+        const topicHex = topic.toHex();
+        // Per-topic serialization: chain on any in-flight append for this
+        // topic. This protects the lastWrittenIndex cache + the feed write
+        // from TOCTOU races when two handleLocalPush calls fire in parallel
+        // for the same doc.
+        const prev = this.appendInFlight.get(topicHex) ?? Promise.resolve();
+        const next = prev.then(() => this.appendBatchLocked(topic, topicHex, batch, granteeHistRef), () => this.appendBatchLocked(topic, topicHex, batch, granteeHistRef));
+        this.appendInFlight.set(topicHex, next);
+        try {
+            return await next;
+        }
+        finally {
+            if (this.appendInFlight.get(topicHex) === next) {
+                this.appendInFlight.delete(topicHex);
+            }
+        }
+    }
+    async appendBatchLocked(topic, topicHex, batch, granteeHistRef) {
+        // Upload ACT-protected batch payload to /bzz. ACT chains the data
+        // to the current grantee list so only participants can decrypt.
         const { reference: actRef, historyAddress } = await this.client.uploadFile(JSON.stringify(batch), {
             act: true,
-            actHistoryAddress: grantees.granteeHistRef,
+            actHistoryAddress: granteeHistRef,
             skipEncryption: true, // ACT handles it
         });
-        const actHist = historyAddress ?? grantees.granteeHistRef;
+        const actHist = historyAddress ?? granteeHistRef;
         // Wrapper chunk: [actRef (32B) || actHist (32B)]. Uploaded plaintext so
         // the feed reader can read {actRef, actHist} pair without pre-shared state.
         const wrapper = new Uint8Array(WRAPPER_BYTES);
@@ -113,10 +101,52 @@ export class CollabOpsFeed {
         const { reference: wrapperRef } = await this.client.uploadData(wrapper, {
             skipEncryption: true,
         });
-        // Feed write. The feed is owned by the writer's Swarm signer, so only
-        // this participant can append here; other participants read it.
-        const topic = CollabOpsFeed.topicFor(collabId, driveId, documentId);
-        await this.client.writeFeedPayload(topic, wrapperRef);
+        // Feed write at an explicit index (bee-js auto-pick can be stale
+        // on public nodes, producing two writes at the same SOC slot).
+        let nextIndex = this.lastWrittenIndex.get(topicHex);
+        if (nextIndex === undefined) {
+            const reader = this.client.bee.makeFeedReader(topic, this.client.getOwnerAddress());
+            try {
+                const head = await reader.downloadReference();
+                nextIndex =
+                    head?.feedIndexNext !== undefined
+                        ? parseFeedIndex(head.feedIndexNext)
+                        : parseFeedIndex(head.feedIndex) + 1;
+            }
+            catch {
+                nextIndex = 0;
+            }
+        }
+        else {
+            nextIndex = nextIndex + 1;
+        }
+        await this.client.writeFeedPayloadAtIndex(topic, wrapperRef, nextIndex);
+        this.lastWrittenIndex.set(topicHex, nextIndex);
+        return { actRef, actHistoryAddress: actHist, feedIndex: nextIndex };
+    }
+    /**
+     * Fast-path download: given the actRef + actHistoryAddress carried
+     * in a GSOC `op-committed` ping, fetch the batch payload directly
+     * from /bzz — bypassing the feed read entirely. This is the main
+     * latency win, because cross-node feed propagation is slower than
+     * cross-node /bzz content-addressed retrieval.
+     *
+     * Returns null on any download/decrypt failure (chunks not yet
+     * propagated to the reader's neighborhood); caller should fall back
+     * to the feed path.
+     */
+    async fetchByRefs(actRef, actHistoryAddress, publisherBeeNodePubKey) {
+        try {
+            const data = await this.client.downloadFile(actRef, {
+                actPublisher: publisherBeeNodePubKey,
+                actHistoryAddress,
+                skipDecryption: true,
+            });
+            return JSON.parse(new TextDecoder().decode(data));
+        }
+        catch {
+            return null;
+        }
     }
     // ─── Read side ─────────────────────────────────────────────────
     /**
@@ -127,7 +157,14 @@ export class CollabOpsFeed {
         try {
             const reader = this.client.bee.makeFeedReader(topic, peerAddress);
             const result = await reader.downloadReference();
-            return parseFeedIndex(result.feedIndex);
+            const base = parseFeedIndex(result.feedIndex);
+            // Same stale-latest correction as CollabManifestFeed.readLatest.
+            if (result.feedIndexNext !== undefined) {
+                const nextIdx = parseFeedIndex(result.feedIndexNext);
+                if (nextIdx > base + 1)
+                    return nextIdx - 1;
+            }
+            return base;
         }
         catch {
             return null;

@@ -1,4 +1,4 @@
-import { Bee, Topic } from "@ethersphere/bee-js";
+import { Bee, Topic, FeedIndex } from "@ethersphere/bee-js";
 import { encrypt, decrypt, isEncrypted } from "./swarm-crypto.js";
 import { StampManager, getBzzUsdPrice } from "./stamp-manager.js";
 import { ShareManager } from "./share-manager.js";
@@ -649,6 +649,49 @@ export class SwarmClient {
         }
         catch {
             return null;
+        }
+    }
+    /**
+     * Write a /bytes reference to a feed at an explicit index. Used by
+     * callers that manage their own index counter — bee-js's auto-pick
+     * relies on a pre-read that is eventually-consistent on public nodes,
+     * so back-to-back writes can collide on the same index.
+     */
+    async writeFeedPayloadAtIndex(topic, payload, index) {
+        const topicHex = topic.toHex();
+        const pending = this.feedWriteLocks.get(topicHex);
+        if (pending)
+            await pending.catch(() => { });
+        const promise = (async () => {
+            const writer = this.bee.makeFeedWriter(topic);
+            // Pass FeedIndex explicitly — some bee-js builds accept a plain
+            // number here, others only accept the class. The FeedIndex wrapper
+            // is the stable surface across versions.
+            const feedIdx = FeedIndex.fromBigInt(BigInt(index));
+            for (let attempt = 0; attempt < 3; attempt++) {
+                try {
+                    await writer.uploadReference(this.batchId, payload, { index: feedIdx });
+                    return;
+                }
+                catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    if (msg.includes("400") || msg.includes("Bad Request")) {
+                        await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+                        continue;
+                    }
+                    throw err;
+                }
+            }
+            throw new Error("Feed write at index failed after 3 attempts");
+        })();
+        this.feedWriteLocks.set(topicHex, promise);
+        try {
+            await promise;
+        }
+        finally {
+            if (this.feedWriteLocks.get(topicHex) === promise) {
+                this.feedWriteLocks.delete(topicHex);
+            }
         }
     }
     /**

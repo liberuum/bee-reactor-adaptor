@@ -9,6 +9,9 @@
  * (participantSignerAddress, collabId, driveId[, documentId]). Every other
  * participant's SwarmChannel reads those feeds.
  */
+/** Max entries retained per collab in recentActivity. Older entries
+ *  fall off the front when new ones arrive. */
+export const RECENT_ACTIVITY_MAX = 20;
 // ─── Swarm topic helpers ──────────────────────────────────────────
 /** Stable string ID from kind + ids, used in feed topics + localStorage keys. */
 export function buildCollabId(kind, driveId, documentId) {

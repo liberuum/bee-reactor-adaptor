@@ -21,6 +21,10 @@ export declare class GsocNotifier {
     private readonly myAddress;
     /** Cache of mined signers per peer overlay (mining takes 10-30s) */
     private minedSigners;
+    /** Cache for mineSignerWithIdentifier, keyed by `${overlay}:${identifierRaw}`.
+     *  Mining is deterministic per (overlay, identifier) + proximity,
+     *  and the output is stable — no point re-mining within a session. */
+    private minedWithIdentifier;
     private subscriptions;
     constructor(bee: Bee, batchId: string, myAddress: string);
     /**
@@ -34,6 +38,44 @@ export declare class GsocNotifier {
      * @returns The mined signer private key (hex)
      */
     mineSigner(targetOverlay: string, proximity?: number): string;
+    /**
+     * Hash an identifier string into a 32-byte hex identifier. Exposed
+     * so subscribers can derive the same identifier the sender mined
+     * under, without paying for a fresh signer mine.
+     */
+    static hashIdentifier(raw: string): string;
+    /**
+     * Mine a GSOC signer with a caller-chosen identifier. Used by
+     * subsystems (e.g. CollabManager) that need multiple independent
+     * notification channels per (sender, receiver) pair — each
+     * identifier produces a distinct SOC address, so chat and collab
+     * pings don't cross-talk.
+     *
+     * Returns the signer hex and the listen address derived from the
+     * signer's pubkey. The listen address is what subscribers use with
+     * `gsocSubscribe`.
+     */
+    mineSignerWithIdentifier(targetOverlay: string, identifierRaw: string, proximity?: number): {
+        signerHex: string;
+        listenAddress: string;
+        identifierHex: string;
+    };
+    /**
+     * Low-level send that targets an explicit identifier + signer. Used by
+     * CollabManager so multiple independent signer chains can coexist per
+     * peer pair without crashing into each other via the shared mining
+     * cache.
+     */
+    sendWithSigner(signerHex: string, identifierHex: string, notificationType: GsocNotificationType, data?: Record<string, unknown>): Promise<void>;
+    /**
+     * Subscribe using an explicit identifier + listen address. Mirror of
+     * sendWithSigner for the receive side.
+     */
+    subscribeWithIdentifier(subscriptionKey: string, listenAddress: string, identifierHex: string, handler: {
+        onNotification: (notification: GsocNotification) => void;
+        onError?: (error: Error) => void;
+        onClose?: () => void;
+    }): GsocSubscription;
     /**
      * Send a notification to a peer via GSOC.
      *

@@ -84,7 +84,35 @@ export interface SwarmUserManifest {
      *  chat history itself lives in ACT-encrypted feeds keyed by the
      *  sorted pair of addresses. Optional for backward compat. */
     chatPeers?: string[];
+    /** Active live-collaborations the user is participating in. Keyed by
+     *  collabId (`drive:<id>` or `doc:<driveId>:<docId>`). The user manifest
+     *  is the authoritative source of "which collabs am I in" — localStorage
+     *  is a startup cache. On fresh-browser recovery, CollabManager reads
+     *  this map and rehydrates by reading each collab's manifest feed.
+     *  Optional for backward compat. */
+    collabs?: Record<string, UserCollabEntry>;
     updatedAt: string;
+}
+/**
+ * User-manifest entry per live-collaboration. Carries just enough to
+ * locate the collab's manifest feed on recovery; full membership +
+ * current grantee chain live on the feed itself, ACT-protected.
+ */
+export interface UserCollabEntry {
+    collabId: string;
+    kind: "drive" | "document";
+    driveId: string;
+    documentId?: string;
+    title: string;
+    /** "initiator" if I own the manifest feed, otherwise "participant". */
+    role: "initiator" | "participant";
+    initiator: string;
+    /** Manifest-feed locator: owner signer address + their Bee node pubkey
+     *  (needed as actPublisher when we decrypt the manifest payload). */
+    manifestOwnerAddress: string;
+    manifestPublisherBeeNodePubKey: string;
+    joinedAt: string;
+    lastActivityAt: string;
 }
 export interface UserDocumentEntry {
     documentType: string;
@@ -204,6 +232,19 @@ export interface SwarmPublicProfile {
     swarmPublicKey?: string;
     /** Bee node overlay address (for GSOC/PSS targeting) */
     overlayAddress?: string;
+    /** Outbound GSOC listen addresses advertised by this user.
+     *
+     *  Shape: { [collabId]: { [peerAddress]: gsocAddress } }
+     *
+     *  Reading: "when I send a collab `op-committed` ping on collabId to
+     *  peerAddress, I write to the SOC at gsocAddress". The receiver
+     *  subscribes at that address.
+     *
+     *  This lives on the public profile because GSOC addresses aren't
+     *  secret (the SOC payloads are; the address is a lookup index). Keeps
+     *  the discovery path self-contained: accept() reads the peer's profile
+     *  and immediately knows where to listen. */
+    collabGsocOutbound?: Record<string, Record<string, string>>;
     updatedAt: string;
 }
 /**

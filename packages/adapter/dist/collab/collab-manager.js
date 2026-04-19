@@ -17,8 +17,31 @@
  *   - Collab-manifest feed with participant add/remove after invite time.
  *   - GSOC `op-committed` pings for real-time pulls.
  */
-import { buildCollabId } from "./types.js";
+import { buildCollabId, RECENT_ACTIVITY_MAX } from "./types.js";
 import { CollabOpsFeed } from "./collab-ops-feed.js";
+import { CollabManifestFeed } from "./collab-manifest-feed.js";
+import { checkOpsFit } from "./gsoc-payload-size.js";
+import { ensureCollabInUserManifest, listCollabsFromUserManifest, removeCollabFromUserManifest, } from "../channel/manifest-manager.js";
+import { GsocNotifier } from "../chat/gsoc-notifier.js";
+/**
+ * Append a CollabActivityEntry to the bounded ring-buffer, trimming
+ * the front when we exceed RECENT_ACTIVITY_MAX. Returns a fresh array
+ * so callers can spread into an immutable summary update.
+ */
+function pushActivity(existing, entry) {
+    const prev = existing ?? [];
+    const next = prev.length >= RECENT_ACTIVITY_MAX
+        ? [...prev.slice(prev.length - RECENT_ACTIVITY_MAX + 1), entry]
+        : [...prev, entry];
+    return next;
+}
+/**
+ * GSOC identifier for op-committed pings. Namespaced under "collab-notify"
+ * so chat's GSOC subscription doesn't see our traffic (and vice versa).
+ */
+function collabGsocIdentifier(senderAddress, collabId) {
+    return `ph:v2:collab-notify:${senderAddress.toLowerCase()}:${collabId}`;
+}
 const LS_SUMMARIES_KEY = "swarm:collabs";
 const LS_PEER_CURSOR_PREFIX = "swarm:collabPeerCursor:";
 const POLL_INTERVAL_MS = 5000;
@@ -29,20 +52,45 @@ export class CollabManager {
     summaries = new Map();
     handlers = new Set();
     opsFeed;
+    manifestFeed;
+    /** Optional GSOC notifier for sub-second op-committed pings. When not
+     *  provided (unit tests, pre-plugin-init), all ping paths no-op and
+     *  the 5s poll timer stays as the sole transport. */
+    gsoc;
+    /** Per-peer mined signer: key `<collabId>:<peerAddress>`, value
+     *  { signerHex, identifierHex } — stable for the life of the collab. */
+    outboundGsoc = new Map();
+    /** Subscription handles for pings we listen to (incoming). Key:
+     *  `<collabId>:<peerAddress>`. */
+    inboundGsocSubs = new Map();
+    /** Signed out-of-process subscription deduper: `<collabId>:<peerAddress>`
+     *  set when we have already either subscribed or failed — stops the
+     *  rehydrate path from repeatedly hitting the same unreachable peer. */
+    subscribedPeers = new Set();
     pollTimer = null;
     pollInFlight = false;
     shuttingDown = false;
-    constructor(client, chat, myAddress) {
+    constructor(client, chat, myAddress, 
+    /** Optional — pass a notifier to enable GSOC op-committed pings.
+     *  Pre-plugin-init paths and unit tests can omit it. */
+    gsoc) {
         this.client = client;
         this.chat = chat;
         this.myAddress = myAddress;
         this.opsFeed = new CollabOpsFeed(client);
+        this.manifestFeed = new CollabManifestFeed(client);
+        this.gsoc = gsoc ?? null;
         this.loadFromStorage();
         this.startPolling();
         // Install the push hook so SwarmChannel can notify us on every local
         // op flush. Stable global so channels created before this manager
         // (cold start, HMR) can still find it lazily.
         globalThis.__swarmCollabManager__ = this;
+        // Rehydrate from the user manifest on Swarm — authoritative source
+        // of "which collabs am I in". Local summaries (localStorage) are a
+        // startup cache; on a fresh browser they start empty and this
+        // backfills from Swarm. Runs in background, not awaited.
+        void this.rehydrateFromUserManifest();
     }
     shutdown() {
         this.shuttingDown = true;
@@ -50,6 +98,13 @@ export class CollabManager {
             clearInterval(this.pollTimer);
             this.pollTimer = null;
         }
+        for (const cancel of this.inboundGsocSubs.values()) {
+            try {
+                cancel();
+            }
+            catch { /* ignore */ }
+        }
+        this.inboundGsocSubs.clear();
         if (globalThis.__swarmCollabManager__ === this) {
             globalThis.__swarmCollabManager__ = null;
         }
@@ -100,22 +155,11 @@ export class CollabManager {
         if (!built) {
             throw new Error("Could not build drive bundle (no operations).");
         }
-        // 3. Upload the bundle under ONE ACT chain with ALL participants as
-        //    grantees. Every participant's Bee node can decrypt the same ref.
+        // 3. Build the participant list (self + invited peers) and create
+        //    ONE ACT grantee chain covering everyone. This single chain is
+        //    used for the initial bundle, the manifest feed, AND all future
+        //    op-batch writes — rotating it is what "revocation" means.
         const myBeeNodePubKey = await this.client.getBeeNodePublicKey();
-        const granteeKeys = [
-            myBeeNodePubKey,
-            ...participantProfiles.map((p) => p.beeNodePublicKey),
-        ];
-        const { ref: granteeRef, historyRef } = await this.client.createGrantees(granteeKeys);
-        const { reference: bundleRef, historyAddress } = await this.client.uploadFile(JSON.stringify(built.bundle), {
-            act: true,
-            actHistoryAddress: historyRef,
-            skipEncryption: true, // ACT handles it
-        });
-        const bundleActHistoryAddress = historyAddress ?? historyRef;
-        void granteeRef; // kept locally; future revocation work uses this ref
-        // 4. Build the local summary.
         const now = new Date().toISOString();
         const selfParticipant = {
             address: this.myAddress.toLowerCase(),
@@ -131,23 +175,72 @@ export class CollabManager {
                 displayName: p.displayName,
             })),
         ];
+        const granteeKeys = participantsFull.map((p) => p.beeNodePublicKey);
+        const { ref: granteeRef, historyRef } = await this.client.createGrantees(granteeKeys);
+        // ACT mantaray timestamps must differ by >= 1s between writes. Sleep
+        // so the initial bundle, the manifest, and the first op batch don't
+        // all collide.
+        await new Promise((r) => setTimeout(r, 1100));
+        // 4. Upload the initial drive bundle under that chain.
+        const { reference: bundleRef, historyAddress } = await this.client.uploadFile(JSON.stringify(built.bundle), {
+            act: true,
+            actHistoryAddress: historyRef,
+            skipEncryption: true,
+        });
+        const bundleActHistoryAddress = historyAddress ?? historyRef;
+        await new Promise((r) => setTimeout(r, 1100));
+        const title = target.documentId
+            ? (built.docs.find((d) => d.documentId === target.documentId)?.name ?? target.documentId)
+            : built.driveName || target.driveId;
+        // 5. Publish the CollabManifest to its own feed. This feed is the
+        //    *live* source of truth for membership — revocation and
+        //    additions write new feed entries. Participants refresh from here.
+        const manifest = {
+            version: 1,
+            collabId,
+            kind,
+            driveId: target.driveId,
+            documentId: target.documentId,
+            title,
+            participants: participantsFull,
+            initiator: this.myAddress.toLowerCase(),
+            createdAt: now,
+            updatedAt: now,
+            caption,
+        };
+        const { feedIndex: manifestFeedIndex } = await this.manifestFeed.publish(manifest, historyRef);
+        // 6. Build the local summary. Track current grantee refs so
+        //    subsequent writes (op batches, manifest rewrites) can reuse
+        //    them and so revocation can rotate them atomically.
         const summary = {
             collabId,
             kind,
             driveId: target.driveId,
             documentId: target.documentId,
-            title: target.documentId
-                ? (built.docs.find((d) => d.documentId === target.documentId)?.name ?? target.documentId)
-                : built.driveName || target.driveId,
+            title,
             initiator: this.myAddress.toLowerCase(),
             participants: participantsFull,
-            manifestRef: bundleRef, // M1: the bundle IS the manifest
+            manifestRef: bundleRef,
             manifestActHistoryAddress: bundleActHistoryAddress,
             manifestPublisherBeeNodePubKey: myBeeNodePubKey,
+            manifestFeedIndex,
+            currentGranteeHistRef: historyRef,
+            currentGranteeRef: granteeRef,
             lastActivityAt: now,
             status: "active",
+            peerActivity: {},
+            recentActivity: [
+                { at: now, kind: "created", actor: this.myAddress.toLowerCase() },
+                ...participantProfiles.map((p) => ({
+                    at: now,
+                    kind: "participant-added",
+                    actor: p.address,
+                })),
+            ],
         };
-        // 5. Send an invitation chat message to each participant.
+        // 7. Send an invitation chat message to each participant. Message
+        //    carries initial-bundle refs (one-shot snapshot) AND the
+        //    manifest feed coordinates (for the live participant list).
         const docInfo = target.documentId
             ? built.docs.find((d) => d.documentId === target.documentId)
             : undefined;
@@ -157,7 +250,7 @@ export class CollabManager {
                 kind: "collab-invite",
                 collabId,
                 collabKind: kind,
-                title: summary.title,
+                title,
                 driveId: target.driveId,
                 driveName: built.driveName,
                 documentId: target.documentId,
@@ -178,14 +271,212 @@ export class CollabManager {
             };
             const text = caption
                 ? caption
-                : `You are invited to collaborate on "${summary.title}".`;
+                : `You are invited to collaborate on "${title}".`;
             await this.chat.sendMessage(session, text, attachment);
         }
-        // 6. Persist + announce.
+        // 8. Persist + announce.
         this.summaries.set(collabId, summary);
         this.persist();
+        // Authoritative record on Swarm — survives browser wipes. Written
+        // AFTER the manifest feed is up so a peer rehydrating can find a
+        // readable feed.
+        void this.upsertUserManifestEntry(summary).catch((err) => {
+            console.warn("[CollabManager] create: user-manifest write failed (non-fatal):", err instanceof Error ? err.message : err);
+        });
+        // Background: mine GSOC signers per peer + publish our outbound
+        // addresses to our profile. Non-blocking — first push might hit
+        // before mining completes, poll-loop covers the gap.
+        void this.provisionOutboundGsoc(collabId, participantsFull).catch((err) => {
+            console.warn("[CollabManager] GSOC provision (create) failed:", err instanceof Error ? err.message : err);
+        });
         this.emit({ type: "collab-created", collabId, data: summary });
         return summary;
+    }
+    /**
+     * Initiator-only: revoke a participant.
+     *
+     * Rebuilds the ACT grantee chain without that participant's Bee pubkey
+     * and publishes a new manifest revision. Future op-batch writes use the
+     * new chain, so the revoked peer's Bee node can no longer decrypt them.
+     * Content previously accessible to them stays accessible — ACT has no
+     * rewind. The revoke is about the *future*.
+     */
+    async revokeParticipant(collabId, peerAddress) {
+        const summary = this.summaries.get(collabId);
+        if (!summary)
+            throw new Error(`Unknown collab: ${collabId}`);
+        if (summary.initiator !== this.myAddress.toLowerCase()) {
+            throw new Error("Only the collab initiator can revoke participants.");
+        }
+        const addr = peerAddress.toLowerCase();
+        if (addr === summary.initiator) {
+            throw new Error("The initiator cannot revoke themselves (leave instead).");
+        }
+        const target = summary.participants.find((p) => p.address === addr);
+        if (!target)
+            throw new Error(`Participant not found: ${peerAddress}`);
+        const nextParticipants = summary.participants.filter((p) => p.address !== addr);
+        const granteeKeys = nextParticipants.map((p) => p.beeNodePublicKey);
+        const { ref: granteeRef, historyRef } = await this.client.createGrantees(granteeKeys);
+        await new Promise((r) => setTimeout(r, 1100));
+        const now = new Date().toISOString();
+        const manifest = {
+            version: 1,
+            collabId,
+            kind: summary.kind,
+            driveId: summary.driveId,
+            documentId: summary.documentId,
+            title: summary.title,
+            participants: nextParticipants,
+            initiator: summary.initiator,
+            createdAt: summary.participants.find((p) => p.address === summary.initiator)?.joinedAt ?? now,
+            updatedAt: now,
+        };
+        const { feedIndex } = await this.manifestFeed.publish(manifest, historyRef);
+        const updated = {
+            ...summary,
+            participants: nextParticipants,
+            currentGranteeRef: granteeRef,
+            currentGranteeHistRef: historyRef,
+            manifestFeedIndex: feedIndex,
+            lastActivityAt: now,
+            recentActivity: pushActivity(summary.recentActivity, {
+                at: now,
+                kind: "participant-revoked",
+                actor: addr,
+            }),
+        };
+        this.summaries.set(collabId, updated);
+        this.persist();
+        this.emit({ type: "collab-updated", collabId, data: updated });
+        return updated;
+    }
+    /**
+     * Initiator-only: add a participant.
+     *
+     * Resolves the new peer's profile, extends the ACT grantee chain via
+     * patchGrantees (incremental — no rewrite), and publishes a new
+     * manifest revision. The new participant receives a standard
+     * invitation chat message pointing at the current bundle + manifest.
+     */
+    async addParticipant(collabId, peerAddress) {
+        const summary = this.summaries.get(collabId);
+        if (!summary)
+            throw new Error(`Unknown collab: ${collabId}`);
+        if (summary.initiator !== this.myAddress.toLowerCase()) {
+            throw new Error("Only the collab initiator can add participants.");
+        }
+        const addr = peerAddress.toLowerCase();
+        if (summary.participants.some((p) => p.address === addr)) {
+            throw new Error(`Participant already in the collab: ${peerAddress}`);
+        }
+        const profile = await this.client.readPublicProfile(addr);
+        if (!profile?.beeNodePublicKey) {
+            throw new Error(`Participant ${peerAddress} has no public profile or Bee node pubkey — they need to connect to Swarm first.`);
+        }
+        if (!summary.currentGranteeHistRef || !summary.currentGranteeRef) {
+            throw new Error("Collab is missing its current grantee chain — refreshManifest() first.");
+        }
+        // Extend grantee chain (patch = incremental, no rebuild).
+        const patched = await this.client.grantAccess(summary.currentGranteeRef, summary.currentGranteeHistRef, [profile.beeNodePublicKey]);
+        await new Promise((r) => setTimeout(r, 1100));
+        const now = new Date().toISOString();
+        const newParticipant = {
+            address: addr,
+            beeNodePublicKey: profile.beeNodePublicKey,
+            joinedAt: now,
+            displayName: profile.ensName ?? undefined,
+        };
+        const nextParticipants = [...summary.participants, newParticipant];
+        const manifest = {
+            version: 1,
+            collabId,
+            kind: summary.kind,
+            driveId: summary.driveId,
+            documentId: summary.documentId,
+            title: summary.title,
+            participants: nextParticipants,
+            initiator: summary.initiator,
+            createdAt: summary.participants.find((p) => p.address === summary.initiator)?.joinedAt ?? now,
+            updatedAt: now,
+        };
+        const { feedIndex } = await this.manifestFeed.publish(manifest, patched.historyRef);
+        const updated = {
+            ...summary,
+            participants: nextParticipants,
+            currentGranteeRef: patched.ref,
+            currentGranteeHistRef: patched.historyRef,
+            manifestFeedIndex: feedIndex,
+            lastActivityAt: now,
+            recentActivity: pushActivity(summary.recentActivity, {
+                at: now,
+                kind: "participant-added",
+                actor: addr,
+            }),
+        };
+        this.summaries.set(collabId, updated);
+        this.persist();
+        // Send the new participant a chat invitation so they know about it.
+        try {
+            const session = await this.chat.startSession(addr);
+            const attachment = {
+                kind: "collab-invite",
+                collabId,
+                collabKind: summary.kind,
+                title: summary.title,
+                driveId: summary.driveId,
+                driveName: summary.title,
+                documentId: summary.documentId,
+                manifestRef: summary.manifestRef,
+                manifestActHistoryAddress: summary.manifestActHistoryAddress,
+                manifestPublisherBeeNodePubKey: summary.manifestPublisherBeeNodePubKey,
+                initialBundleRef: summary.manifestRef,
+                initialBundleActHistoryAddress: summary.manifestActHistoryAddress,
+                initialBundlePublisherBeeNodePubKey: summary.manifestPublisherBeeNodePubKey,
+                participants: nextParticipants.map((pp) => ({
+                    address: pp.address,
+                    displayName: pp.displayName,
+                })),
+                invitedBy: this.myAddress.toLowerCase(),
+                invitedAt: now,
+            };
+            await this.chat.sendMessage(session, `You were added to "${summary.title}".`, attachment);
+        }
+        catch (err) {
+            console.warn(`[CollabManager] addParticipant: chat invite send failed (continuing):`, err instanceof Error ? err.message : err);
+        }
+        this.emit({ type: "collab-updated", collabId, data: updated });
+        return updated;
+    }
+    /**
+     * Re-read the collab's manifest feed to pick up any participant changes
+     * the initiator has published since we last looked. Updates the local
+     * summary if a newer manifest index is available.
+     *
+     * Returns the post-refresh summary (unchanged if no newer index).
+     */
+    async refreshManifest(collabId) {
+        const summary = this.summaries.get(collabId);
+        if (!summary)
+            return null;
+        const latest = await this.manifestFeed.readLatest(collabId, summary.initiator, summary.manifestPublisherBeeNodePubKey);
+        if (!latest)
+            return summary;
+        if (summary.manifestFeedIndex != null &&
+            latest.feedIndex <= summary.manifestFeedIndex) {
+            return summary; // nothing new
+        }
+        const updated = {
+            ...summary,
+            participants: latest.manifest.participants,
+            manifestFeedIndex: latest.feedIndex,
+            title: latest.manifest.title ?? summary.title,
+            lastActivityAt: new Date().toISOString(),
+        };
+        this.summaries.set(collabId, updated);
+        this.persist();
+        this.emit({ type: "collab-updated", collabId, data: updated });
+        return updated;
     }
     /**
      * Accept a collab invitation received in chat. Downloads the initial
@@ -220,6 +511,10 @@ export class CollabManager {
         const result = await applyDocumentBundle(bundleData, {
             cacheKey: `swarm:collabAccept:${invite.collabId}`,
             displayName: invite.title,
+            // Live collab requires both sides to share the same drive + doc IDs
+            // so the per-(collab, drive, doc, writer) feed topics align and
+            // reactor.load on incoming ops targets the correct local doc.
+            preserveIds: { driveId: invite.driveId },
         });
         if (!result.success) {
             throw new Error(result.error ?? "Failed to apply collab bundle");
@@ -231,22 +526,47 @@ export class CollabManager {
             beeNodePublicKey: myBeeNodePubKey,
             joinedAt: now,
         };
-        // Reconstruct participants from the invite + ensure self is present.
-        const inviteParticipants = invite.participants.map((p) => ({
-            address: p.address.toLowerCase(),
-            // Bee node pubkeys aren't in the invite's participant list — they
-            // live in the invite fields for the initiator's identity only. We
-            // backfill lazily as needed when we start pulling their feeds.
-            beeNodePublicKey: p.address.toLowerCase() === invite.invitedBy.toLowerCase()
-                ? invite.manifestPublisherBeeNodePubKey
-                : "",
-            joinedAt: now,
-            displayName: p.displayName,
-        }));
-        const participants = [
-            mySelf,
-            ...inviteParticipants.filter((p) => p.address !== mySelf.address),
-        ];
+        // Try to read the authoritative participant list from the manifest
+        // feed. It's written ACT-protected by the initiator under the same
+        // grantee chain we're now a member of, so we can decrypt. Fall back
+        // to the invite's (slimmer) participant list if the feed isn't
+        // reachable yet (chunk not propagated).
+        let participants = null;
+        let manifestFeedIndex;
+        try {
+            const latest = await this.manifestFeed.readLatest(invite.collabId, invite.invitedBy, invite.manifestPublisherBeeNodePubKey);
+            if (latest) {
+                // Ensure self is present — the manifest should list us, but if
+                // the invite arrived on a stale manifest (edge case: initiator
+                // invited us in a prior chain) patch self in.
+                const listed = latest.manifest.participants.map((p) => ({
+                    ...p,
+                    address: p.address.toLowerCase(),
+                }));
+                const hasSelf = listed.some((p) => p.address === mySelf.address);
+                participants = hasSelf ? listed : [...listed, mySelf];
+                manifestFeedIndex = latest.feedIndex;
+            }
+        }
+        catch (err) {
+            console.warn("[CollabManager] accept: manifest feed read failed, falling back to invite participants:", err instanceof Error ? err.message : err);
+        }
+        if (!participants) {
+            // Fallback: invite's slim list (only the initiator has a known
+            // pubkey, others will have empty pubkeys until refreshManifest).
+            const inviteParticipants = invite.participants.map((p) => ({
+                address: p.address.toLowerCase(),
+                beeNodePublicKey: p.address.toLowerCase() === invite.invitedBy.toLowerCase()
+                    ? invite.manifestPublisherBeeNodePubKey
+                    : "",
+                joinedAt: now,
+                displayName: p.displayName,
+            }));
+            participants = [
+                mySelf,
+                ...inviteParticipants.filter((p) => p.address !== mySelf.address),
+            ];
+        }
         const summary = {
             collabId: invite.collabId,
             kind: invite.collabKind,
@@ -258,25 +578,123 @@ export class CollabManager {
             manifestRef: invite.manifestRef,
             manifestActHistoryAddress: invite.manifestActHistoryAddress,
             manifestPublisherBeeNodePubKey: invite.manifestPublisherBeeNodePubKey,
+            manifestFeedIndex,
+            // Non-initiators don't own the grantee chain; they ingest ops but
+            // don't write collab feed entries until they make local edits.
+            // Their ACT chain for writes gets lazily created from the current
+            // participant set the first time handleLocalPush fires.
             lastActivityAt: now,
             status: "active",
+            peerActivity: {},
+            recentActivity: [
+                { at: now, kind: "accepted", actor: this.myAddress.toLowerCase() },
+            ],
         };
         this.summaries.set(summary.collabId, summary);
         this.persist();
+        void this.upsertUserManifestEntry(summary).catch((err) => {
+            console.warn("[CollabManager] accept: user-manifest write failed (non-fatal):", err instanceof Error ? err.message : err);
+        });
+        // Provision our outbound GSOC to each peer (so they can subscribe and
+        // learn when we push) and subscribe to theirs (so we pull on their
+        // pushes). Both are background, best-effort. After provisioning
+        // resolves, broadcast a "collab-join" ping so the initiator's UI can
+        // flip from "Awaiting" to joined without waiting for our first edit.
+        void this.provisionOutboundGsoc(summary.collabId, participants)
+            .then(() => this.broadcastJoinedPing(summary))
+            .catch((err) => {
+            console.warn("[CollabManager] GSOC provision (accept) failed:", err instanceof Error ? err.message : err);
+        });
+        void this.subscribeToPeerGsoc(summary).catch((err) => {
+            console.warn("[CollabManager] GSOC subscribe (accept) failed:", err instanceof Error ? err.message : err);
+        });
         this.emit({ type: "collab-accepted", collabId: summary.collabId, data: summary });
         return summary;
     }
     /**
-     * Locally stop participating in a collab. M1 is local-only: we clear
-     * the summary so pulls + UI stop. The initiator still lists this user
-     * in their manifest until they rewrite it.
+     * Record that a peer announced themselves via "collab-join". Seeds
+     * peerActivity so the Manage panel can show "joined Xs ago" without
+     * waiting for their first op. No-op if we already have activity for
+     * this peer — real ops are strictly more informative.
      */
-    leave(collabId) {
+    markPeerJoined(collabId, writer) {
+        const summary = this.summaries.get(collabId);
+        if (!summary)
+            return;
+        const writerKey = writer.toLowerCase();
+        if (summary.peerActivity?.[writerKey])
+            return;
+        const now = new Date().toISOString();
+        const nextPeerActivity = {
+            ...(summary.peerActivity ?? {}),
+            [writerKey]: { lastAppliedAt: now, opsApplied: 0 },
+        };
+        const updated = {
+            ...summary,
+            lastActivityAt: now,
+            peerActivity: nextPeerActivity,
+            recentActivity: pushActivity(summary.recentActivity, {
+                at: now,
+                kind: "participant-added",
+                actor: writerKey,
+                label: "joined",
+            }),
+        };
+        this.summaries.set(collabId, updated);
+        this.persist();
+        this.emit({ type: "collab-updated", collabId, data: updated });
+        try {
+            globalThis.window?.dispatchEvent(new CustomEvent("swarm:collab:updated", { detail: { collabId } }));
+        }
+        catch { /* non-browser */ }
+    }
+    /**
+     * Fire a best-effort "collab-join" ping to every peer in the collab.
+     * Lets the initiator (and anyone else already in) flip their
+     * "Awaiting" indicator to joined without needing our first edit to
+     * land. Called from `accept()` after `provisionOutboundGsoc` resolves
+     * so the outbound signers are mined.
+     */
+    async broadcastJoinedPing(summary) {
+        if (!this.gsoc)
+            return;
+        for (const peer of summary.participants) {
+            if (peer.address === this.myAddress.toLowerCase())
+                continue;
+            const key = `${summary.collabId}:${peer.address}`;
+            const mined = this.outboundGsoc.get(key);
+            if (!mined)
+                continue;
+            try {
+                await this.gsoc.sendWithSigner(mined.signerHex, mined.identifierHex, "collab-join", {
+                    collabId: summary.collabId,
+                    writerAddress: this.myAddress.toLowerCase(),
+                });
+            }
+            catch (err) {
+                console.warn(`[CollabManager] joined ping to ${peer.address.slice(0, 10)} failed:`, err instanceof Error ? err.message : err);
+            }
+        }
+    }
+    /**
+     * Stop participating in a collab on this device + strip the entry
+     * from the user manifest so a fresh browser doesn't re-hydrate it.
+     * The initiator's collab manifest feed is untouched — they still
+     * list this user as a participant until they explicitly revoke.
+     * Returns a promise so callers can await the manifest write.
+     */
+    async leave(collabId) {
         const existing = this.summaries.get(collabId);
         if (!existing)
             return;
         this.summaries.delete(collabId);
         this.persist();
+        try {
+            await removeCollabFromUserManifest(this.client, this.myAddress, collabId);
+        }
+        catch (err) {
+            console.warn("[CollabManager] leave: user-manifest remove failed (local state already cleared):", err instanceof Error ? err.message : err);
+        }
         this.emit({ type: "collab-removed", collabId });
     }
     list() {
@@ -292,6 +710,499 @@ export class CollabManager {
         };
         this.handlers.add(wrapped);
         return () => this.handlers.delete(wrapped);
+    }
+    // ─── GSOC op-committed pings (sub-second real-time) ────────────
+    /**
+     * Mine a signer per peer for a collab, remember the listen address,
+     * and merge the outbound-to-peer map into our public profile so peers
+     * can find where to subscribe. Best-effort: failures are logged but
+     * not thrown — the poll-loop fallback still delivers ops.
+     *
+     * Idempotent per (collabId, peerAddress): subsequent calls reuse the
+     * cached mined signer.
+     */
+    async provisionOutboundGsoc(collabId, peers) {
+        if (!this.gsoc || peers.length === 0)
+            return;
+        // Read the existing profile so we can merge without clobbering other
+        // fields. This is the authoritative advertise surface.
+        let profile = null;
+        try {
+            profile = await this.client.readPublicProfile(this.myAddress);
+        }
+        catch { /* no profile yet */ }
+        if (!profile) {
+            // No profile published yet — bail. The plugin publishes one on
+            // connect; a later collab.provisionOutboundGsoc call will catch up.
+            return;
+        }
+        const existingMap = { ...(profile.collabGsocOutbound ?? {}) };
+        const collabMap = { ...(existingMap[collabId] ?? {}) };
+        let profileDirty = false;
+        for (const peer of peers) {
+            if (peer.address === this.myAddress.toLowerCase())
+                continue;
+            const key = `${collabId}:${peer.address}`;
+            if (this.outboundGsoc.has(key) && collabMap[peer.address])
+                continue;
+            // Look up the peer's overlay from their profile — required for
+            // mining (signer address must land near their neighborhood).
+            let peerProfile = null;
+            try {
+                peerProfile = await this.client.readPublicProfile(peer.address);
+            }
+            catch { /* skip */ }
+            const overlay = peerProfile?.overlayAddress;
+            if (!overlay)
+                continue;
+            try {
+                const identifierRaw = collabGsocIdentifier(this.myAddress, collabId);
+                const { signerHex, listenAddress, identifierHex } = this.gsoc.mineSignerWithIdentifier(overlay, identifierRaw);
+                this.outboundGsoc.set(key, { signerHex, identifierHex });
+                if (collabMap[peer.address] !== listenAddress) {
+                    collabMap[peer.address] = listenAddress;
+                    profileDirty = true;
+                }
+            }
+            catch (err) {
+                console.warn(`[CollabManager] mine for ${collabId} peer ${peer.address.slice(0, 10)} failed:`, err instanceof Error ? err.message : err);
+            }
+        }
+        if (!profileDirty)
+            return;
+        existingMap[collabId] = collabMap;
+        const updatedProfile = {
+            ...profile,
+            collabGsocOutbound: existingMap,
+            updatedAt: new Date().toISOString(),
+        };
+        try {
+            await this.client.publishPublicProfile(this.myAddress, updatedProfile);
+        }
+        catch (err) {
+            console.warn("[CollabManager] publishPublicProfile for collab GSOC addrs failed:", err instanceof Error ? err.message : err);
+        }
+    }
+    /**
+     * Subscribe to each peer's advertised outbound-to-me GSOC address for
+     * a given collab, if we haven't already. Called lazily after mining
+     * completes and on rehydrate.
+     */
+    async subscribeToPeerGsoc(summary) {
+        if (!this.gsoc)
+            return;
+        for (const peer of summary.participants) {
+            if (peer.address === this.myAddress.toLowerCase())
+                continue;
+            const subKey = `${summary.collabId}:${peer.address}`;
+            if (this.subscribedPeers.has(subKey))
+                continue;
+            this.subscribedPeers.add(subKey);
+            try {
+                const peerProfile = await this.client.readPublicProfile(peer.address);
+                const listenAddress = peerProfile?.collabGsocOutbound?.[summary.collabId]?.[this.myAddress.toLowerCase()];
+                if (!listenAddress) {
+                    // Peer hasn't advertised an outbound-to-me GSOC address for
+                    // this collab yet. They will, on their next provisionOutboundGsoc
+                    // (e.g. on their create/accept). Drop from the dedup set so a
+                    // later subscribe attempt can retry.
+                    this.subscribedPeers.delete(subKey);
+                    continue;
+                }
+                // Derive the identifier deterministically — no need to mine on
+                // the subscribe side (we already know the sender's listen
+                // address from their profile). GsocNotifier.hashIdentifier is a
+                // pure hash of the raw string.
+                const identifierRaw = collabGsocIdentifier(peer.address, summary.collabId);
+                const identifierHex = GsocNotifier.hashIdentifier(identifierRaw);
+                const subscription = this.gsoc.subscribeWithIdentifier(subKey, listenAddress, identifierHex, {
+                    // Look up the summary fresh on each ping — the captured
+                    // `summary` snapshot is stale after revoke/add, and we
+                    // want to react against the current participant list.
+                    onNotification: (n) => this.handlePeerPing(this.summaries.get(summary.collabId) ?? summary, peer.address, n),
+                    onError: (err) => {
+                        console.warn(`[CollabManager] GSOC subscribe error for ${subKey}:`, err.message);
+                    },
+                });
+                this.inboundGsocSubs.set(subKey, () => subscription.cancel());
+            }
+            catch (err) {
+                this.subscribedPeers.delete(subKey);
+                console.warn(`[CollabManager] subscribe to GSOC for ${subKey} failed:`, err instanceof Error ? err.message : err);
+            }
+        }
+    }
+    handlePeerPing(summary, writerAddress, notification) {
+        // Any ping from a peer in this collab is a signal that they wrote
+        // new ops. If the ping carries actRef + actHistoryAddress, we can
+        // download directly via /bzz (bypassing the feed read entirely —
+        // the feed propagation delay is the main latency source). Otherwise
+        // fall back to scheduling a poll-loop read for that peer.
+        const n = notification;
+        const collabId = n?.data?.collabId ?? summary.collabId;
+        const writer = (n?.data?.writerAddress ?? writerAddress).toLowerCase();
+        if (collabId !== summary.collabId)
+            return;
+        // "collab-join" is an announce-only ping — no ops, no refs. Bump
+        // peerActivity so the UI flips from "Awaiting" to joined, then bail
+        // (no fetch / reactor.load work needed).
+        if (n?.type === "collab-join") {
+            this.markPeerJoined(summary.collabId, writer);
+            return;
+        }
+        const d = n?.data;
+        const hasInline = Array.isArray(d?.inlineOps) && d.inlineOps.length > 0 && !!d?.documentId;
+        const hasRefs = !!d?.actRef
+            && !!d?.actHistoryAddress
+            && !!d?.publisherBeeNodePubKey
+            && !!d?.driveId
+            && !!d?.documentId
+            && d?.feedIndex !== undefined;
+        if (hasInline) {
+            // Zero-RTT fast path — ops are already in the ping payload.
+            void this.applyInlineOps(summary, writer, {
+                ops: d.inlineOps,
+                docId: d.documentId,
+                scope: d.inlineScope ?? "global",
+                branch: d.inlineBranch ?? "main",
+                feedIndex: d.feedIndex,
+            });
+        }
+        else if (hasRefs) {
+            // Direct /bzz fetch fast path — skip feed read, fetch by refs.
+            void this.applyFromPing(summary, writer, {
+                actRef: d.actRef,
+                actHistoryAddress: d.actHistoryAddress,
+                feedIndex: d.feedIndex,
+                publisherBeeNodePubKey: d.publisherBeeNodePubKey,
+                driveId: d.driveId,
+                docId: d.documentId,
+            });
+        }
+        else {
+            // Legacy / stripped ping — fall back to the poll-loop path which
+            // reads the feed.
+            void this.pollOnce();
+        }
+    }
+    /**
+     * Zero-RTT apply: the ops arrived inline in the GSOC ping. No Swarm
+     * round-trip needed — straight to reactor.load. This is the fastest
+     * path, bound only by GSOC delivery (~1s cross-node) + reactor.load time.
+     */
+    async applyInlineOps(summary, writer, input) {
+        try {
+            const applied = await this.applyOpsAndAdvanceCursor({
+                collabId: summary.collabId,
+                writer,
+                docId: input.docId,
+                branch: input.branch,
+                ops: input.ops,
+                feedIndex: input.feedIndex,
+            });
+            if (!applied)
+                return;
+        }
+        catch (err) {
+            console.warn(`[CollabManager] inline-ops apply failed for ${summary.collabId}, falling back to feed pull:`, err instanceof Error ? err.message : err);
+            void this.pollOnce();
+        }
+    }
+    /**
+     * Fast-path: apply a peer's ops directly from the refs carried in
+     * a GSOC ping. Retries a few times with backoff because the /bzz
+     * content chunk may not yet have propagated to our neighborhood
+     * even though the ping did.
+     */
+    async applyFromPing(summary, writer, refs) {
+        // Exponential backoff retries for chunk propagation.
+        // Total budget: ~15s (0 + 0.5 + 1 + 2 + 4 + 8 = 15.5s).
+        const waits = [0, 500, 1000, 2000, 4000, 8000];
+        for (const wait of waits) {
+            if (this.shuttingDown)
+                return;
+            if (wait > 0)
+                await new Promise((r) => setTimeout(r, wait));
+            const batch = await this.opsFeed.fetchByRefs(refs.actRef, refs.actHistoryAddress, refs.publisherBeeNodePubKey);
+            if (!batch)
+                continue;
+            try {
+                const raw = JSON.parse(batch.opsJson);
+                const applied = await this.applyOpsAndAdvanceCursor({
+                    collabId: summary.collabId,
+                    writer,
+                    docId: refs.docId,
+                    branch: batch.branch ?? "main",
+                    ops: raw,
+                    feedIndex: refs.feedIndex,
+                });
+                if (applied)
+                    return;
+            }
+            catch (err) {
+                // reactor.load is idempotent per op id, so retrying is safe on
+                // transient errors (e.g. concurrent writes racing in PGlite).
+                // Continue to the next retry tick; if every attempt fails, fall
+                // through to pollOnce() below so the poll loop gets a chance
+                // on the next tick with a fresh feed read.
+                console.warn(`[CollabManager] fast-path apply failed for ${summary.collabId} (will retry):`, err instanceof Error ? err.message : err);
+                continue;
+            }
+        }
+        // All retries exhausted — fall back to the poll loop's feed-read
+        // path on the next tick.
+        void this.pollOnce();
+    }
+    /**
+     * Core apply pipeline shared by inline-ops, refs-fetch, and the
+     * poll-loop path: unwrap OperationWithContext → reactor.load →
+     * advance cursor → mark lastActivityAt → emit op-applied event.
+     *
+     * Returns true if ops were applied (even zero-length batches count
+     * as "successfully handled"), false if the reactor isn't available.
+     * Throws if reactor.load throws — callers decide whether to retry.
+     */
+    async applyOpsAndAdvanceCursor(input) {
+        const ph = globalThis.window?.ph;
+        // IReactor.load() takes bare Operation[] from sync — lives on the
+        // reactor module, not on ReactorClient (which only exposes execute()
+        // for Actions). Fall back to window.ph.reactor for legacy shims.
+        const reactor = ph?.reactorClientModule?.reactorModule?.reactor ??
+            ph?.reactor;
+        if (typeof reactor?.load !== "function")
+            return false;
+        if (!Array.isArray(input.ops) || input.ops.length === 0)
+            return true;
+        // SwarmChannel pushes OperationWithContext[]; reactor.load needs
+        // bare Operation[]. Unwrap defensively — fall back to the entry
+        // itself for already-flat payloads.
+        const ops = input.ops.map((entry) => entry?.operation ?? entry);
+        await reactor.load(input.docId, input.branch, ops);
+        if (input.feedIndex !== undefined) {
+            const cursorKey = `${LS_PEER_CURSOR_PREFIX}${input.collabId}:${input.writer}:${input.docId}`;
+            const cursor = this.readCursor(cursorKey);
+            if (input.feedIndex + 1 > cursor) {
+                this.writeCursor(cursorKey, input.feedIndex + 1);
+            }
+        }
+        const liveSummary = this.summaries.get(input.collabId);
+        if (liveSummary) {
+            const now = new Date().toISOString();
+            const writerKey = input.writer.toLowerCase();
+            const priorActivity = liveSummary.peerActivity?.[writerKey];
+            const nextPeerActivity = {
+                ...(liveSummary.peerActivity ?? {}),
+                [writerKey]: {
+                    lastAppliedAt: now,
+                    opsApplied: (priorActivity?.opsApplied ?? 0) + ops.length,
+                },
+            };
+            this.summaries.set(input.collabId, {
+                ...liveSummary,
+                lastActivityAt: now,
+                peerActivity: nextPeerActivity,
+                recentActivity: pushActivity(liveSummary.recentActivity, {
+                    at: now,
+                    kind: "ops-applied",
+                    actor: writerKey,
+                    opsCount: ops.length,
+                    docId: input.docId,
+                }),
+            });
+            this.persist();
+        }
+        this.emit({ type: "op-applied", collabId: input.collabId });
+        try {
+            globalThis.window?.dispatchEvent(new CustomEvent("swarm:collab:op-applied", {
+                detail: { collabId: input.collabId },
+            }));
+        }
+        catch { /* non-browser */ }
+        return true;
+    }
+    /**
+     * Send op-committed pings to every OTHER participant for a collab.
+     *
+     * Three-tier fast path, in order of speed:
+     *   1. **Inline ops** — if the serialized ops fit within the GSOC
+     *      4KB chunk budget, embed them in the ping. Receiver applies
+     *      immediately with zero Swarm content fetches. Sub-second.
+     *   2. **Refs only** — always include `actRef + actHistoryAddress +
+     *      feedIndex` so a receiver whose ping exceeded the inline budget
+     *      (or missed it) can download the batch via /bzz directly,
+     *      bypassing the feed read.
+     *   3. **Feed** — the actual feed write always happens in the write
+     *      path. Receivers who missed both the ping entirely fall back
+     *      to the poll loop that reads the feed. Recovery / fresh-browser
+     *      rehydrate also reads the feed.
+     *
+     * Best-effort — failures don't block the personal push that already
+     * succeeded.
+     */
+    async pingPeersForCollab(summary, driveId, docId, write) {
+        if (!this.gsoc)
+            return;
+        const myBeeNodePubKey = await this.client.getBeeNodePublicKey().catch(() => "");
+        // Decide which fast-path tier this batch qualifies for based on
+        // serialized size. See collab/gsoc-payload-size.ts for the full
+        // rationale. Ops sizes vary a lot — a SET_AUTHOR_NAME is ~200B;
+        // paste-a-big-string can be 10KB+. Inline when it fits; otherwise
+        // the ping carries only refs and the receiver does one /bzz fetch
+        // (still faster than a feed read). Feed is always written above.
+        const fit = checkOpsFit(write?.ops, write?.scope, write?.branch);
+        const inlineable = fit.fits && write
+            ? {
+                ops: write.ops,
+                scope: write.scope ?? "global",
+                branch: write.branch ?? "main",
+            }
+            : null;
+        if (write?.ops?.length) {
+            console.log(`[CollabManager] ping ${summary.collabId} tier=${fit.tier} (${fit.size}B / ${fit.budget}B budget)`);
+        }
+        for (const peer of summary.participants) {
+            if (peer.address === this.myAddress.toLowerCase())
+                continue;
+            const key = `${summary.collabId}:${peer.address}`;
+            const mined = this.outboundGsoc.get(key);
+            if (!mined)
+                continue; // haven't mined for this peer yet — next push will catch up
+            try {
+                await this.gsoc.sendWithSigner(mined.signerHex, mined.identifierHex, "doc-updated", {
+                    collabId: summary.collabId,
+                    writerAddress: this.myAddress.toLowerCase(),
+                    driveId,
+                    documentId: docId,
+                    // Refs fallback — always present when we have them.
+                    ...(write
+                        ? {
+                            actRef: write.actRef,
+                            actHistoryAddress: write.actHistoryAddress,
+                            feedIndex: write.feedIndex,
+                            publisherBeeNodePubKey: myBeeNodePubKey,
+                        }
+                        : {}),
+                    // Zero-RTT fast path: inline ops when they fit the 4KB chunk.
+                    ...(inlineable
+                        ? {
+                            inlineOps: inlineable.ops,
+                            inlineScope: inlineable.scope,
+                            inlineBranch: inlineable.branch,
+                        }
+                        : {}),
+                });
+            }
+            catch (err) {
+                console.warn(`[CollabManager] GSOC ping to ${peer.address.slice(0, 10)} failed:`, err instanceof Error ? err.message : err);
+            }
+        }
+    }
+    // ─── User-manifest integration (authoritative collab registry) ─
+    summaryToUserManifestEntry(s) {
+        return {
+            collabId: s.collabId,
+            kind: s.kind,
+            driveId: s.driveId,
+            documentId: s.documentId,
+            title: s.title,
+            role: s.initiator === this.myAddress.toLowerCase() ? "initiator" : "participant",
+            initiator: s.initiator,
+            manifestOwnerAddress: s.initiator,
+            manifestPublisherBeeNodePubKey: s.manifestPublisherBeeNodePubKey,
+            joinedAt: s.participants.find((p) => p.address === this.myAddress.toLowerCase())?.joinedAt
+                ?? new Date().toISOString(),
+            lastActivityAt: s.lastActivityAt,
+        };
+    }
+    async upsertUserManifestEntry(s) {
+        await ensureCollabInUserManifest(this.client, this.myAddress, this.summaryToUserManifestEntry(s));
+    }
+    /**
+     * Boot-time recovery: read the user manifest's `collabs` map and
+     * reconstruct local summaries for any collab that isn't already in
+     * localStorage. For each entry we pull the ACT-protected manifest
+     * feed to get the live participant list.
+     *
+     * Non-fatal if any part fails — the user can still open the
+     * Collaborate tab and re-join from a fresh invite.
+     */
+    async rehydrateFromUserManifest() {
+        try {
+            const registry = await listCollabsFromUserManifest(this.client, this.myAddress);
+            const entries = Object.values(registry);
+            if (entries.length === 0)
+                return;
+            let recovered = 0;
+            for (const entry of entries) {
+                if (this.summaries.has(entry.collabId))
+                    continue;
+                try {
+                    const latest = await this.manifestFeed.readLatest(entry.collabId, entry.manifestOwnerAddress, entry.manifestPublisherBeeNodePubKey);
+                    if (!latest) {
+                        // Feed unreachable — maybe we've been revoked, maybe
+                        // chunks haven't propagated. Stash a pending summary so
+                        // the UI can show it; a later refreshManifest or retry
+                        // will promote it to active or mark it revoked.
+                        this.summaries.set(entry.collabId, {
+                            collabId: entry.collabId,
+                            kind: entry.kind,
+                            driveId: entry.driveId,
+                            documentId: entry.documentId,
+                            title: entry.title,
+                            initiator: entry.initiator,
+                            participants: [],
+                            manifestRef: "",
+                            manifestActHistoryAddress: "",
+                            manifestPublisherBeeNodePubKey: entry.manifestPublisherBeeNodePubKey,
+                            lastActivityAt: entry.lastActivityAt,
+                            status: "pending",
+                        });
+                        continue;
+                    }
+                    const m = latest.manifest;
+                    this.summaries.set(entry.collabId, {
+                        collabId: entry.collabId,
+                        kind: entry.kind,
+                        driveId: entry.driveId,
+                        documentId: entry.documentId,
+                        title: m.title ?? entry.title,
+                        initiator: m.initiator,
+                        participants: m.participants.map((p) => ({
+                            ...p,
+                            address: p.address.toLowerCase(),
+                        })),
+                        manifestRef: "",
+                        manifestActHistoryAddress: "",
+                        manifestPublisherBeeNodePubKey: entry.manifestPublisherBeeNodePubKey,
+                        manifestFeedIndex: latest.feedIndex,
+                        lastActivityAt: entry.lastActivityAt,
+                        status: "active",
+                    });
+                    recovered++;
+                }
+                catch (err) {
+                    console.warn(`[CollabManager] rehydrate skipped ${entry.collabId}:`, err instanceof Error ? err.message : err);
+                }
+            }
+            if (recovered > 0) {
+                console.log(`[CollabManager] Rehydrated ${recovered} collab(s) from user manifest.`);
+                this.persist();
+                this.emit({ type: "collab-updated", collabId: "*" });
+            }
+            // Provision outbound GSOC + subscribe to peer pings for every
+            // summary we know about (both freshly-recovered and
+            // already-present from localStorage). Runs in the background —
+            // both are best-effort; poll-loop covers the gap either way.
+            for (const summary of this.summaries.values()) {
+                if (summary.status === "pending")
+                    continue;
+                void this.provisionOutboundGsoc(summary.collabId, summary.participants).catch(() => { });
+                void this.subscribeToPeerGsoc(summary).catch(() => { });
+            }
+        }
+        catch (err) {
+            console.warn("[CollabManager] rehydrate failed:", err instanceof Error ? err.message : err);
+        }
     }
     // ─── Internal helpers ──────────────────────────────────────────
     emit(event) {
@@ -379,15 +1290,12 @@ export class CollabManager {
         const endIndex = input.ops[input.ops.length - 1]?.operation?.index ?? 0;
         for (const s of relevant) {
             try {
-                const granteeKeys = s.participants
-                    .map((p) => p.beeNodePublicKey)
-                    .filter((k) => !!k);
-                if (granteeKeys.length < 2) {
-                    // Participant list is incomplete (e.g. accepted invite with no
-                    // bee pubkey for the initiator) — skip mirror until the
-                    // participant list gets refreshed on next invite exchange.
-                    continue;
-                }
+                // Ensure we have a grantee chain to write under. Initiator has
+                // one from create(); joiners lazily create one on first push,
+                // backfilling their own pubkey into the participant record.
+                const granteeHistRef = await this.ensureGranteeChainForLocalWrite(s);
+                if (!granteeHistRef)
+                    continue; // not enough info to mirror yet
                 const batch = {
                     opsJson: JSON.stringify(input.ops),
                     startIndex,
@@ -396,16 +1304,86 @@ export class CollabManager {
                     branch: input.branch,
                     timestamp: new Date().toISOString(),
                 };
-                // Doc-level collab writes to a doc-scoped topic; drive-level writes
-                // to a doc-scoped topic as well, so every doc gets its own feed
-                // inside the drive collab. This keeps reads parallelizable per doc.
-                await this.opsFeed.appendBatch(s.collabId, input.driveId, input.docId, batch, granteeKeys);
-                const updated = { ...s, lastActivityAt: new Date().toISOString() };
+                const writeResult = await this.opsFeed.appendBatch(s.collabId, input.driveId, input.docId, batch, granteeHistRef);
+                const updated = { ...this.summaries.get(s.collabId), lastActivityAt: new Date().toISOString() };
                 this.summaries.set(s.collabId, updated);
                 this.persist();
+                // Fire-and-forget GSOC ping. Three-tier fast path: the ping
+                // carries the ops inline if they fit in 4KB; falls back to
+                // actRef/actHistoryAddress for /bzz download; feed still got
+                // written above for catch-up + recovery.
+                void this.pingPeersForCollab(updated, input.driveId, input.docId, {
+                    ...writeResult,
+                    ops: input.ops,
+                    scope: input.scope,
+                    branch: input.branch,
+                }).catch(() => { });
             }
             catch (err) {
                 console.warn(`[CollabManager] mirror push failed for ${s.collabId} doc ${input.docId.slice(0, 8)}:`, err instanceof Error ? err.message : err);
+            }
+        }
+    }
+    /** Per-collabId in-flight grantee-chain creation. Without this,
+     *  two parallel handleLocalPush calls (e.g. SwarmChannel flushing
+     *  two docs at once) both create a fresh chain; whoever writes
+     *  summaries.set last wins, and the first writer's ops are uploaded
+     *  under an orphaned chain that peers can't decrypt. */
+    granteeChainInFlight = new Map();
+    /**
+     * Return a live ACT grantee-chain head for writes on this collab. For
+     * the initiator this is just the summary's currentGranteeHistRef. For
+     * joiners, this creates a chain the first time we write (lazy), using
+     * the participant list from the manifest feed.
+     *
+     * Concurrency-safe per collabId: parallel callers await the same
+     * pending chain-creation promise instead of each creating their own.
+     */
+    async ensureGranteeChainForLocalWrite(s) {
+        if (s.currentGranteeHistRef)
+            return s.currentGranteeHistRef;
+        const pending = this.granteeChainInFlight.get(s.collabId);
+        if (pending)
+            return pending;
+        const promise = (async () => {
+            // Re-read the summary inside the lock in case another caller
+            // already wrote a chain while we were queuing.
+            const live = this.summaries.get(s.collabId) ?? s;
+            if (live.currentGranteeHistRef)
+                return live.currentGranteeHistRef;
+            let workingSummary = live;
+            const known = live.participants.filter((p) => p.beeNodePublicKey);
+            if (known.length < live.participants.length) {
+                const refreshed = await this.refreshManifest(live.collabId).catch(() => null);
+                if (refreshed?.currentGranteeHistRef)
+                    return refreshed.currentGranteeHistRef;
+                workingSummary = refreshed ?? this.summaries.get(live.collabId) ?? live;
+            }
+            const liveKeys = workingSummary.participants
+                .map((p) => p.beeNodePublicKey)
+                .filter((k) => !!k);
+            if (liveKeys.length < 2)
+                return null;
+            const { ref, historyRef } = await this.client.createGrantees(liveKeys);
+            // ACT's 1-second rule between chain touches — don't race the
+            // next write.
+            await new Promise((r) => setTimeout(r, 1100));
+            const updated = {
+                ...(this.summaries.get(workingSummary.collabId) ?? workingSummary),
+                currentGranteeRef: ref,
+                currentGranteeHistRef: historyRef,
+            };
+            this.summaries.set(workingSummary.collabId, updated);
+            this.persist();
+            return historyRef;
+        })();
+        this.granteeChainInFlight.set(s.collabId, promise);
+        try {
+            return await promise;
+        }
+        finally {
+            if (this.granteeChainInFlight.get(s.collabId) === promise) {
+                this.granteeChainInFlight.delete(s.collabId);
             }
         }
     }
@@ -438,9 +1416,7 @@ export class CollabManager {
     }
     async pollSummary(summary) {
         const ph = globalThis.window?.ph;
-        const reactorClient = ph?.reactorClient;
-        const reactor = ph?.reactor; // low-level reactor module — exposes load()
-        if (!reactorClient)
+        if (!ph?.reactorClient)
             return;
         // Figure out which docs to poll. Drive-level = every doc currently in
         // the drive. Doc-level = just the one doc.
@@ -451,77 +1427,64 @@ export class CollabManager {
         if (summary.kind === "drive" && !docIds.includes(summary.driveId)) {
             docIds.unshift(summary.driveId);
         }
-        let anyApplied = false;
+        // Parallelize the per-(doc, peer) probes. Feed reads + ACT decrypts
+        // are network-bound and mostly independent; running them in parallel
+        // scales linearly with peer count. Applied ops for a SINGLE
+        // (peer, doc) still sequence in feedIndex order via
+        // pollPeerDoc's inner loop — only the outer fan-out parallelizes.
+        const jobs = [];
         for (const docId of docIds) {
             for (const participant of summary.participants) {
                 if (participant.address === this.myAddress.toLowerCase())
                     continue;
                 if (!participant.beeNodePublicKey)
                     continue;
+                jobs.push(this.pollPeerDoc(summary, docId, participant));
+            }
+        }
+        await Promise.all(jobs);
+    }
+    /**
+     * Probe a single (peer, doc) feed and apply any new batches. Called
+     * in parallel for each (peer, doc) tuple in a collab; the batches
+     * within one tuple are applied sequentially to preserve feedIndex
+     * order.
+     */
+    async pollPeerDoc(summary, docId, participant) {
+        try {
+            // Write path in handleLocalPush always passes a docId (even for
+            // drive ops, docId === driveId), so the read path matches that
+            // convention: always use the doc-scoped topic.
+            const latest = await this.opsFeed.getLatestIndex(summary.collabId, summary.driveId, docId, participant.address);
+            if (latest == null)
+                return;
+            const cursorKey = `${LS_PEER_CURSOR_PREFIX}${summary.collabId}:${participant.address}:${docId}`;
+            const cursor = this.readCursor(cursorKey);
+            if (latest < cursor)
+                return;
+            const batches = await this.opsFeed.readRange(summary.collabId, summary.driveId, docId, participant.address, cursor, latest, participant.beeNodePublicKey);
+            if (batches.length === 0)
+                return;
+            for (const { feedIndex, batch } of batches) {
                 try {
-                    // Write path in handleLocalPush always passes a docId (even for
-                    // drive ops, docId === driveId), so the read path matches that
-                    // convention: always use the doc-scoped topic.
-                    const latest = await this.opsFeed.getLatestIndex(summary.collabId, summary.driveId, docId, participant.address);
-                    if (latest == null)
-                        continue;
-                    const cursorKey = `${LS_PEER_CURSOR_PREFIX}${summary.collabId}:${participant.address}:${docId}`;
-                    const cursor = this.readCursor(cursorKey);
-                    if (latest < cursor)
-                        continue;
-                    const batches = await this.opsFeed.readRange(summary.collabId, summary.driveId, docId, participant.address, cursor, latest, participant.beeNodePublicKey);
-                    if (batches.length === 0)
-                        continue;
-                    for (const { feedIndex, batch } of batches) {
-                        try {
-                            const raw = JSON.parse(batch.opsJson);
-                            if (!Array.isArray(raw) || raw.length === 0)
-                                continue;
-                            // SwarmChannel pushes OperationWithContext[] (each entry has
-                            // `.operation` + `.context`); reactor.load expects bare
-                            // Operation[]. Unwrap defensively — fall back to the entry
-                            // itself for already-flat payloads.
-                            const ops = raw.map((entry) => entry?.operation ?? entry);
-                            // Dispatch to the reactor. reactor.load() is idempotent per op
-                            // id, so re-runs from a re-pull don't corrupt state.
-                            if (reactor?.load) {
-                                await reactor.load(docId, batch.branch ?? "main", ops);
-                            }
-                            else if (reactorClient?.load) {
-                                await reactorClient.load(docId, batch.branch ?? "main", ops);
-                            }
-                            else {
-                                console.warn("[CollabManager] No reactor.load available, ops queued but not applied");
-                                continue;
-                            }
-                            anyApplied = true;
-                            this.writeCursor(cursorKey, feedIndex + 1);
-                        }
-                        catch (err) {
-                            console.warn(`[CollabManager] apply ops failed (${summary.collabId}, doc ${docId.slice(0, 8)}, idx ${feedIndex}):`, err instanceof Error ? err.message : err);
-                        }
-                    }
+                    await this.applyOpsAndAdvanceCursor({
+                        collabId: summary.collabId,
+                        writer: participant.address,
+                        docId,
+                        branch: batch.branch ?? "main",
+                        ops: JSON.parse(batch.opsJson),
+                        feedIndex,
+                    });
                 }
                 catch (err) {
-                    // Peer's feed may not exist yet (they haven't made any edits).
-                    // Keep walking — other peers / docs may be ahead.
-                    void err;
+                    console.warn(`[CollabManager] apply ops failed (${summary.collabId}, doc ${docId.slice(0, 8)}, idx ${feedIndex}):`, err instanceof Error ? err.message : err);
                 }
             }
         }
-        if (anyApplied) {
-            const updated = { ...summary, lastActivityAt: new Date().toISOString() };
-            this.summaries.set(summary.collabId, updated);
-            this.persist();
-            this.emit({ type: "op-applied", collabId: summary.collabId });
-            // UI hook: fire a custom event so the toolbar History view can
-            // refresh without having to subscribe to collab events.
-            try {
-                globalThis.window?.dispatchEvent(new CustomEvent("swarm:collab:op-applied", {
-                    detail: { collabId: summary.collabId },
-                }));
-            }
-            catch { /* non-browser */ }
+        catch (err) {
+            // Peer's feed may not exist yet (they haven't made any edits).
+            // Log at debug level so unexpected errors are still visible.
+            console.debug(`[CollabManager] pollSummary peer ${participant.address.slice(0, 10)} skipped:`, err instanceof Error ? err.message : err);
         }
     }
     readCursor(key) {

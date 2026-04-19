@@ -226,6 +226,78 @@ export async function clearChatPeersInUserManifest(client, ownerAddress) {
         console.log(`[ManifestManager] Cleared ${removed} chat peer(s) from user manifest`);
     });
 }
+// ═══════════════════════════════════════════════════════════════
+// Live Collaboration Registry (user-manifest.collabs)
+// ═══════════════════════════════════════════════════════════════
+//
+// Follows the chatPeers pattern: the user manifest is the authoritative
+// source of "which collabs am I in". Fresh-browser recovery reads this,
+// then each collab's ACT-protected manifest feed provides the live
+// membership + grantee chain. localStorage (CollabManager) is a startup
+// cache only.
+/**
+ * Upsert a collab entry on the user manifest. Idempotent: updates the
+ * entry in place if the collabId already exists. Serialized through the
+ * same per-owner mutex as drive + chat-peer writes so concurrent
+ * create/accept calls on a fresh browser can't clobber each other.
+ */
+export async function ensureCollabInUserManifest(client, ownerAddress, entry) {
+    return enqueueUserManifestWrite(ownerAddress, async () => {
+        let manifest = await readUserManifestCached(client, ownerAddress);
+        if (!manifest) {
+            manifest = {
+                address: ownerAddress,
+                documents: {},
+                drives: {},
+                stamps: {},
+                updatedAt: new Date().toISOString(),
+            };
+        }
+        const collabs = { ...(manifest.collabs ?? {}) };
+        const prior = collabs[entry.collabId];
+        // If the incoming entry's lastActivityAt is older than what we
+        // already have, keep the newer timestamp. Everything else (title,
+        // manifest pubkey, role) trusts the incoming write — it's the
+        // caller who just performed a create/accept and has the freshest view.
+        const lastActivityAt = prior && prior.lastActivityAt > entry.lastActivityAt
+            ? prior.lastActivityAt
+            : entry.lastActivityAt;
+        collabs[entry.collabId] = { ...entry, lastActivityAt };
+        manifest.collabs = collabs;
+        manifest.updatedAt = new Date().toISOString();
+        await writeUserManifestAndCache(client, ownerAddress, manifest);
+        console.log(`[ManifestManager] Collab ${prior ? "updated" : "added"} in user manifest: ${entry.collabId}`);
+    });
+}
+/**
+ * Remove a collab entry from the user manifest. Used on `leave()` so a
+ * fresh-browser recovery doesn't re-surface a collab the user has
+ * opted out of. Does NOT affect the collab's manifest feed (the
+ * initiator still lists this user as a participant until they
+ * explicitly revoke).
+ */
+export async function removeCollabFromUserManifest(client, ownerAddress, collabId) {
+    return enqueueUserManifestWrite(ownerAddress, async () => {
+        const manifest = await readUserManifestCached(client, ownerAddress);
+        if (!manifest?.collabs?.[collabId])
+            return;
+        const collabs = { ...manifest.collabs };
+        delete collabs[collabId];
+        manifest.collabs = collabs;
+        manifest.updatedAt = new Date().toISOString();
+        await writeUserManifestAndCache(client, ownerAddress, manifest);
+        console.log(`[ManifestManager] Collab removed from user manifest: ${collabId}`);
+    });
+}
+/**
+ * Return the user manifest's current collab registry, or an empty
+ * object if the feed hasn't been populated yet. Used by CollabManager's
+ * boot-time rehydrate path.
+ */
+export async function listCollabsFromUserManifest(client, ownerAddress) {
+    const manifest = await readUserManifestCached(client, ownerAddress);
+    return manifest?.collabs ?? {};
+}
 /**
  * Reconcile the user manifest against the reactor's local drive list.
  *

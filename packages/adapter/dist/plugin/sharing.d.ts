@@ -65,10 +65,16 @@ export declare function shareDocumentsWithUser(client: SwarmClient, docIds: stri
  * @param opts.cacheKey - sessionStorage key so repeated imports of the
  *                       same share reuse the already-created drive
  * @param opts.displayName - Name shown to the user in the drive list
+ * @param opts.preserveIds - Collab-accept path: reuse the sender's drive
+ *   and doc IDs instead of minting fresh ones. Required for live collab
+ *   so both sides agree on the feed-topic IDs and reactor doc IDs.
  */
 export declare function applyDocumentBundle(bundleData: Uint8Array, opts: {
     cacheKey: string;
     displayName: string;
+    preserveIds?: {
+        driveId: string;
+    };
 }): Promise<{
     success: boolean;
     driveId?: string;

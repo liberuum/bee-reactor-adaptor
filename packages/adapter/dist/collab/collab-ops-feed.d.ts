@@ -36,23 +36,53 @@ export interface CollabOpsBatch {
 }
 export declare class CollabOpsFeed {
     private readonly client;
-    /** granteeRef cache keyed by `${collabId}:${driveId}[:${docId}]`. */
-    private granteeCache;
+    /** Last index we wrote per topic. Same staleness workaround as the
+     *  manifest feed — bee-js's auto-pick pre-read can be stale on public
+     *  nodes, so we track indices ourselves and write at an explicit index. */
+    private lastWrittenIndex;
+    /** Per-topic in-flight append — serializes concurrent appendBatch
+     *  calls for the same topic. Without this, two parallel calls both
+     *  see lastWrittenIndex as undefined, both do the pre-read, both
+     *  derive the same nextIndex, and both write to the same feed slot
+     *  (second overwrites first). */
+    private appendInFlight;
     constructor(client: SwarmClient);
-    static topicFor(collabId: CollabId, driveId: string, documentId?: string): Topic;
     /**
-     * Ensure a grantee list exists for this collab feed. Cached per
-     * (collabId, driveId, docId?) because the same grantee chain covers every
-     * write to the same feed (participants only change when the manifest is
-     * rewritten, which is a future milestone).
+     * Resolve the Swarm feed topic for a per-peer collab ops feed.
+     *
+     * Note: production callers always pass `documentId`. Drive-level
+     * ops are stored under the doc-scoped topic with `docId === driveId`
+     * (see `handleLocalPush` + `pollSummary`'s `docIds.unshift(driveId)`).
+     * The `documentId`-omitted branch is retained for future flexibility
+     * and is exercised by the unit test.
      */
-    private ensureGrantees;
+    static topicFor(collabId: CollabId, driveId: string, documentId?: string): Topic;
     /**
      * Append a batch of ops to this writer's per-collab feed.
      *
-     * @param granteeBeePubKeys - every participant's Bee node pubkey (including self).
+     * @param granteeHistRef ACT grantee-chain head that the caller has
+     *        already created (via SwarmClient.createGrantees). The caller
+     *        (CollabManager) owns this lifecycle so revocation can rotate
+     *        the chain without losing track of it.
      */
-    appendBatch(collabId: CollabId, driveId: string, documentId: string | undefined, batch: CollabOpsBatch, granteeBeePubKeys: string[]): Promise<void>;
+    appendBatch(collabId: CollabId, driveId: string, documentId: string | undefined, batch: CollabOpsBatch, granteeHistRef: string): Promise<{
+        actRef: string;
+        actHistoryAddress: string;
+        feedIndex: number;
+    }>;
+    private appendBatchLocked;
+    /**
+     * Fast-path download: given the actRef + actHistoryAddress carried
+     * in a GSOC `op-committed` ping, fetch the batch payload directly
+     * from /bzz — bypassing the feed read entirely. This is the main
+     * latency win, because cross-node feed propagation is slower than
+     * cross-node /bzz content-addressed retrieval.
+     *
+     * Returns null on any download/decrypt failure (chunks not yet
+     * propagated to the reader's neighborhood); caller should fall back
+     * to the feed path.
+     */
+    fetchByRefs(actRef: string, actHistoryAddress: string, publisherBeeNodePubKey: string): Promise<CollabOpsBatch | null>;
     /**
      * Latest feed index for a peer's feed, or null if the feed doesn't exist yet.
      */

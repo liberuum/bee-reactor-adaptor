@@ -86,15 +86,60 @@ export interface CollabSummary {
     title: string;
     initiator: string;
     participants: CollabParticipant[];
-    /** Swarm refs needed to reread/refresh the manifest later. */
+    /** Swarm refs for the one-shot initial drive bundle (ACT-protected). */
     manifestRef: string;
     manifestActHistoryAddress: string;
     manifestPublisherBeeNodePubKey: string;
+    /** Feed index of the latest manifest revision we know about. Used to
+     *  detect new revisions on refresh and to compare membership changes. */
+    manifestFeedIndex?: number;
+    /** ACT grantee chain head covering the current participant set. Used
+     *  by the owner of the collab op feeds (the writer) when appending new
+     *  batches. Updated on every participant add/remove by the initiator,
+     *  and by any participant learning a newer manifest from the feed. */
+    currentGranteeHistRef?: string;
+    /** The grantee ref returned alongside currentGranteeHistRef. Kept for
+     *  future patchGrantees calls (incremental add/remove without
+     *  rebuilding the whole list). */
+    currentGranteeRef?: string;
     /** Most recent inbound op timestamp from any participant, or createdAt
      *  if nothing has arrived yet. Drives the "last activity" UI. */
     lastActivityAt: string;
+    /** Per-peer activity state: last time we applied ops from them and
+     *  cumulative count of ops we've applied in this session. Updated by
+     *  `applyOpsAndAdvanceCursor`. Drives per-participant "active Xm ago"
+     *  labels in the Manage panel + the collab-row counter. Keyed by
+     *  lowercase peer address. Missing entry = no activity yet. */
+    peerActivity?: Record<string, {
+        lastAppliedAt: string;
+        opsApplied: number;
+    }>;
+    /** Bounded ring-buffer of recent collab events: joins, revokes,
+     *  op-applied batches. Newest last. Drives the "Recent activity" feed
+     *  in the Manage panel. Capped at RECENT_ACTIVITY_MAX so the summary
+     *  doesn't balloon in localStorage for long-running collabs. */
+    recentActivity?: CollabActivityEntry[];
     /** Populated as this client starts writing/reading collab feeds. */
-    status: "active" | "pending" | "error";
+    status: "active" | "pending" | "error" | "revoked";
+}
+/** Max entries retained per collab in recentActivity. Older entries
+ *  fall off the front when new ones arrive. */
+export declare const RECENT_ACTIVITY_MAX = 20;
+/** One row in the "Recent activity" feed. Stored on the summary so a
+ *  fresh browser shows state immediately from localStorage. */
+export interface CollabActivityEntry {
+    /** ISO timestamp. */
+    at: string;
+    kind: "created" | "accepted" | "left" | "participant-added" | "participant-revoked" | "ops-applied";
+    /** Who the event is about (peer address for ops/add/revoke). */
+    actor?: string;
+    /** Short summary for the UI. Optional; UI can recompute from the
+     *  kind + actor + count when absent. */
+    label?: string;
+    /** Populated for `ops-applied`: how many operations were in the batch. */
+    opsCount?: number;
+    /** Populated for `ops-applied`: which doc received the ops. */
+    docId?: string;
 }
 /** Adapter-level event stream for Connect's UI. */
 export type CollabEventType = "invite-received" | "collab-created" | "collab-accepted" | "collab-updated" | "collab-removed" | "op-applied";
